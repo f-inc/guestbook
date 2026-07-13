@@ -1,6 +1,6 @@
-// @ts-nocheck
 "use client";
 
+import type { CSSProperties } from "react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowRight,
@@ -138,11 +138,11 @@ export default function Home() {
     return () => window.clearTimeout(timeout);
   }, [toastSequence, apiState.message, apiState.status]);
 
-  const loadLumaEvents = async ({ cancelled = () => false } = {}) => {
+  const loadLumaEvents = async ({ cancelled = () => false }: { cancelled?: () => boolean } = {}) => {
     setApiState({ status: "loading", message: "Checking cached Luma events." });
     try {
       const response = await fetch("/api/luma", { cache: "no-store" });
-      const data = await response.json();
+      const data: any = await response.json();
       if (!response.ok) throw new Error(withRequestId(data.error || "Unable to load Luma data.", data.requestId));
       if (cancelled()) return;
       setState((current) => mergeLumaState(current, data));
@@ -157,7 +157,7 @@ export default function Home() {
   };
 
   useEffect(() => {
-    let cancelled = false;
+    let cancelled: boolean = false;
     loadLumaEvents({ cancelled: () => cancelled });
     return () => {
       cancelled = true;
@@ -295,7 +295,7 @@ export default function Home() {
     });
   };
 
-  const openPerson = (personId, eventId) => {
+  const openPerson = (personId: string, eventId = "") => {
     updateState((draft) => {
       draft.selectedPersonId = personId;
       if (eventId) draft.selectedEventId = eventId;
@@ -323,7 +323,7 @@ export default function Home() {
     });
   };
 
-  const loadEventGuests = async (eventId, { force = false } = {}) => {
+  const loadEventGuests = async (eventId: string, { force = false }: { force?: boolean } = {}) => {
     const event = getEvent(state, eventId);
     if (!event) {
       setApiState({ status: "error", message: "Could not find event " + eventId + ". Reload the page and try again." });
@@ -343,7 +343,7 @@ export default function Home() {
     try {
       const refresh = force ? "&refresh=1" : "";
       const response = await fetch("/api/luma?event_id=" + encodeURIComponent(eventId) + refresh, { cache: "no-store" });
-      const data = await response.json();
+      const data: any = await response.json();
       if (!response.ok) throw new Error(withRequestId(data.error || (force ? "Unable to sync the Luma event." : "Unable to load Luma guests."), data.requestId));
       setState((current) => mergeLumaGuests(current, data));
       if (force) setActivityTraces({});
@@ -361,7 +361,7 @@ export default function Home() {
     }
   };
 
-  const tracePersonActivity = async (person, { force = false } = {}) => {
+  const tracePersonActivity = async (person: any, { force = false }: { force?: boolean } = {}) => {
     if (!person || traceRequestsRef.current.has(person.id)) return;
     traceRequestsRef.current.add(person.id);
     setActivityTraces((current) => ({
@@ -383,7 +383,7 @@ export default function Home() {
         params.set("trace_scope", "known");
       }
       const response = await fetch("/api/luma?" + params.toString(), { cache: "no-store" });
-      const data = await response.json();
+      const data: any = await response.json();
       if (!response.ok) throw new Error(withRequestId(data.error || "Unable to trace event activity.", data.requestId));
       const records = data.records || [];
       const truncatedText = data.truncated ? " Scan hit configured limits." : "";
@@ -426,7 +426,7 @@ export default function Home() {
     tracePersonActivity(selectedPerson);
   }, [selectedPerson?.id, selectedPerson?.source, selectedTrace.status]);
 
-  const setGuestStatus = async (personId, status, { sendEmail = false, message = "" } = {}) => {
+  const setGuestStatus = async (personId: string, status: string, { sendEmail = false, message = "" }: { sendEmail?: boolean; message?: string } = {}) => {
     const event = getEvent(state, state.selectedEventId);
     const guest = event?.guests.find((item) => item.personId === personId);
     const person = getPerson(state, personId);
@@ -1048,7 +1048,7 @@ export default function Home() {
                       ))
                     ) : (
                       <tr>
-                        <td colSpan="4">
+                        <td colSpan={4}>
                           <div className="empty-state">No one remains after source, group, and subtraction rules.</div>
                         </td>
                       </tr>
@@ -1294,7 +1294,7 @@ function GuestStatusDialog({ draft, event, guest, person, onChange, onClose, onS
           </span>
           <textarea
             autoFocus
-            rows="4"
+            rows={4}
             maxLength={MAX_GUEST_STATUS_MESSAGE_LENGTH}
             value={draft.message}
             disabled={!draft.sendEmail || draft.submitting}
@@ -1405,7 +1405,7 @@ function GroupChecklist({ title, groups, selected, onChange }) {
       </div>
       <div className="chip-grid">
         {groups.map((group) => (
-          <label className="check-chip" style={{ "--chip-color": group.color }} key={group.id}>
+          <label className="check-chip" style={{ "--chip-color": group.color } as CSSProperties} key={group.id}>
             <input type="checkbox" checked={selected.includes(group.id)} onChange={(event) => onChange(toggleValue(selected, group.id, event.target.checked))} />
             <span>{group.name}</span>
           </label>
@@ -1674,7 +1674,7 @@ function PersonChips({ person, groups, emptyText = "" }) {
   return (
     <div className="chips">
       {personGroups.map((group) => (
-        <span className="chip" style={{ "--chip-color": group.color }} key={group.id}>
+        <span className="chip" style={{ "--chip-color": group.color } as CSSProperties} key={group.id}>
           {group.name}
         </span>
       ))}
@@ -1696,7 +1696,7 @@ async function postLumaAction(payload) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload),
   });
-  const data = await response.json();
+  const data: any = await response.json();
   if (!response.ok || data.ok === false) throw new Error(withRequestId(data.error || data.message || "Luma request failed.", data.requestId));
   return data;
 }
@@ -1731,7 +1731,7 @@ function mergeLumaGuests(current, lumaData) {
     ...current,
     events,
     people,
-    selectedPersonId: current.selectedPersonId || people[0]?.id || "",
+    selectedPersonId: current.selectedPersonId || (people as any[])[0]?.id || "",
   });
 }
 
@@ -1959,7 +1959,7 @@ function personGuestRecords(state, personId) {
 }
 
 function mostRecentPersonEventId(state, personId) {
-  return personGuestRecords(state, personId).sort((a, b) => new Date(b.event.date) - new Date(a.event.date))[0]?.event.id || "";
+  return personGuestRecords(state, personId).sort((a, b) => new Date(b.event.date).getTime() - new Date(a.event.date).getTime())[0]?.event.id || "";
 }
 
 function searchSnippet(text, query) {
@@ -2012,7 +2012,7 @@ function nonnegativeCount(value, fallback) {
   return Number.isFinite(count) && count >= 0 ? count : fallback;
 }
 
-function searchableGuestText(person, guest = {}) {
+function searchableGuestText(person: any, guest: any = {}) {
   return [
     person.name,
     person.email,
@@ -2071,7 +2071,7 @@ function registrationAnswerGroups(person, state) {
       answers: (guest.registrationAnswers || []).filter((answer) => answer.value),
     }))
     .filter((group) => group.answers.length)
-    .sort((a, b) => new Date(b.event.date) - new Date(a.event.date));
+    .sort((a, b) => new Date(b.event.date).getTime() - new Date(a.event.date).getTime());
 }
 
 function currentProfileRecord(state, person) {
@@ -2203,7 +2203,7 @@ function getPersonHistory(state, personId) {
           guest,
         })),
     )
-    .sort((a, b) => new Date(b.event.date) - new Date(a.event.date));
+    .sort((a, b) => new Date(b.event.date).getTime() - new Date(a.event.date).getTime());
 
   const attendedRecords = records.filter(({ guest }) => guest.status === "checked_in" || Boolean(guest.checkedInAt));
   const registeredRecords = records.filter(({ guest }) => ["registered", "going", "waitlisted", "checked_in", "declined", "no_show"].includes(guest.status));
@@ -2277,7 +2277,7 @@ function pastEvents(state) {
 }
 
 function sortEvents(events) {
-  return [...events].sort((a, b) => new Date(a.date) - new Date(b.date));
+  return [...events].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 }
 
 function isUpcoming(event) {

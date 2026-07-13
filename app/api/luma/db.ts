@@ -1,5 +1,7 @@
-// @ts-nocheck
 import { Prisma, PrismaClient } from "@prisma/client";
+
+type AnyRecord = Record<string, any>;
+type HttpError = Error & { status?: number };
 import { orderAvatarCandidates } from "../../avatar-order";
 import { lumaEventDate } from "./event-date";
 
@@ -80,13 +82,13 @@ export async function listIndexedEventGuests(eventId, { limit = 1000 } = {}) {
   };
 }
 
-export async function getIndexedTrace({ tracePersonId, traceEmail, limit = 500 } = {}) {
+export async function getIndexedTrace({ tracePersonId, traceEmail, limit = 500 }: AnyRecord = {}) {
   const rawPersonId = typeof tracePersonId === "string" ? tracePersonId.trim() : "";
   const targetId = normalizeTraceValue(tracePersonId);
   const targetEmail = normalizeEmail(traceEmail);
 
   if (!targetId && !targetEmail) {
-    const error = new Error("Indexed trace requires a Luma person id or email.");
+    const error = new Error("Indexed trace requires a Luma person id or email.") as HttpError;
     error.status = 400;
     throw error;
   }
@@ -103,7 +105,7 @@ export async function getIndexedTrace({ tracePersonId, traceEmail, limit = 500 }
     orderBy: [{ checkedInAt: "desc" }, { registeredAt: "desc" }, { createdAt: "desc" }, { lastSeenAt: "desc" }],
   });
 
-  const records = rows.map(indexedGuestToTraceRecord).sort((a, b) => new Date(b.eventStartsAt || b.eventDate || b.sortAt) - new Date(a.eventStartsAt || a.eventDate || a.sortAt));
+  const records = rows.map(indexedGuestToTraceRecord).sort((a, b) => new Date(b.eventStartsAt || b.eventDate || b.sortAt).getTime() - new Date(a.eventStartsAt || a.eventDate || a.sortAt).getTime());
 
   return {
     source: "luma-index",
@@ -123,7 +125,7 @@ export async function getIndexedTrace({ tracePersonId, traceEmail, limit = 500 }
   };
 }
 
-export async function removeIndexedTraceRecordsMissingFromEvents({ tracePersonId, traceEmail, scannedEventIds = [], matchedEventIds = [] } = {}) {
+export async function removeIndexedTraceRecordsMissingFromEvents({ tracePersonId, traceEmail, scannedEventIds = [], matchedEventIds = [] }: AnyRecord = {}) {
   const rawPersonId = typeof tracePersonId === "string" ? tracePersonId.trim() : "";
   const targetId = normalizeTraceValue(tracePersonId);
   const targetEmail = normalizeEmail(traceEmail);
@@ -147,7 +149,7 @@ export async function removeIndexedTraceRecordsMissingFromEvents({ tracePersonId
   return { deletedCount: result.count };
 }
 
-export async function removeIndexedEventGuestsMissingFromSnapshot({ eventId, personIds = [] } = {}) {
+export async function removeIndexedEventGuestsMissingFromSnapshot({ eventId, personIds = [] }: AnyRecord = {}) {
   if (!eventId) return { deletedCount: 0 };
   const currentPersonIds = [...new Set(personIds.filter(Boolean))];
   const result = await prisma().lumaEventGuest.deleteMany({
@@ -369,7 +371,7 @@ export async function upsertNormalizedLumaGuestActivity({ event, guest, rawGuest
 
 function prisma() {
   if (!hasLumaDb()) {
-    const error = new Error("Missing DB_URL. Add a PostgreSQL connection string before using the Luma index.");
+    const error = new Error("Missing DB_URL. Add a PostgreSQL connection string before using the Luma index.") as HttpError;
     error.status = 503;
     throw error;
   }
@@ -761,7 +763,7 @@ function indexedEventToApiEvent(row) {
   };
 }
 
-function indexedPersonToApiPerson(row, guestRow = {}) {
+function indexedPersonToApiPerson(row: any, guestRow: any = {}) {
   const avatarCandidates = indexedAvatarCandidates(row.raw, row.avatarUrl);
   return {
     id: row.personId,
@@ -872,7 +874,7 @@ function isoOrNull(value) {
   return String(value);
 }
 
-function indexedEventImageUrl(raw = {}) {
+function indexedEventImageUrl(raw: AnyRecord = {}) {
   return firstHttpUrl(
     raw?.cover_url,
     raw?.cover_image_url,
@@ -885,11 +887,11 @@ function indexedEventImageUrl(raw = {}) {
   );
 }
 
-function indexedEventDescription(raw = {}) {
+function indexedEventDescription(raw: AnyRecord = {}) {
   return [raw?.description, raw?.description_md, raw?.event_description, raw?.summary].find((value) => typeof value === "string" && value.trim())?.trim() || "";
 }
 
-function indexedAvatarCandidates(raw = {}, storedAvatarUrl = "") {
+function indexedAvatarCandidates(raw: AnyRecord = {}, storedAvatarUrl = "") {
   return orderAvatarCandidates(
     storedAvatarUrl,
     raw?.user_avatar_url,
@@ -970,7 +972,7 @@ function withoutUndefined(value) {
   return Object.fromEntries(Object.entries(value).filter(([, nested]) => nested !== undefined));
 }
 
-function safeInt(envName, fallback, min, max) {
+function safeInt(envName: string, fallback: number, min: number, max: number) {
   const value = Number.parseInt(process.env[envName] || "", 10);
   if (!Number.isFinite(value)) return fallback;
   return Math.min(max, Math.max(min, value));

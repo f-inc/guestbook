@@ -1,5 +1,7 @@
-// @ts-nocheck
 import { appendFile, mkdir } from "node:fs/promises";
+
+type AnyRecord = Record<string, any>;
+type HttpError = Error & { status?: number };
 import nodePath from "node:path";
 import { getIndexedTrace, hasLumaDb, listIndexedEventGuests, listIndexedEvents, removeIndexedEventGuestsMissingFromSnapshot, removeIndexedTraceRecordsMissingFromEvents, updateIndexedGuestStatus, upsertNormalizedLumaGuestActivity, upsertNormalizedLumaSnapshot } from "./db";
 import { lumaEventDate } from "./event-date";
@@ -31,7 +33,7 @@ const CACHE_KEY = "__guestbookLumaCache";
 const IN_FLIGHT_KEY = "__guestbookLumaInFlight";
 const DEFAULT_DEBUG_LOG_PATH = nodePath.join(process.cwd(), ".debug", "luma-api.log");
 
-export async function GET(request) {
+export async function GET(request: Request) {
   const requestId = createRequestId();
   const startedAt = Date.now();
 
@@ -254,13 +256,13 @@ export async function GET(request) {
     return jsonError(error, requestId);
   }
 }
-export async function POST(request) {
+export async function POST(request: Request) {
   const requestId = createRequestId();
   const startedAt = Date.now();
 
   try {
     assertApiKey();
-    const body = await request.json();
+    const body: any = await request.json();
     await debugLog(requestId, "POST /api/luma start", { action: body.action, eventId: body.eventId });
     requireLiveWriteConfirmation(body);
 
@@ -367,7 +369,7 @@ function normalizeEvent(event) {
 
 function assertApiKey() {
   if (!process.env.LUMA_API_KEY) {
-    const error = new Error("Missing LUMA_API_KEY. Add it to .env.local before using live Luma data.");
+    const error = new Error("Missing LUMA_API_KEY. Add it to .env.local before using live Luma data.") as HttpError;
     error.status = 503;
     throw error;
   }
@@ -375,7 +377,7 @@ function assertApiKey() {
 
 function requireLiveWriteConfirmation(body) {
   if (body.confirm !== LIVE_WRITE_CONFIRMATION) {
-    const error = new Error("Live Luma write was blocked because the request did not include an explicit confirmation token.");
+    const error = new Error("Live Luma write was blocked because the request did not include an explicit confirmation token.") as HttpError;
     error.status = 400;
     throw error;
   }
@@ -383,13 +385,13 @@ function requireLiveWriteConfirmation(body) {
 
 function assertString(value, name) {
   if (!value || typeof value !== "string") {
-    const error = new Error("Missing required " + name + ".");
+    const error = new Error("Missing required " + name + ".") as HttpError;
     error.status = 400;
     throw error;
   }
 }
 
-async function fetchBounded(path, { params = {}, maxEntries, maxPages, requestId, requestDelayMs = 0 }) {
+async function fetchBounded(path: string, { params = {}, maxEntries, maxPages, requestId, requestDelayMs = 0 }: AnyRecord) {
   const entries = [];
   let cursor = null;
   let pages = 0;
@@ -417,11 +419,11 @@ async function fetchBounded(path, { params = {}, maxEntries, maxPages, requestId
   };
 }
 
-async function lumaFetch(path, { method = "GET", params = {}, body, requestId, logParams = params, allowNotFound = false } = {}) {
+async function lumaFetch(path: string, { method = "GET", params = {}, body, requestId, logParams = params, allowNotFound = false }: AnyRecord = {}): Promise<any> {
   const url = new URL(path, LUMA_BASE_URL);
   Object.entries(params).forEach(([key, value]) => {
     if (Array.isArray(value)) value.forEach((item) => url.searchParams.append(key, item));
-    else if (value !== undefined && value !== null) url.searchParams.set(key, value);
+    else if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
   });
 
   const requestKey = method === "GET" ? method + " " + url.toString() : null;
@@ -452,7 +454,7 @@ async function lumaFetch(path, { method = "GET", params = {}, body, requestId, l
     if (!response.ok) {
       const text = await response.text();
       await debugLog(requestId, "luma fetch error", { ...logDetails, status: response.status, response: text, durationMs: Date.now() - startedAt }, "error");
-      const error = new Error("Luma API " + response.status + ": " + (text || response.statusText));
+      const error = new Error("Luma API " + response.status + ": " + (text || response.statusText)) as HttpError;
       error.status = response.status;
       throw error;
     }
@@ -474,7 +476,7 @@ async function lumaFetch(path, { method = "GET", params = {}, body, requestId, l
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-function safeInt(envName, fallback, min, max) {
+function safeInt(envName: string, fallback: number, min: number, max: number) {
   const value = Number.parseInt(process.env[envName] || "", 10);
   if (!Number.isFinite(value)) return fallback;
   return Math.min(max, Math.max(min, value));
@@ -519,7 +521,7 @@ function clearCachePrefix(prefix) {
   }
 }
 
-async function refreshManagedData({ requestId, rawEvents }) {
+async function refreshManagedData({ requestId, rawEvents }: AnyRecord) {
   const limits = {
     maxGuestsPerEvent: safeInt("LUMA_REFRESH_MAX_GUESTS_PER_EVENT", 50000, 1, 50000),
     guestPageSize: safeInt("LUMA_REFRESH_GUESTS_PAGE_SIZE", 100, 1, 100),
@@ -573,14 +575,14 @@ async function refreshManagedData({ requestId, rawEvents }) {
   return { refreshedEventCount, failedEventCount, guestCount, personCount, truncatedGuestEventCount, deletedStaleGuestCount, limits };
 }
 
-async function tracePersonActivity({ requestId, tracePersonId, traceEmail, forceRefresh, traceScope, startedAt }) {
+async function tracePersonActivity({ requestId, tracePersonId, traceEmail, forceRefresh, traceScope, startedAt }: AnyRecord) {
   const target = {
     id: normalizeTraceValue(tracePersonId),
     email: normalizeEmail(traceEmail),
   };
 
   if (!target.id && !target.email) {
-    const error = new Error("Trace requires a Luma person id or email.");
+    const error = new Error("Trace requires a Luma person id or email.") as HttpError;
     error.status = 400;
     throw error;
   }
@@ -676,7 +678,7 @@ async function tracePersonActivity({ requestId, tracePersonId, traceEmail, force
     ? await removeIndexedTraceRecordsMissingFromEvents({ tracePersonId, traceEmail, scannedEventIds, matchedEventIds })
     : { deletedCount: 0 };
 
-  records.sort((a, b) => new Date(b.eventStartsAt || b.eventDate || b.sortAt) - new Date(a.eventStartsAt || a.eventDate || a.sortAt));
+  records.sort((a, b) => new Date(b.eventStartsAt || b.eventDate || b.sortAt).getTime() - new Date(a.eventStartsAt || a.eventDate || a.sortAt).getTime());
 
   const payload = {
     source: "luma",
@@ -735,7 +737,7 @@ function traceRecordToEventCandidate(record) {
   };
 }
 
-async function writeSnapshotToIndex({ requestId, rawEvent, event, guests, rawGuests }) {
+async function writeSnapshotToIndex({ requestId, rawEvent, event, guests, rawGuests }: AnyRecord) {
   if (!hasLumaDb()) return null;
   try {
     const result = await upsertNormalizedLumaSnapshot({ rawEvent, event, guests, rawGuests });
@@ -1234,7 +1236,7 @@ function firstTag(event) {
   return tag?.name || tag?.tag_name || tag || null;
 }
 
-function jsonError(error, requestId) {
+function jsonError(error: any, requestId: string) {
   return Response.json(
     {
       ok: false,

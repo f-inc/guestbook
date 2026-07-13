@@ -1,5 +1,7 @@
-// @ts-nocheck
 import { appendFile, mkdir } from "node:fs/promises";
+
+type AnyRecord = Record<string, any>;
+type HttpError = Error & { status?: number };
 import nodePath from "node:path";
 import { createSyncRun, finishSyncRun, getEventSyncStates, getIndexStats, hasLumaDb, recordEventSyncState, upsertNormalizedLumaSnapshot } from "../db";
 import { lumaEventDate } from "../event-date";
@@ -19,7 +21,7 @@ const approvalToStatus = {
   session: "going",
 };
 
-export async function GET(request) {
+export async function GET(request: Request) {
   const url = new URL(request.url);
   if (url.searchParams.get("run") === "1") return runSync(request);
 
@@ -36,11 +38,11 @@ export async function GET(request) {
   }
 }
 
-export async function POST(request) {
+export async function POST(request: Request) {
   return runSync(request);
 }
 
-async function runSync(request) {
+async function runSync(request: Request) {
   const requestId = createRequestId();
   const startedAt = Date.now();
   let syncRun = null;
@@ -203,7 +205,7 @@ async function runSync(request) {
   }
 }
 
-async function loadSyncEvents({ requestId, body, limits }) {
+async function loadSyncEvents({ requestId, body, limits }: AnyRecord) {
   const eventIds = Array.isArray(body.eventIds) ? body.eventIds.filter((eventId) => typeof eventId === "string" && eventId.trim()).slice(0, limits.maxEvents) : [];
   if (eventIds.length) {
     const entries = [];
@@ -231,7 +233,7 @@ async function loadSyncEvents({ requestId, body, limits }) {
   });
 }
 
-function syncLimits(body = {}) {
+function syncLimits(body: AnyRecord = {}) {
   return {
     maxEvents: boundedBodyInt(body.maxEvents, "LUMA_SYNC_MAX_EVENTS", 250, 1, 5000),
     eventPageSize: boundedBodyInt(body.eventPageSize, "LUMA_SYNC_EVENTS_PAGE_SIZE", 50, 1, 50),
@@ -244,7 +246,7 @@ function syncLimits(body = {}) {
   };
 }
 
-async function fetchBounded(path, { params = {}, maxEntries, maxPages, requestId }) {
+async function fetchBounded(path: string, { params = {}, maxEntries, maxPages, requestId }: AnyRecord): Promise<any> {
   const entries = [];
   let cursor = null;
   let pages = 0;
@@ -271,12 +273,12 @@ async function fetchBounded(path, { params = {}, maxEntries, maxPages, requestId
   };
 }
 
-async function lumaFetch(path, { method = "GET", params = {}, body, requestId } = {}) {
+async function lumaFetch(path: string, { method = "GET", params = {}, body, requestId }: AnyRecord = {}): Promise<any> {
   await throttleSyncRequest();
   const url = new URL(path, LUMA_BASE_URL);
   Object.entries(params).forEach(([key, value]) => {
     if (Array.isArray(value)) value.forEach((item) => url.searchParams.append(key, item));
-    else if (value !== undefined && value !== null) url.searchParams.set(key, value);
+    else if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
   });
 
   const startedAt = Date.now();
@@ -295,7 +297,7 @@ async function lumaFetch(path, { method = "GET", params = {}, body, requestId } 
   if (!response.ok) {
     const text = await response.text();
     await debugLog(requestId, "sync luma fetch error", { ...logDetails, status: response.status, response: text, durationMs: Date.now() - startedAt }, "error");
-    const error = new Error("Luma API " + response.status + ": " + (text || response.statusText));
+    const error = new Error("Luma API " + response.status + ": " + (text || response.statusText)) as HttpError;
     error.status = response.status;
     throw error;
   }
@@ -305,7 +307,7 @@ async function lumaFetch(path, { method = "GET", params = {}, body, requestId } 
   return response.json();
 }
 
-function shouldForceRefresh(request, body = {}) {
+function shouldForceRefresh(request: Request, body: AnyRecord = {}) {
   const url = new URL(request.url);
   return body.force === true || body.refresh === true || url.searchParams.get("force") === "1" || url.searchParams.get("refresh") === "1";
 }
@@ -714,7 +716,7 @@ function requireSyncAuth(request) {
   const secret = process.env.GUESTBOOK_SYNC_SECRET;
   if (!secret && process.env.NODE_ENV !== "production") return;
   if (!secret) {
-    const error = new Error("Missing GUESTBOOK_SYNC_SECRET. Refusing to run sync without a secret in production.");
+    const error = new Error("Missing GUESTBOOK_SYNC_SECRET. Refusing to run sync without a secret in production.") as HttpError;
     error.status = 503;
     throw error;
   }
@@ -725,14 +727,14 @@ function requireSyncAuth(request) {
   const urlSecret = new URL(request.url).searchParams.get("secret") || "";
   if (bearer === secret || headerSecret === secret || urlSecret === secret) return;
 
-  const error = new Error("Unauthorized sync request.");
+  const error = new Error("Unauthorized sync request.") as HttpError;
   error.status = 401;
   throw error;
 }
 
 function assertApiKey() {
   if (!process.env.LUMA_API_KEY) {
-    const error = new Error("Missing LUMA_API_KEY. Add it before syncing live Luma data.");
+    const error = new Error("Missing LUMA_API_KEY. Add it before syncing live Luma data.") as HttpError;
     error.status = 503;
     throw error;
   }
@@ -740,13 +742,13 @@ function assertApiKey() {
 
 function assertDb() {
   if (!hasLumaDb()) {
-    const error = new Error("Missing DB_URL. Add a PostgreSQL connection string before syncing.");
+    const error = new Error("Missing DB_URL. Add a PostgreSQL connection string before syncing.") as HttpError;
     error.status = 503;
     throw error;
   }
 }
 
-async function readJsonBody(request) {
+async function readJsonBody(request: Request): Promise<any> {
   try {
     return await request.json();
   } catch {
@@ -754,9 +756,9 @@ async function readJsonBody(request) {
   }
 }
 
-function boundedBodyInt(bodyValue, envName, fallback, min, max) {
+function boundedBodyInt(bodyValue: unknown, envName: string, fallback: number, min: number, max: number) {
   const raw = bodyValue ?? process.env[envName] ?? "";
-  const value = Number.parseInt(raw, 10);
+  const value = Number.parseInt(String(raw), 10);
   if (!Number.isFinite(value)) return fallback;
   return Math.min(max, Math.max(min, value));
 }
@@ -818,7 +820,7 @@ function truncateLogValue(value) {
   return value.length > 600 ? value.slice(0, 600) + "...[truncated]" : value;
 }
 
-function jsonError(error, requestId) {
+function jsonError(error: any, requestId: string) {
   return Response.json(
     {
       ok: false,

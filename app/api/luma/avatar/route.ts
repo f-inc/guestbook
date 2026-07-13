@@ -1,5 +1,6 @@
 import { getIndexedPersonAvatarSource, updateIndexedPersonAvatar } from "../db";
 import { avatarSource } from "../../../avatar-order";
+import { requireSessionKey } from "../../session-auth";
 
 export const runtime = "nodejs";
 
@@ -8,7 +9,19 @@ const missCache = new Map();
 const MISS_TTL_MS = 6 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 5000;
 
-export async function GET(request) {
+export async function GET(request: Request) {
+  try {
+    requireSessionKey(request);
+  } catch (error: any) {
+    return Response.json(
+      { ok: false, error: error.message || "Unable to validate the session key." },
+      {
+        status: error.status || 500,
+        headers: { "cache-control": "private, no-store" },
+      },
+    );
+  }
+
   const personId = new URL(request.url).searchParams.get("person_id")?.trim();
   if (!personId || personId.length > 200) return new Response(null, { status: 400 });
 
@@ -26,7 +39,7 @@ export async function GET(request) {
       status: 307,
       headers: {
         location: avatarUrl,
-        "cache-control": "public, max-age=86400, stale-while-revalidate=604800",
+        "cache-control": "private, no-store",
       },
     });
   } catch {

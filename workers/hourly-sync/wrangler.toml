@@ -7,4 +7,4 @@ workers_dev = true
 crons = ["0 * * * *"]
 
 [vars]
-GUESTBOOK_APP_URL = "https://guestbook.example.com"
+GUESTBOOK_APP_URL = "https://guestbook.up.railway.app"

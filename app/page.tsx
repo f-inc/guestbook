@@ -9,6 +9,7 @@ import {
   CircleX,
   Clock3,
   ExternalLink,
+  Lock,
   MailPlus,
   Mail,
   MapPin,
@@ -57,6 +58,9 @@ const sourceStatusDefaults = ["going", "checked_in"];
 const LIVE_WRITE_CONFIRMATION = "CONFIRM_LUMA_WRITE";
 const EVENT_PAGE_SIZE = 10;
 const EVENT_SCROLL_THRESHOLD = 96;
+const SESSION_KEY_STORAGE_KEY = "guestbook.sessionKey";
+const SESSION_KEY_HEADER = "x-guestbook-session-key";
+const SESSION_KEY_COOKIE = "guestbook_session_key";
 
 const initialState = {
   selectedEventId: "",
@@ -85,7 +89,7 @@ export default function Home() {
   const [apiState, setApiStateValue] = useState({ status: "loading", message: "Checking Luma API" });
   const [toastSequence, setToastSequence] = useState(0);
   const [toastVisible, setToastVisible] = useState(true);
-  const [profilePanelOpen, setProfilePanelOpen] = useState(true);
+  const [profilePanelOpen, setProfilePanelOpen] = useState(false);
   const [loadingGuestEvents, setLoadingGuestEvents] = useState([]);
   const [eventDraft, setEventDraft] = useState(null);
   const [guestStatusDraft, setGuestStatusDraft] = useState(null);
@@ -103,10 +107,86 @@ export default function Home() {
   const [eventWindow, setEventWindow] = useState({ start: 0, end: EVENT_PAGE_SIZE });
   const [newGroup, setNewGroup] = useState({ name: "", color: "#0f766e" });
   const [audienceName, setAudienceName] = useState("");
+  const [sessionStatus, setSessionStatus] = useState("checking");
+  const [sessionKey, setSessionKey] = useState("");
+  const [sessionKeyDraft, setSessionKeyDraft] = useState("");
+  const [sessionError, setSessionError] = useState("");
 
   const setApiState = (next) => {
     setApiStateValue(next);
     setToastSequence((current) => current + 1);
+  };
+
+  const lockSession = (message = "") => {
+    window.localStorage.removeItem(SESSION_KEY_STORAGE_KEY);
+    clearSessionCookie();
+    setSessionKey("");
+    setSessionStatus("locked");
+    setSessionError(message);
+    setState(initialState);
+    setActivityTraces({});
+    setSearchOpen(false);
+    setProfilePanelOpen(false);
+  };
+
+  const apiFetch = async (input: RequestInfo | URL, init: RequestInit = {}) => {
+    const response = await sessionFetch(sessionKey, input, init);
+    if (response.status === 401) lockSession("That session key is no longer valid.");
+    return response;
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    const storedKey = window.localStorage.getItem(SESSION_KEY_STORAGE_KEY) || "";
+    setSessionKeyDraft(storedKey);
+    if (!storedKey) {
+      setSessionStatus("locked");
+      return;
+    }
+
+    verifySessionKey(storedKey).then((result) => {
+      if (cancelled) return;
+      if (result.ok) {
+        writeSessionCookie(storedKey);
+        setSessionKey(storedKey);
+        setSessionStatus("ready");
+        setSessionError("");
+        return;
+      }
+      if (result.status === 401) {
+        window.localStorage.removeItem(SESSION_KEY_STORAGE_KEY);
+        clearSessionCookie();
+      }
+      setSessionStatus("locked");
+      setSessionError(result.error);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const submitSessionKey = async (event) => {
+    event.preventDefault();
+    const nextKey = sessionKeyDraft.trim();
+    if (!nextKey) {
+      setSessionError("Enter a session key.");
+      return;
+    }
+
+    setSessionStatus("checking");
+    setSessionError("");
+    const result = await verifySessionKey(nextKey);
+    if (!result.ok) {
+      setSessionStatus("locked");
+      setSessionError(result.error);
+      return;
+    }
+
+    window.localStorage.setItem(SESSION_KEY_STORAGE_KEY, nextKey);
+    writeSessionCookie(nextKey);
+    setSessionKey(nextKey);
+    setSessionStatus("ready");
   };
 
   useEffect(() => {
@@ -141,7 +221,7 @@ export default function Home() {
   const loadLumaEvents = async ({ cancelled = () => false }: { cancelled?: () => boolean } = {}) => {
     setApiState({ status: "loading", message: "Checking cached Luma events." });
     try {
-      const response = await fetch("/api/luma", { cache: "no-store" });
+      const response = await apiFetch("/api/luma", { cache: "no-store" });
       const data: any = await response.json();
       if (!response.ok) throw new Error(withRequestId(data.error || "Unable to load Luma data.", data.requestId));
       if (cancelled()) return;
@@ -157,12 +237,13 @@ export default function Home() {
   };
 
   useEffect(() => {
+    if (sessionStatus !== "ready" || !sessionKey) return;
     let cancelled: boolean = false;
     loadLumaEvents({ cancelled: () => cancelled });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [sessionStatus, sessionKey]);
 
   const selectedEvent = getEvent(state, state.selectedEventId);
   const selectedEventManageUrl = lumaEventManageUrl(selectedEvent);
@@ -342,7 +423,7 @@ export default function Home() {
     setLoadingGuestEvents((current) => unique([...current, eventId]));
     try {
       const refresh = force ? "&refresh=1" : "";
-      const response = await fetch("/api/luma?event_id=" + encodeURIComponent(eventId) + refresh, { cache: "no-store" });
+      const response = await apiFetch("/api/luma?event_id=" + encodeURIComponent(eventId) + refresh, { cache: "no-store" });
       const data: any = await response.json();
       if (!response.ok) throw new Error(withRequestId(data.error || (force ? "Unable to sync the Luma event." : "Unable to load Luma guests."), data.requestId));
       setState((current) => mergeLumaGuests(current, data));
@@ -382,7 +463,7 @@ export default function Home() {
         params.set("refresh", "1");
         params.set("trace_scope", "known");
       }
-      const response = await fetch("/api/luma?" + params.toString(), { cache: "no-store" });
+      const response = await apiFetch("/api/luma?" + params.toString(), { cache: "no-store" });
       const data: any = await response.json();
       if (!response.ok) throw new Error(withRequestId(data.error || "Unable to trace event activity.", data.requestId));
       const records = data.records || [];
@@ -439,7 +520,7 @@ export default function Home() {
             confirm: LIVE_WRITE_CONFIRMATION,
             eventId: event.id,
             guests: [{ email: person.email, name: person.name, source: person.source }],
-          });
+          }, apiFetch);
         } else if (["going", "registered", "declined", "waitlisted"].includes(status)) {
           await postLumaAction({
             action: "updateGuestStatus",
@@ -449,7 +530,7 @@ export default function Home() {
             status,
             sendEmail,
             message,
-          });
+          }, apiFetch);
         } else {
           setApiState({ status: "live", message: `${statusLabels[status]} was not changed because Luma public API does not expose that write.` });
           return false;
@@ -558,7 +639,7 @@ export default function Home() {
           confirm: LIVE_WRITE_CONFIRMATION,
           eventId: target.id,
           guests: lumaGuests,
-        });
+        }, apiFetch);
       } catch (error) {
         setApiState({ status: "error", message: error.message });
         return;
@@ -650,6 +731,18 @@ export default function Home() {
     setSearchOpen(false);
   };
 
+  if (sessionStatus !== "ready") {
+    return (
+      <SessionKeyGate
+        value={sessionKeyDraft}
+        error={sessionError}
+        checking={sessionStatus === "checking"}
+        onChange={setSessionKeyDraft}
+        onSubmit={submitSessionKey}
+      />
+    );
+  }
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -665,6 +758,10 @@ export default function Home() {
           <kbd aria-label="Command K"><span aria-hidden="true">⌘</span><span>K</span></kbd>
         </button>
         <div className="topbar-actions">
+          <button className="button" type="button" onClick={() => lockSession()}>
+            <Lock size={17} aria-hidden="true" />
+            Lock
+          </button>
           <button className="button primary" type="button" onClick={() => setEventDraft(blankEventDraft())}>
             <Plus size={17} aria-hidden="true" />
             New event
@@ -1239,6 +1336,40 @@ export default function Home() {
   );
 }
 
+function SessionKeyGate({ value, error, checking, onChange, onSubmit }) {
+  return (
+    <main className="session-shell">
+      <section className="session-panel" aria-labelledby="session-title">
+        <div className="session-brand">
+          <img className="brand-mark" src="/guestbook-logo.png" alt="" width="52" height="52" />
+          <div>
+            <p className="eyebrow">Private workspace</p>
+            <h1 id="session-title">Guestbook</h1>
+          </div>
+        </div>
+        <form className="session-form" onSubmit={onSubmit}>
+          <label>
+            <span>Session key</span>
+            <input
+              type="password"
+              autoComplete="current-password"
+              autoFocus
+              value={value}
+              disabled={checking}
+              onChange={(event) => onChange(event.target.value)}
+            />
+          </label>
+          {error ? <p className="session-error" role="alert">{error}</p> : null}
+          <button className="button primary" type="submit" disabled={checking}>
+            <Lock size={17} aria-hidden="true" />
+            {checking ? "Checking..." : "Unlock Guestbook"}
+          </button>
+        </form>
+      </section>
+    </main>
+  );
+}
+
 function GuestStatusDialog({ draft, event, guest, person, onChange, onClose, onSubmit }) {
   if (!event || !guest || !person) return null;
   const ActionIcon = guestActionIcons[draft.label] || CircleCheck;
@@ -1690,8 +1821,8 @@ function withRequestId(message, requestId) {
   return requestId ? message + " (request " + requestId + ")" : message;
 }
 
-async function postLumaAction(payload) {
-  const response = await fetch("/api/luma", {
+async function postLumaAction(payload, apiFetch) {
+  const response = await apiFetch("/api/luma", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload),
@@ -1699,6 +1830,36 @@ async function postLumaAction(payload) {
   const data: any = await response.json();
   if (!response.ok || data.ok === false) throw new Error(withRequestId(data.error || data.message || "Luma request failed.", data.requestId));
   return data;
+}
+
+async function verifySessionKey(sessionKey: string) {
+  try {
+    const response = await sessionFetch(sessionKey, "/api/session", { cache: "no-store" });
+    const data: any = await response.json();
+    return {
+      ok: response.ok && data.ok !== false,
+      status: response.status,
+      error: data.error || "Unable to validate the session key.",
+    };
+  } catch {
+    return { ok: false, status: 0, error: "Unable to reach Guestbook. Try again." };
+  }
+}
+
+function sessionFetch(sessionKey: string, input: RequestInfo | URL, init: RequestInit = {}) {
+  const headers = new Headers(init.headers);
+  headers.set(SESSION_KEY_HEADER, sessionKey);
+  return fetch(input, { ...init, headers });
+}
+
+function writeSessionCookie(sessionKey: string) {
+  const secure = window.location.protocol === "https:" ? "; Secure" : "";
+  document.cookie = `${SESSION_KEY_COOKIE}=${encodeURIComponent(sessionKey)}; path=/; max-age=31536000; SameSite=Lax${secure}`;
+}
+
+function clearSessionCookie() {
+  const secure = window.location.protocol === "https:" ? "; Secure" : "";
+  document.cookie = `${SESSION_KEY_COOKIE}=; path=/; max-age=0; SameSite=Lax${secure}`;
 }
 
 function mergeLumaGuests(current, lumaData) {
@@ -1747,17 +1908,19 @@ function mergeLumaState(current, lumaData) {
     return mergePersonRecord(existing, person);
   });
 
+  const firstUpcomingEventId = upcomingEvents({ events: lumaData.events })[0]?.id || sortEvents(lumaData.events).at(-1)?.id || "";
+
   return normalizeState({
     ...current,
     source: "luma",
     loadedAt: lumaData.loadedAt,
     events: lumaData.events,
     people,
-    selectedEventId: lumaData.events.some((event) => event.id === current.selectedEventId) ? current.selectedEventId : lumaData.events[0]?.id || "",
+    selectedEventId: lumaData.events.some((event) => event.id === current.selectedEventId) ? current.selectedEventId : firstUpcomingEventId,
     selectedPersonId: people.some((person) => person.id === current.selectedPersonId) ? current.selectedPersonId : people[0]?.id || "",
     invite: {
       ...current.invite,
-      targetEventId: lumaData.events.some((event) => event.id === current.invite.targetEventId) ? current.invite.targetEventId : lumaData.events[0]?.id || "",
+      targetEventId: lumaData.events.some((event) => event.id === current.invite.targetEventId) ? current.invite.targetEventId : firstUpcomingEventId,
       sourceEventId: lumaData.events.some((event) => event.id === current.invite.sourceEventId) ? current.invite.sourceEventId : lumaData.events[0]?.id || "",
     },
   });

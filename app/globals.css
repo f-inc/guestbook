@@ -78,6 +78,42 @@
     @apply mx-auto min-h-screen w-full max-w-[1800px] p-4;
   }
 
+  .session-shell {
+    @apply grid min-h-screen place-items-center bg-canvas p-4;
+  }
+
+  .session-panel {
+    @apply w-full max-w-sm rounded-lg border border-border bg-surface p-6 shadow-xl;
+  }
+
+  .session-brand {
+    @apply mb-6 flex items-center gap-3;
+  }
+
+  .session-brand .brand-mark {
+    @apply size-13 shrink-0 object-contain mix-blend-multiply;
+  }
+
+  .session-brand h1 {
+    @apply mt-0.5 text-2xl font-bold;
+  }
+
+  .session-form {
+    @apply grid gap-4;
+  }
+
+  .session-form label {
+    @apply grid gap-1.5 text-sm font-semibold;
+  }
+
+  .session-form .button {
+    @apply w-full;
+  }
+
+  .session-error {
+    @apply rounded-lg border border-danger/25 bg-danger-soft px-3 py-2 text-sm text-danger;
+  }
+
   .topbar {
     @apply mb-4 grid items-center gap-4;
     grid-template-columns: minmax(180px, 1fr) minmax(300px, 560px) auto;
@@ -385,7 +421,7 @@
   }
 
   table {
-    @apply w-full min-w-[620px] border-collapse bg-surface text-left text-sm;
+    @apply w-full min-w-[940px] border-collapse bg-surface text-left text-sm;
   }
 
   th {
@@ -490,7 +526,7 @@
     @apply border-danger/20 bg-danger-soft text-danger hover:border-danger/35 hover:bg-danger hover:text-white focus-visible:ring-danger/25;
   }
 
-  @container (min-width: 680px) {
+  @container (min-width: 960px) {
     .guest-action {
       @apply w-auto px-2.5;
     }
@@ -999,7 +1035,7 @@
   }
 }
 
-@media (max-width: 1500px) {
+@media (max-width: 1650px) {
   .workspace {
     grid-template-columns: 240px minmax(0, 1fr) 350px;
   }

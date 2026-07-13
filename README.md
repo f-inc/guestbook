@@ -33,6 +33,7 @@ Set the required values:
 ```bash
 LUMA_API_KEY=your_luma_calendar_api_key
 DB_URL=your_postgres_connection_string
+GUESTBOOK_KEY=replace_with_private_guestbook_key
 GUESTBOOK_SYNC_SECRET=replace_with_random_sync_secret
 ```
 
@@ -53,8 +54,11 @@ The `/api/luma/sync` endpoint ingests event and guest activity into the local da
 
 ```bash
 curl -X POST http://localhost:3000/api/luma/sync \
+  -H "x-guestbook-session-key: $GUESTBOOK_KEY" \
   -H "Authorization: Bearer $GUESTBOOK_SYNC_SECRET"
 ```
+
+The hourly Worker uses the same key for scheduled syncs and its status URL. Store `GUESTBOOK_KEY` and `GUESTBOOK_SYNC_SECRET` as Wrangler secrets before deploying it.
 
 The sync job is intentionally capped by defaults in `.env.local.example`. Raise those limits only when you explicitly want a larger backfill.
 

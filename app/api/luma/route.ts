@@ -7,6 +7,7 @@ import { getIndexedTrace, hasLumaDb, listIndexedEventGuests, listIndexedEvents, 
 import { lumaEventDate } from "./event-date";
 import { orderAvatarCandidates } from "../../avatar-order";
 import { normalizeGuestStatusNotification } from "../../guest-status-notification";
+import { requireSessionKey } from "../session-auth";
 
 export const runtime = "nodejs";
 
@@ -38,6 +39,7 @@ export async function GET(request: Request) {
   const startedAt = Date.now();
 
   try {
+    requireSessionKey(request);
     assertApiKey();
     const url = new URL(request.url);
     const eventId = url.searchParams.get("event_id");
@@ -261,6 +263,7 @@ export async function POST(request: Request) {
   const startedAt = Date.now();
 
   try {
+    requireSessionKey(request);
     assertApiKey();
     const body: any = await request.json();
     await debugLog(requestId, "POST /api/luma start", { action: body.action, eventId: body.eventId });

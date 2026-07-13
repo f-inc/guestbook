@@ -6,6 +6,7 @@ import nodePath from "node:path";
 import { createSyncRun, finishSyncRun, getEventSyncStates, getIndexStats, hasLumaDb, recordEventSyncState, upsertNormalizedLumaSnapshot } from "../db";
 import { lumaEventDate } from "../event-date";
 import { orderAvatarCandidates } from "../../../avatar-order";
+import { requireSessionKey } from "../../session-auth";
 
 export const runtime = "nodejs";
 
@@ -27,6 +28,7 @@ export async function GET(request: Request) {
 
   const requestId = createRequestId();
   try {
+    requireSessionKey(request);
     if (!hasLumaDb()) {
       return Response.json({ ok: false, error: "Missing DB_URL.", requestId }, { status: 503 });
     }
@@ -55,6 +57,7 @@ async function runSync(request: Request) {
   let truncatedGuestEventCount = 0;
 
   try {
+    requireSessionKey(request);
     assertApiKey();
     assertDb();
     requireSyncAuth(request);

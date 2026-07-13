@@ -1,0 +1,127 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DB_URL")
+}
+
+model LumaEvent {
+  eventId     String    @id @map("event_id")
+  title       String
+  date        DateTime? @db.Date
+  startsAt    DateTime? @map("starts_at") @db.Timestamptz(6)
+  location    String?
+  category    String?
+  capacity    Int?
+  lumaUrl     String?   @map("luma_url")
+  raw         Json      @default("{}")
+  firstSeenAt DateTime  @default(now()) @map("first_seen_at") @db.Timestamptz(6)
+  lastSeenAt  DateTime  @default(now()) @map("last_seen_at") @db.Timestamptz(6)
+  syncedAt    DateTime  @default(now()) @map("synced_at") @db.Timestamptz(6)
+
+  guests    LumaEventGuest[]
+  syncState LumaEventSyncState?
+
+  @@index([startsAt(sort: Desc)])
+  @@map("luma_events")
+}
+
+model LumaPerson {
+  personId        String   @id @map("person_id")
+  lumaUserId      String?  @map("luma_user_id")
+  lumaUserIdLower String?  @map("luma_user_id_lower")
+  email           String?
+  emailLower      String?  @map("email_lower")
+  name            String
+  title           String?
+  bio             String?
+  avatarUrl       String?  @map("avatar_url")
+  profileUrl      String?  @map("profile_url")
+  socialLinks     Json     @default("[]") @map("social_links")
+  referrer        Json?
+  groups          Json     @default("[]")
+  raw             Json     @default("{}")
+  firstSeenAt     DateTime @default(now()) @map("first_seen_at") @db.Timestamptz(6)
+  lastSeenAt      DateTime @default(now()) @map("last_seen_at") @db.Timestamptz(6)
+  syncedAt        DateTime @default(now()) @map("synced_at") @db.Timestamptz(6)
+
+  eventGuests LumaEventGuest[]
+
+  @@index([lumaUserIdLower])
+  @@index([emailLower])
+  @@map("luma_people")
+}
+
+model LumaEventGuest {
+  eventId             String    @map("event_id")
+  personId            String    @map("person_id")
+  lumaGuestId         String?   @map("luma_guest_id")
+  lumaUserId          String?   @map("luma_user_id")
+  lumaUserIdLower     String?   @map("luma_user_id_lower")
+  email               String?
+  emailLower          String?   @map("email_lower")
+  status              String?
+  lumaApprovalStatus  String?   @map("luma_approval_status")
+  registeredAt        DateTime? @map("registered_at") @db.Timestamptz(6)
+  invitedAt           DateTime? @map("invited_at") @db.Timestamptz(6)
+  createdAt           DateTime? @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime? @map("updated_at") @db.Timestamptz(6)
+  approvedAt          DateTime? @map("approved_at") @db.Timestamptz(6)
+  checkedInAt         DateTime? @map("checked_in_at") @db.Timestamptz(6)
+  profileDescription  String?   @map("profile_description")
+  registrationAnswers Json      @default("[]") @map("registration_answers")
+  socialLinks         Json      @default("[]") @map("social_links")
+  referrer            Json?
+  searchText          String?   @map("search_text")
+  raw                 Json      @default("{}")
+  firstSeenAt         DateTime  @default(now()) @map("first_seen_at") @db.Timestamptz(6)
+  lastSeenAt          DateTime  @default(now()) @map("last_seen_at") @db.Timestamptz(6)
+  syncedAt            DateTime  @default(now()) @map("synced_at") @db.Timestamptz(6)
+
+  event  LumaEvent  @relation(fields: [eventId], references: [eventId], onDelete: Cascade)
+  person LumaPerson @relation(fields: [personId], references: [personId], onDelete: Cascade)
+
+  @@id([eventId, personId])
+  @@index([eventId])
+  @@index([personId])
+  @@index([lumaUserIdLower])
+  @@index([emailLower])
+  @@index([checkedInAt(sort: Desc), registeredAt(sort: Desc), createdAt(sort: Desc), lastSeenAt(sort: Desc)])
+  @@map("luma_event_guests")
+}
+
+model LumaSyncRun {
+  id          String    @id @default(cuid())
+  requestId   String    @map("request_id")
+  status      String
+  startedAt   DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
+  finishedAt  DateTime? @map("finished_at") @db.Timestamptz(6)
+  eventCount  Int       @default(0) @map("event_count")
+  guestCount  Int       @default(0) @map("guest_count")
+  personCount Int       @default(0) @map("person_count")
+  error       String?
+  limits      Json      @default("{}")
+
+  @@index([startedAt(sort: Desc)])
+  @@index([status])
+  @@map("luma_sync_runs")
+}
+
+model LumaEventSyncState {
+  eventId         String    @id @map("event_id")
+  lastGuestSyncAt DateTime? @map("last_guest_sync_at") @db.Timestamptz(6)
+  lastEventSyncAt DateTime? @map("last_event_sync_at") @db.Timestamptz(6)
+  lastGuestCount  Int       @default(0) @map("last_guest_count")
+  lastStatus      String?   @map("last_status")
+  truncated       Boolean   @default(false)
+  error           String?
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  event LumaEvent @relation(fields: [eventId], references: [eventId], onDelete: Cascade)
+
+  @@index([lastGuestSyncAt(sort: Desc)])
+  @@index([lastStatus])
+  @@map("luma_event_sync_state")
+}

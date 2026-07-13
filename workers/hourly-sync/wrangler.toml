@@ -1,0 +1,10 @@
+name = "guestbook-hourly-sync"
+main = "src/index.js"
+compatibility_date = "2026-07-12"
+workers_dev = true
+
+[triggers]
+crons = ["0 * * * *"]
+
+[vars]
+GUESTBOOK_APP_URL = "https://guestbook.example.com"

@@ -35,7 +35,8 @@
 
   button,
   input,
-  select {
+  select,
+  textarea {
     font: inherit;
   }
 
@@ -56,12 +57,14 @@
   }
 
   input,
-  select {
+  select,
+  textarea {
     @apply h-10 w-full rounded-lg border border-border bg-surface px-3 text-sm text-ink outline-none transition;
   }
 
   input:focus,
-  select:focus {
+  select:focus,
+  textarea:focus {
     @apply border-brand ring-2 ring-brand/10;
   }
 
@@ -793,6 +796,75 @@
   .event-dialog,
   .search-dialog {
     @apply max-h-[calc(100vh-32px)] w-full max-w-2xl overflow-y-auto rounded-lg border border-border bg-surface p-5 shadow-2xl;
+  }
+
+  .status-dialog {
+    @apply max-w-lg;
+  }
+
+  .status-transition {
+    @apply mb-4 flex items-center gap-2 rounded-lg bg-subtle px-3 py-2 text-muted;
+  }
+
+  .status-notify {
+    @apply flex cursor-pointer items-center gap-3 rounded-lg border border-border p-3 transition hover:border-border-strong hover:bg-subtle;
+  }
+
+  .status-notify input {
+    @apply size-4 shrink-0 accent-brand;
+  }
+
+  .status-notify-icon {
+    @apply grid size-8 shrink-0 place-items-center rounded-full bg-brand-soft text-brand;
+  }
+
+  .status-notify > span:last-child {
+    @apply grid min-w-0 gap-0.5;
+  }
+
+  .status-notify strong {
+    @apply text-sm;
+  }
+
+  .status-notify small {
+    @apply truncate text-xs text-muted;
+  }
+
+  .status-message {
+    @apply mt-4 grid gap-2;
+  }
+
+  .status-message-head {
+    @apply flex items-center justify-between gap-3 text-xs;
+  }
+
+  .status-message-head strong {
+    @apply text-ink;
+  }
+
+  .status-message-head strong span,
+  .status-message-head small {
+    @apply font-normal text-muted;
+  }
+
+  .status-message textarea {
+    @apply min-h-28 resize-y py-2.5 leading-relaxed;
+  }
+
+  .status-message textarea:disabled {
+    @apply cursor-not-allowed bg-subtle text-muted;
+  }
+
+  .status-submit-going {
+    @apply border-brand bg-brand text-white hover:bg-brand/90;
+  }
+
+  .status-submit-waitlisted {
+    @apply border-warning bg-warning text-white hover:bg-warning/90;
+  }
+
+  .status-submit-declined {
+    @apply border-danger bg-danger text-white hover:bg-danger/90;
   }
 
   .dialog-head {

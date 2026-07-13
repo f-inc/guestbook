@@ -3,6 +3,7 @@ import nodePath from "node:path";
 import { getIndexedTrace, hasLumaDb, listIndexedEventGuests, listIndexedEvents, removeIndexedEventGuestsMissingFromSnapshot, removeIndexedTraceRecordsMissingFromEvents, updateIndexedGuestStatus, upsertNormalizedLumaGuestActivity, upsertNormalizedLumaSnapshot } from "./db";
 import { lumaEventDate } from "./event-date.mjs";
 import { orderAvatarCandidates } from "../../avatar-order.mjs";
+import { normalizeGuestStatusNotification } from "../../guest-status-notification.mjs";
 
 export const runtime = "nodejs";
 
@@ -271,7 +272,16 @@ export async function POST(request) {
         return Response.json({ ok: false, skipped: true, message: "Luma does not support setting " + body.status + " through this endpoint.", requestId });
       }
 
-      await debugLog(requestId, "guest status update start", { eventId: body.eventId, guestId: body.guestId, requestedStatus: body.status, lumaStatus: status });
+      const notification = normalizeGuestStatusNotification({ sendEmail: body.sendEmail, message: body.message });
+
+      await debugLog(requestId, "guest status update start", {
+        eventId: body.eventId,
+        guestId: body.guestId,
+        requestedStatus: body.status,
+        lumaStatus: status,
+        sendEmail: notification.sendEmail,
+        hasMessage: Boolean(notification.message),
+      });
       await lumaFetch("/v1/events/guests/update-status", {
         requestId,
         method: "POST",
@@ -279,7 +289,8 @@ export async function POST(request) {
           event_id: body.eventId,
           guest_id: body.guestId,
           status,
-          send_email: body.sendEmail ?? false,
+          send_email: notification.sendEmail,
+          message: notification.message,
         },
       });
       if (hasLumaDb()) {
@@ -293,7 +304,7 @@ export async function POST(request) {
         }
       }
       await debugLog(requestId, "guest status update success", { eventId: body.eventId, guestId: body.guestId, durationMs: Date.now() - startedAt });
-      return Response.json({ ok: true, requestId });
+      return Response.json({ ok: true, notificationSent: notification.sendEmail, requestId });
     }
 
     if (body.action === "sendInvites") {

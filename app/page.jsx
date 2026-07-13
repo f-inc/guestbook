@@ -2,12 +2,14 @@
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowRight,
   BadgeCheck,
   CircleCheck,
   CircleX,
   Clock3,
   ExternalLink,
   MailPlus,
+  Mail,
   MapPin,
   Pencil,
   Plus,
@@ -20,6 +22,7 @@ import {
 import { activityRecordStatus } from "./activity-status.mjs";
 import { orderAvatarCandidates } from "./avatar-order.mjs";
 import { guestStatusDate, guestStatusTimestamp } from "./guest-status-date.mjs";
+import { MAX_GUEST_STATUS_MESSAGE_LENGTH } from "./guest-status-notification.mjs";
 import { lumaEventManageUrl } from "./luma-event-url.mjs";
 
 const statusLabels = {
@@ -84,6 +87,7 @@ export default function Home() {
   const [profilePanelOpen, setProfilePanelOpen] = useState(true);
   const [loadingGuestEvents, setLoadingGuestEvents] = useState([]);
   const [eventDraft, setEventDraft] = useState(null);
+  const [guestStatusDraft, setGuestStatusDraft] = useState(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [universalQuery, setUniversalQuery] = useState("");
   const universalSearchInputRef = useRef(null);
@@ -113,6 +117,7 @@ export default function Home() {
       if (event.key === "Escape") {
         setSearchOpen(false);
         setProfilePanelOpen(false);
+        setGuestStatusDraft((current) => current?.submitting ? current : null);
       }
     };
     window.addEventListener("keydown", handleKeyDown);
@@ -420,7 +425,7 @@ export default function Home() {
     tracePersonActivity(selectedPerson);
   }, [selectedPerson?.id, selectedPerson?.source, selectedTrace.status]);
 
-  const setGuestStatus = async (personId, status) => {
+  const setGuestStatus = async (personId, status, { sendEmail = false, message = "" } = {}) => {
     const event = getEvent(state, state.selectedEventId);
     const guest = event?.guests.find((item) => item.personId === personId);
     const person = getPerson(state, personId);
@@ -441,14 +446,16 @@ export default function Home() {
             eventId: event.id,
             guestId: guest.lumaGuestId,
             status,
+            sendEmail,
+            message,
           });
         } else {
           setApiState({ status: "live", message: `${statusLabels[status]} was not changed because Luma public API does not expose that write.` });
-          return;
+          return false;
         }
       } catch (error) {
         setApiState({ status: "error", message: error.message });
-        return;
+        return false;
       }
     }
 
@@ -465,6 +472,41 @@ export default function Home() {
       if (status === "invited") guest.invitedAt = changedAt;
       draft.selectedPersonId = personId;
     });
+    return true;
+  };
+
+  const requestGuestStatusChange = (personId, status, label) => {
+    const event = getEvent(state, state.selectedEventId);
+    if (event?.source !== "luma" || !["Approve", "Waitlist", "Decline"].includes(label)) {
+      void setGuestStatus(personId, status);
+      return;
+    }
+
+    setGuestStatusDraft({
+      personId,
+      status,
+      label,
+      sendEmail: true,
+      message: "",
+      submitting: false,
+    });
+  };
+
+  const closeGuestStatusDialog = () => {
+    setGuestStatusDraft((current) => current?.submitting ? current : null);
+  };
+
+  const submitGuestStatusChange = async (event) => {
+    event.preventDefault();
+    if (!guestStatusDraft || guestStatusDraft.submitting) return;
+
+    const draft = guestStatusDraft;
+    setGuestStatusDraft((current) => current ? { ...current, submitting: true } : current);
+    const updated = await setGuestStatus(draft.personId, draft.status, {
+      sendEmail: draft.sendEmail,
+      message: draft.sendEmail ? draft.message : "",
+    });
+    setGuestStatusDraft((current) => updated ? null : current ? { ...current, submitting: false } : current);
   };
 
   const saveEvent = (event) => {
@@ -839,7 +881,7 @@ export default function Home() {
                                       key={status}
                                       aria-label={`${label} ${person.name}`}
                                       title={label}
-                                      onClick={() => setGuestStatus(person.id, status)}
+                                      onClick={() => requestGuestStatusChange(person.id, status, label)}
                                     >
                                       <ActionIcon aria-hidden="true" size={14} strokeWidth={2.25} />
                                       <span>{label}</span>
@@ -1180,6 +1222,94 @@ export default function Home() {
           </form>
         </div>
       ) : null}
+
+      {guestStatusDraft ? (
+        <GuestStatusDialog
+          draft={guestStatusDraft}
+          event={selectedEvent}
+          guest={selectedEvent?.guests.find((guest) => guest.personId === guestStatusDraft.personId)}
+          person={getPerson(state, guestStatusDraft.personId)}
+          onChange={setGuestStatusDraft}
+          onClose={closeGuestStatusDialog}
+          onSubmit={submitGuestStatusChange}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function GuestStatusDialog({ draft, event, guest, person, onChange, onClose, onSubmit }) {
+  if (!event || !guest || !person) return null;
+  const ActionIcon = guestActionIcons[draft.label] || CircleCheck;
+
+  return (
+    <div className="modal-scrim" role="presentation" onMouseDown={onClose}>
+      <form
+        className="event-dialog status-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="guest-status-dialog-title"
+        onSubmit={onSubmit}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="dialog-head">
+          <div>
+            <p className="eyebrow">{event.title}</p>
+            <h2 id="guest-status-dialog-title">{draft.label} {person.name}</h2>
+          </div>
+          <button className="icon-button" type="button" disabled={draft.submitting} aria-label="Close status dialog" title="Close" onClick={onClose}>
+            <X size={18} aria-hidden="true" />
+          </button>
+        </div>
+
+        <div className="status-transition" aria-label={`Change status from ${statusLabels[guest.status] || guest.status} to ${statusLabels[draft.status] || draft.status}`}>
+          <StatusPill status={guest.status} />
+          <ArrowRight size={16} aria-hidden="true" />
+          <StatusPill status={draft.status} />
+        </div>
+
+        <label className="status-notify">
+          <input
+            type="checkbox"
+            checked={draft.sendEmail}
+            disabled={draft.submitting}
+            onChange={(event) => onChange((current) => ({
+              ...current,
+              sendEmail: event.target.checked,
+              message: event.target.checked ? current.message : "",
+            }))}
+          />
+          <span className="status-notify-icon"><Mail size={17} aria-hidden="true" /></span>
+          <span>
+            <strong>Notify by email</strong>
+            <small>{person.email || "Luma guest"}</small>
+          </span>
+        </label>
+
+        <label className="status-message">
+          <span className="status-message-head">
+            <strong>Message <span>(optional)</span></strong>
+            <small>{draft.message.length}/{MAX_GUEST_STATUS_MESSAGE_LENGTH}</small>
+          </span>
+          <textarea
+            autoFocus
+            rows="4"
+            maxLength={MAX_GUEST_STATUS_MESSAGE_LENGTH}
+            value={draft.message}
+            disabled={!draft.sendEmail || draft.submitting}
+            placeholder="Add a personal note"
+            onChange={(event) => onChange((current) => ({ ...current, message: event.target.value }))}
+          />
+        </label>
+
+        <div className="dialog-actions">
+          <button className="button ghost" type="button" disabled={draft.submitting} onClick={onClose}>Cancel</button>
+          <button className={`button status-submit status-submit-${draft.status}`} type="submit" disabled={draft.submitting}>
+            {draft.submitting ? <RefreshCw className="animate-spin" size={16} aria-hidden="true" /> : <ActionIcon size={16} aria-hidden="true" />}
+            {draft.submitting ? "Updating..." : draft.label}
+          </button>
+        </div>
+      </form>
     </div>
   );
 }

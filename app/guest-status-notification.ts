@@ -1,6 +1,13 @@
 export const MAX_GUEST_STATUS_MESSAGE_LENGTH = 200;
 
-export function normalizeGuestStatusNotification({ sendEmail, message } = {}) {
+type GuestStatusNotificationInput = {
+  message?: unknown;
+  sendEmail?: unknown;
+};
+
+type HttpError = Error & { status?: number };
+
+export function normalizeGuestStatusNotification({ sendEmail, message }: GuestStatusNotificationInput = {}) {
   if (message !== undefined && message !== null && typeof message !== "string") {
     throw badRequest("Guest status message must be text.");
   }
@@ -21,8 +28,8 @@ export function normalizeGuestStatusNotification({ sendEmail, message } = {}) {
   };
 }
 
-function badRequest(message) {
-  const error = new Error(message);
+function badRequest(message: string): HttpError {
+  const error = new Error(message) as HttpError;
   error.status = 400;
   return error;
 }

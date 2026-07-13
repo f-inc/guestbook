@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { avatarSource, orderAvatarCandidates } from "../../avatar-order.mjs";
+import { avatarSource, orderAvatarCandidates } from "../../avatar-order";
 
 test("orders Luma, resolver, LinkedIn, then X avatars", () => {
   const luma = "https://images.lumacdn.com/avatars/example.jpg";

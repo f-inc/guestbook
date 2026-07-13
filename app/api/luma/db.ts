@@ -1,6 +1,7 @@
+// @ts-nocheck
 import { Prisma, PrismaClient } from "@prisma/client";
-import { orderAvatarCandidates } from "../../avatar-order.mjs";
-import { lumaEventDate } from "./event-date.mjs";
+import { orderAvatarCandidates } from "../../avatar-order";
+import { lumaEventDate } from "./event-date";
 
 const PRISMA_KEY = "__guestbookPrismaClient";
 

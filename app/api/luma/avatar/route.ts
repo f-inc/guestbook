@@ -1,5 +1,5 @@
 import { getIndexedPersonAvatarSource, updateIndexedPersonAvatar } from "../db";
-import { avatarSource } from "../../../avatar-order.mjs";
+import { avatarSource } from "../../../avatar-order";
 
 export const runtime = "nodejs";
 

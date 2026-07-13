@@ -10,23 +10,30 @@ const timestampFieldsByStatus = {
 
 const fallbackTimestampFields = ["updatedAt", "checkedInAt", "approvedAt", "registeredAt", "invitedAt", "createdAt"];
 
-export function guestStatusDate(guest, event = {}) {
+type GuestStatusRecord = Record<string, unknown> & { status?: string };
+type EventDateRecord = {
+  date?: unknown;
+  startsAt?: unknown;
+};
+
+export function guestStatusDate(guest: GuestStatusRecord, event: EventDateRecord = {}): string | null {
   const fields = timestampFieldsByStatus[guest?.status] || fallbackTimestampFields;
   for (const field of fields) {
-    if (validDateValue(guest?.[field])) return guest[field];
+    const value = guest?.[field];
+    if (validDateValue(value)) return String(value);
   }
 
-  if (validDateValue(event?.startsAt)) return event.startsAt;
+  if (validDateValue(event?.startsAt)) return String(event.startsAt);
   if (/^\d{4}-\d{2}-\d{2}$/.test(String(event?.date || ""))) return `${event.date}T12:00:00`;
-  if (validDateValue(event?.date)) return event.date;
+  if (validDateValue(event?.date)) return String(event.date);
   return null;
 }
 
-export function guestStatusTimestamp(guest, event = {}) {
+export function guestStatusTimestamp(guest: GuestStatusRecord, event: EventDateRecord = {}): number {
   const value = guestStatusDate(guest, event);
   return value ? new Date(value).getTime() : 0;
 }
 
-function validDateValue(value) {
-  return Boolean(value) && !Number.isNaN(new Date(value).getTime());
+function validDateValue(value: unknown): boolean {
+  return Boolean(value) && !Number.isNaN(new Date(String(value)).getTime());
 }

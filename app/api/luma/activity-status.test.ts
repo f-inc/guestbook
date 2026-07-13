@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { activityRecordStatus, eventHasStarted } from "../../activity-status.mjs";
+import { activityRecordStatus, eventHasStarted } from "../../activity-status";
 
 const now = new Date("2026-07-12T22:00:00-07:00");
 

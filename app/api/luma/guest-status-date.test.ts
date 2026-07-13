@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { guestStatusDate, guestStatusTimestamp } from "../../guest-status-date.mjs";
+import { guestStatusDate, guestStatusTimestamp } from "../../guest-status-date";
 
 test("uses the timestamp matching the current guest state", () => {
   assert.equal(

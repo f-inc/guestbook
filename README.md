@@ -13,6 +13,7 @@ Guestbook is a compact event-ops console for Luma-backed communities. It gives t
 ## Stack
 
 - Next.js App Router
+- TypeScript
 - React
 - Tailwind CSS
 - Prisma

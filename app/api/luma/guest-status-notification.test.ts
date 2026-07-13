@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { MAX_GUEST_STATUS_MESSAGE_LENGTH, normalizeGuestStatusNotification } from "../../guest-status-notification.mjs";
+import { MAX_GUEST_STATUS_MESSAGE_LENGTH, normalizeGuestStatusNotification } from "../../guest-status-notification";
 
 test("normalizes an emailed guest status message", () => {
   assert.deepEqual(

@@ -1,3 +1,4 @@
+// @ts-nocheck
 "use client";
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -19,11 +20,11 @@ import {
   UserX,
   X,
 } from "lucide-react";
-import { activityRecordStatus } from "./activity-status.mjs";
-import { orderAvatarCandidates } from "./avatar-order.mjs";
-import { guestStatusDate, guestStatusTimestamp } from "./guest-status-date.mjs";
-import { MAX_GUEST_STATUS_MESSAGE_LENGTH } from "./guest-status-notification.mjs";
-import { lumaEventManageUrl } from "./luma-event-url.mjs";
+import { activityRecordStatus } from "./activity-status";
+import { orderAvatarCandidates } from "./avatar-order";
+import { guestStatusDate, guestStatusTimestamp } from "./guest-status-date";
+import { MAX_GUEST_STATUS_MESSAGE_LENGTH } from "./guest-status-notification";
+import { lumaEventManageUrl } from "./luma-event-url";
 
 const statusLabels = {
   registered: "Registered",

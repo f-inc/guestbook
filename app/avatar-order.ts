@@ -5,7 +5,9 @@ const sourcePriority = {
   x: 3,
 };
 
-export function avatarSource(value) {
+type AvatarSource = keyof typeof sourcePriority | "unknown";
+
+export function avatarSource(value: unknown): AvatarSource {
   if (typeof value !== "string" || !value.trim()) return "unknown";
   if (value.startsWith("/api/luma/avatar")) return "resolver";
 
@@ -21,11 +23,11 @@ export function avatarSource(value) {
   return "luma";
 }
 
-export function orderAvatarCandidates(...groups) {
-  const seen = new Set();
+export function orderAvatarCandidates(...groups: unknown[]): string[] {
+  const seen = new Set<string>();
   const candidates = groups
     .flat(Infinity)
-    .filter((value) => typeof value === "string" && (/^https?:\/\//i.test(value) || value.startsWith("/api/luma/avatar")))
+    .filter((value): value is string => typeof value === "string" && (/^https?:\/\//i.test(value) || value.startsWith("/api/luma/avatar")))
     .filter((value) => {
       if (seen.has(value)) return false;
       seen.add(value);

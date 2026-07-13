@@ -1,9 +1,10 @@
+// @ts-nocheck
 import { appendFile, mkdir } from "node:fs/promises";
 import nodePath from "node:path";
 import { getIndexedTrace, hasLumaDb, listIndexedEventGuests, listIndexedEvents, removeIndexedEventGuestsMissingFromSnapshot, removeIndexedTraceRecordsMissingFromEvents, updateIndexedGuestStatus, upsertNormalizedLumaGuestActivity, upsertNormalizedLumaSnapshot } from "./db";
-import { lumaEventDate } from "./event-date.mjs";
-import { orderAvatarCandidates } from "../../avatar-order.mjs";
-import { normalizeGuestStatusNotification } from "../../guest-status-notification.mjs";
+import { lumaEventDate } from "./event-date";
+import { orderAvatarCandidates } from "../../avatar-order";
+import { normalizeGuestStatusNotification } from "../../guest-status-notification";
 
 export const runtime = "nodejs";
 

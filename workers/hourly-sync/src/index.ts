@@ -1,9 +1,16 @@
+/// <reference types="@cloudflare/workers-types" />
+
+type Env = {
+  GUESTBOOK_APP_URL: string;
+  GUESTBOOK_SYNC_SECRET: string;
+};
+
 export default {
-  async scheduled(_controller, env, ctx) {
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
     ctx.waitUntil(syncGuestbook(env));
   },
 
-  async fetch(_request, env) {
+  async fetch(_request: Request, env: Env) {
     return Response.json({
       ok: true,
       worker: "guestbook-hourly-sync",
@@ -13,7 +20,7 @@ export default {
   },
 };
 
-async function syncGuestbook(env) {
+async function syncGuestbook(env: Env): Promise<void> {
   const response = await fetch(`${env.GUESTBOOK_APP_URL}/api/luma/sync`, {
     method: "POST",
     headers: {

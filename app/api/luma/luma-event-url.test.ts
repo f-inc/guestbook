@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { lumaEventManageUrl } from "../../luma-event-url.mjs";
+import { lumaEventManageUrl } from "../../luma-event-url";
 
 test("builds the precise Luma management URL from the API event id", () => {
   assert.equal(

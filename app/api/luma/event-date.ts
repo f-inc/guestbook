@@ -1,6 +1,8 @@
 const DEFAULT_EVENT_TIMEZONE = "America/Los_Angeles";
 
-export function lumaEventDate(event = {}, fallbackValue = "") {
+type LumaEventDateInput = Record<string, any>;
+
+export function lumaEventDate(event: LumaEventDateInput = {}, fallbackValue: unknown = ""): string {
   const source = firstString(event.start_at, event.startAt, fallbackValue, event.created_at);
   if (!source) return new Date().toISOString().slice(0, 10);
 
@@ -22,7 +24,7 @@ export function lumaEventDate(event = {}, fallbackValue = "") {
   }
 }
 
-export function lumaEventTimezone(event = {}) {
+export function lumaEventTimezone(event: LumaEventDateInput = {}): string {
   return firstString(
     event.timezone,
     event.time_zone,
@@ -37,6 +39,7 @@ export function lumaEventTimezone(event = {}) {
   );
 }
 
-function firstString(...values) {
-  return values.find((value) => typeof value === "string" && value.trim())?.trim() || "";
+function firstString(...values: unknown[]): string {
+  const value = values.find((candidate) => typeof candidate === "string" && candidate.trim());
+  return typeof value === "string" ? value.trim() : "";
 }

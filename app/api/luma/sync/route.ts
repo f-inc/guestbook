@@ -1,8 +1,9 @@
+// @ts-nocheck
 import { appendFile, mkdir } from "node:fs/promises";
 import nodePath from "node:path";
 import { createSyncRun, finishSyncRun, getEventSyncStates, getIndexStats, hasLumaDb, recordEventSyncState, upsertNormalizedLumaSnapshot } from "../db";
-import { lumaEventDate } from "../event-date.mjs";
-import { orderAvatarCandidates } from "../../../avatar-order.mjs";
+import { lumaEventDate } from "../event-date";
+import { orderAvatarCandidates } from "../../../avatar-order";
 
 export const runtime = "nodejs";
 

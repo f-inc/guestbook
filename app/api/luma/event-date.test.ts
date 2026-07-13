@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { lumaEventDate, lumaEventTimezone } from "./event-date.mjs";
+import { lumaEventDate, lumaEventTimezone } from "./event-date";
 
 test("converts a midnight UTC start into the event's local calendar day", () => {
   assert.equal(

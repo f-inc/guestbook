@@ -5,6 +5,7 @@ type HttpError = Error & { status?: number };
 import nodePath from "node:path";
 import { createSyncRun, finishSyncRun, getEventSyncStates, getIndexStats, hasLumaDb, recordEventSyncState, upsertNormalizedLumaSnapshot } from "../db";
 import { lumaEventDate } from "../event-date";
+import { requestedEventIds, shouldRefreshEventGuests } from "../sync-policy";
 import { orderAvatarCandidates } from "../../../avatar-order";
 import { requireSessionKey } from "../../session-auth";
 
@@ -12,6 +13,7 @@ export const runtime = "nodejs";
 
 const LUMA_BASE_URL = "https://public-api.luma.com";
 const DEFAULT_DEBUG_LOG_PATH = nodePath.join(/*turbopackIgnore: true*/ process.cwd(), ".debug", "luma-api.log");
+const SYNC_IN_FLIGHT_KEY = "__guestbookLumaSyncInFlight";
 
 const approvalToStatus = {
   approved: "going",
@@ -55,23 +57,88 @@ async function runSync(request: Request) {
   const people = new Set();
   let failedEventCount = 0;
   let truncatedGuestEventCount = 0;
+  let syncLockAcquired = false;
 
   try {
     requireSessionKey(request);
     assertApiKey();
     assertDb();
-    requireSyncAuth(request);
 
     const body = request.method === "POST" ? await readJsonBody(request) : {};
+    const upcomingScope = body.scope === "upcoming" && Array.isArray(body.eventIds);
+    requireSyncAuth(request, { allowSessionOnly: upcomingScope });
+    const runningRequestId = globalThis[SYNC_IN_FLIGHT_KEY];
+    if (runningRequestId) {
+      await debugLog(requestId, "luma sync skipped already running", { scope: upcomingScope ? "upcoming" : "full" });
+      return Response.json({ ok: true, status: "already_running", requestId, runningRequestId }, { status: 202 });
+    }
+    globalThis[SYNC_IN_FLIGHT_KEY] = requestId;
+    syncLockAcquired = true;
+
     const limits = syncLimits(body);
     currentSyncRequestDelayMs = limits.requestDelayMs;
     const forceRefresh = shouldForceRefresh(request, body);
-    await debugLog(requestId, "luma sync start", { limits, forceRefresh, hasEventIds: Array.isArray(body.eventIds) && body.eventIds.length > 0 });
-    syncRun = await createSyncRun({ requestId, limits });
+    await debugLog(requestId, "luma sync start", { limits, forceRefresh, scope: upcomingScope ? "upcoming" : "full", hasEventIds: Array.isArray(body.eventIds) && body.eventIds.length > 0 });
 
-    const rawEvents = await loadSyncEvents({ requestId, body, limits });
-    const managedEvents = rawEvents.entries.filter((event) => event.platform !== "external");
-    const syncStates = forceRefresh ? new Map() : await getEventSyncStates(managedEvents.map((event) => event.id).filter(Boolean));
+    let syncBody = body;
+    let syncStates = new Map();
+    if (upcomingScope && !forceRefresh) {
+      const eventIds = requestedEventIds(body, limits.maxEvents);
+      syncStates = await getEventSyncStates(eventIds);
+      const staleEventIds = eventIds.filter((eventId) => shouldRefreshEventGuests({
+        state: syncStates.get(eventId),
+        forceRefresh: false,
+        staleAfterMinutes: limits.staleAfterMinutes,
+      }).refresh);
+      skippedFreshEventCount = eventIds.length - staleEventIds.length;
+      eventCount = skippedFreshEventCount;
+      syncBody = { ...body, eventIds: staleEventIds };
+      await debugLog(requestId, "luma sync upcoming freshness check", {
+        requestedEventCount: eventIds.length,
+        staleEventCount: staleEventIds.length,
+        skippedFreshEventCount,
+      });
+      if (!staleEventIds.length) {
+        return Response.json({
+          ok: true,
+          status: "fresh",
+          requestId,
+          eventCount,
+          refreshedEventCount: 0,
+          skippedFreshEventCount,
+          guestCount: 0,
+          personCount: 0,
+          failedEventCount: 0,
+          truncated: false,
+          limits,
+        });
+      }
+    }
+
+    syncRun = await createSyncRun({ requestId, limits });
+    const rawEvents = await loadSyncEvents({ requestId, body: syncBody, limits });
+    for (const failure of rawEvents.failures || []) {
+      eventCount += 1;
+      failedEventCount += 1;
+      const missing = failure.status === 404;
+      await recordEventSyncState({
+        eventId: failure.eventId,
+        guestCount: 0,
+        status: missing ? "not_found" : "error",
+        truncated: false,
+        error: missing ? null : failure.message,
+      }).catch(() => {});
+      await debugLog(requestId, "luma sync event metadata skipped", {
+        eventId: failure.eventId,
+        status: failure.status,
+        missing,
+        message: failure.message,
+      }, missing ? "info" : "error");
+    }
+    const managedEvents = rawEvents.entries
+      .filter((event) => event.platform !== "external")
+      .filter((event) => !upcomingScope || isUpcomingSyncEvent(event));
+    if (!upcomingScope && !forceRefresh) syncStates = await getEventSyncStates(managedEvents.map((event) => event.id).filter(Boolean));
 
     for (const rawEvent of managedEvents) {
       const event = normalizeEvent(rawEvent);
@@ -84,19 +151,6 @@ async function runSync(request: Request) {
         });
 
         if (!syncDecision.refresh) {
-          await upsertNormalizedLumaSnapshot({
-            rawEvent,
-            event,
-            guests: [],
-            rawGuests: [],
-          });
-          await recordEventSyncState({
-            eventId: event.id,
-            guestCount: syncDecision.lastGuestCount,
-            status: "skipped_fresh",
-            truncated: false,
-            syncGuests: false,
-          });
           skippedFreshEventCount += 1;
           await debugLog(requestId, "luma sync event skipped fresh", { eventId: event.id, reason: syncDecision.reason, lastGuestSyncAt: syncDecision.lastGuestSyncAt });
           continue;
@@ -205,22 +259,32 @@ async function runSync(request: Request) {
     }
     await debugLog(requestId, "luma sync error", { status: error.status || 500, message: error.message, durationMs: Date.now() - startedAt }, "error");
     return jsonError(error, requestId);
+  } finally {
+    if (syncLockAcquired && globalThis[SYNC_IN_FLIGHT_KEY] === requestId) delete globalThis[SYNC_IN_FLIGHT_KEY];
   }
 }
 
 async function loadSyncEvents({ requestId, body, limits }: AnyRecord) {
-  const eventIds = Array.isArray(body.eventIds) ? body.eventIds.filter((eventId) => typeof eventId === "string" && eventId.trim()).slice(0, limits.maxEvents) : [];
-  if (eventIds.length) {
+  if (Array.isArray(body.eventIds)) {
+    const eventIds = requestedEventIds(body, limits.maxEvents);
     const entries = [];
+    const failures = [];
     for (const eventId of eventIds) {
-      entries.push(
-        await lumaFetch("/v1/events/get", {
+      try {
+        entries.push(await lumaFetch("/v1/events/get", {
           requestId,
           params: { event_id: eventId },
-        }),
-      );
+        }));
+      } catch (error) {
+        if (error.status !== 404) throw error;
+        failures.push({
+          eventId,
+          status: error.status || 500,
+          message: error.message,
+        });
+      }
     }
-    return { entries, truncated: body.eventIds.length > eventIds.length };
+    return { entries, failures, truncated: body.eventIds.length > eventIds.length };
   }
 
   return fetchBounded("/v1/calendars/events/list", {
@@ -315,25 +379,21 @@ function shouldForceRefresh(request: Request, body: AnyRecord = {}) {
   return body.force === true || body.refresh === true || url.searchParams.get("force") === "1" || url.searchParams.get("refresh") === "1";
 }
 
-function shouldRefreshEventGuests({ state, forceRefresh, staleAfterMinutes }) {
-  if (forceRefresh) return { refresh: true, reason: "force" };
-  if (!state) return { refresh: true, reason: "never_synced" };
-  if (state.error) return { refresh: true, reason: "previous_error" };
-  if (state.truncated) return { refresh: true, reason: "previous_truncated" };
-  if (state.lastStatus && !["success", "skipped_fresh"].includes(state.lastStatus)) return { refresh: true, reason: "previous_status_" + state.lastStatus };
-  if (!state.lastGuestSyncAt) return { refresh: true, reason: "missing_guest_sync_time" };
+function isUpcomingSyncEvent(event) {
+  const eventDate = lumaEventDate(event);
+  return Boolean(eventDate) && eventDate >= syncTodayKey();
+}
 
-  const staleMs = staleAfterMinutes * 60 * 1000;
-  if (staleMs === 0) return { refresh: true, reason: "stale_disabled" };
-  const ageMs = Date.now() - new Date(state.lastGuestSyncAt).getTime();
-  if (!Number.isFinite(ageMs) || ageMs >= staleMs) return { refresh: true, reason: "stale" };
-
-  return {
-    refresh: false,
-    reason: "fresh",
-    lastGuestSyncAt: state.lastGuestSyncAt.toISOString(),
-    lastGuestCount: state.lastGuestCount || 0,
-  };
+function syncTodayKey() {
+  const timeZone = process.env.LUMA_DEFAULT_TIMEZONE || "America/Los_Angeles";
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
 }
 
 let lastSyncRequestAt = 0;
@@ -715,7 +775,8 @@ function firstTag(event) {
   return tag?.name || tag?.tag_name || tag || null;
 }
 
-function requireSyncAuth(request) {
+function requireSyncAuth(request, { allowSessionOnly = false } = {}) {
+  if (allowSessionOnly) return;
   const secret = process.env.GUESTBOOK_SYNC_SECRET;
   if (!secret && process.env.NODE_ENV !== "production") return;
   if (!secret) {

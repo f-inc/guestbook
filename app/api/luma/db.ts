@@ -3,9 +3,51 @@ import { Prisma, PrismaClient } from "@prisma/client";
 type AnyRecord = Record<string, any>;
 type HttpError = Error & { status?: number };
 import { orderAvatarCandidates } from "../../avatar-order";
+import { databaseUrlWithPoolLimits } from "./database-url";
 import { lumaEventDate } from "./event-date";
+import { eventGuestWhere, guestStatusWhere, type GuestFilter, type GuestListQuery } from "./guest-query";
+import { normalizePersonTags } from "./person-tags";
+import { buildRegistrationQuestionAnalytics } from "../../event-analytics";
 
-const PRISMA_KEY = "__guestbookPrismaClient";
+const PRISMA_KEY = "__guestbookPrismaClientV3";
+const LEGACY_PRISMA_KEYS = ["__guestbookPrismaClientV2", "__guestbookPrismaClient"];
+
+const INDEXED_PERSON_SELECT = {
+  personId: true,
+  lumaUserId: true,
+  email: true,
+  name: true,
+  title: true,
+  bio: true,
+  avatarUrl: true,
+  profileUrl: true,
+  socialLinks: true,
+  referrer: true,
+  groups: true,
+  tags: true,
+};
+
+const INDEXED_GUEST_SELECT = {
+  eventId: true,
+  personId: true,
+  lumaGuestId: true,
+  email: true,
+  status: true,
+  lumaApprovalStatus: true,
+  registeredAt: true,
+  invitedAt: true,
+  createdAt: true,
+  updatedAt: true,
+  approvedAt: true,
+  checkedInAt: true,
+  profileDescription: true,
+  registrationAnswers: true,
+  socialLinks: true,
+  referrer: true,
+  searchText: true,
+  lastSeenAt: true,
+  person: { select: INDEXED_PERSON_SELECT },
+};
 
 export function hasLumaDb() {
   return Boolean(process.env.DB_URL);
@@ -26,18 +68,48 @@ export async function listIndexedEvents({ limit = 100 } = {}) {
   };
 }
 
-export async function listIndexedEventGuests(eventId, { limit = 1000 } = {}) {
+export async function listIndexedEventGuests(
+  eventId: string,
+  query: GuestListQuery = { filter: "all", search: "", tags: [], cursor: 0, pageSize: 50 },
+) {
   const db = prisma();
-  const rows = await db.lumaEventGuest.findMany({
-    where: { eventId },
-    include: { person: true },
-    take: limit,
-    orderBy: [{ checkedInAt: "desc" }, { registeredAt: "desc" }, { createdAt: "desc" }, { lastSeenAt: "desc" }],
-  });
+  const where = eventGuestWhere(eventId, query);
+  const statWhere = (filter: GuestFilter) => {
+    const statusWhere = guestStatusWhere(eventId, filter);
+    return { eventId, ...(statusWhere ? { AND: [statusWhere] } : {}) };
+  };
+  const newFaceWhere = guestStatusWhere(eventId, "new_faces");
+  const [rows, filteredCount, total, checkedIn, accepted, registered, invited, waitlisted, newFaces, analyticsQuestionRows] = await db.$transaction([
+    db.lumaEventGuest.findMany({
+      where,
+      select: INDEXED_GUEST_SELECT,
+      skip: query.cursor,
+      take: query.pageSize,
+      orderBy: [{ checkedInAt: "desc" }, { registeredAt: "desc" }, { createdAt: "desc" }, { lastSeenAt: "desc" }],
+    }),
+    db.lumaEventGuest.count({ where }),
+    db.lumaEventGuest.count({ where: { eventId } }),
+    db.lumaEventGuest.count({ where: statWhere("checked_in") }),
+    db.lumaEventGuest.count({ where: statWhere("accepted") }),
+    db.lumaEventGuest.count({ where: statWhere("registered") }),
+    db.lumaEventGuest.count({ where: statWhere("invited") }),
+    db.lumaEventGuest.count({ where: statWhere("waitlisted") }),
+    db.lumaEventGuest.count({ where: statWhere("new_faces") }),
+    db.lumaEventGuest.findMany({
+      where: {
+        eventId,
+        status: { in: ["registered", "going", "waitlisted", "checked_in", "declined", "no_show"] },
+        ...(newFaceWhere ? { AND: [newFaceWhere] } : {}),
+      },
+      select: { personId: true, registrationAnswers: true },
+      take: safeInt("LUMA_ANALYTICS_MAX_NEW_FACES", 1000, 1, 5000),
+      orderBy: [{ registeredAt: "desc" }, { createdAt: "desc" }, { lastSeenAt: "desc" }],
+    }),
+  ]);
 
   const personIds = [...new Set(rows.map((row) => row.personId))];
-  const [attendedCounts, registeredCounts] = personIds.length
-    ? await Promise.all([
+  const [attendedCounts, registeredCounts, historyCounts] = personIds.length
+    ? await db.$transaction([
         db.lumaEventGuest.groupBy({
           by: ["personId"],
           where: {
@@ -54,23 +126,37 @@ export async function listIndexedEventGuests(eventId, { limit = 1000 } = {}) {
           },
           _count: { _all: true },
         }),
+        db.lumaEventGuest.groupBy({
+          by: ["personId"],
+          where: {
+            personId: { in: personIds },
+            eventId: { not: eventId },
+          },
+          _count: { _all: true },
+        }),
       ])
-    : [[], []];
+    : [[], [], []];
 
-  const eventCountsByPerson = new Map(personIds.map((personId) => [personId, { attended: 0, registered: 0 }]));
+  const eventCountsByPerson = new Map(personIds.map((personId) => [personId, { attended: 0, registered: 0, history: 0 }]));
   attendedCounts.forEach((row) => {
     eventCountsByPerson.get(row.personId).attended = row._count._all;
   });
   registeredCounts.forEach((row) => {
     eventCountsByPerson.get(row.personId).registered = row._count._all;
   });
+  historyCounts.forEach((row) => {
+    eventCountsByPerson.get(row.personId).history = row._count._all;
+  });
 
   const peopleById = new Map();
   const guests = rows.map((row) => {
     const person = indexedPersonToApiPerson(row.person, row);
     if (!peopleById.has(person.id)) peopleById.set(person.id, person);
-    return indexedGuestToApiGuest(row, eventCountsByPerson.get(row.personId));
+    const eventCounts = eventCountsByPerson.get(row.personId);
+    return { ...indexedGuestToApiGuest(row, eventCounts), isNewFace: eventCounts.history === 0 };
   });
+
+  const nextCursor = query.cursor + rows.length;
 
   return {
     source: "luma-index",
@@ -79,7 +165,39 @@ export async function listIndexedEventGuests(eventId, { limit = 1000 } = {}) {
     people: [...peopleById.values()],
     loadedAt: new Date().toISOString(),
     indexed: true,
+    stats: { total, checkedIn, accepted, registered, invited, waitlisted, newFaces },
+    analyticsQuestions: buildRegistrationQuestionAnalytics(analyticsQuestionRows),
+    pageInfo: {
+      total: filteredCount,
+      pageSize: query.pageSize,
+      hasMore: nextCursor < filteredCount,
+      nextCursor: nextCursor < filteredCount ? String(nextCursor) : null,
+    },
+    query: { filter: query.filter, search: query.search, tags: query.tags },
   };
+}
+
+export async function listIndexedPersonTags() {
+  const rows = await prisma().$queryRaw<Array<{ tag: string }>>(Prisma.sql`
+    SELECT DISTINCT tag_value AS tag
+    FROM luma_people
+    CROSS JOIN LATERAL jsonb_array_elements_text(
+      CASE WHEN jsonb_typeof(tags) = 'array' THEN tags ELSE '[]'::jsonb END
+    ) AS tag_values(tag_value)
+    WHERE length(tag_value) > 0
+    ORDER BY tag_value
+    LIMIT 500
+  `);
+  return rows.map((row) => row.tag);
+}
+
+export async function setIndexedPersonTags(personId: string, value: unknown) {
+  const tags = normalizePersonTags(value);
+  return prisma().lumaPerson.update({
+    where: { personId },
+    data: { tags: sanitizeJson(tags) },
+    select: { personId: true, tags: true },
+  });
 }
 
 export async function getIndexedTrace({ tracePersonId, traceEmail, limit = 500 }: AnyRecord = {}) {
@@ -100,7 +218,19 @@ export async function getIndexedTrace({ tracePersonId, traceEmail, limit = 500 }
 
   const rows = await prisma().lumaEventGuest.findMany({
     where: { OR: guestMatches },
-    include: { event: true, person: true },
+    select: {
+      ...INDEXED_GUEST_SELECT,
+      event: {
+        select: {
+          title: true,
+          date: true,
+          startsAt: true,
+          category: true,
+          location: true,
+          lumaUrl: true,
+        },
+      },
+    },
     take: limit,
     orderBy: [{ checkedInAt: "desc" }, { registeredAt: "desc" }, { createdAt: "desc" }, { lastSeenAt: "desc" }],
   });
@@ -180,7 +310,7 @@ export async function updateIndexedGuestStatus({ eventId, lumaGuestId, status, l
 
 export async function getIndexStats() {
   const db = prisma();
-  const [eventCount, personCount, guestRecordCount, lastGuest, lastEvent, lastRun, truncatedEventCount, errorEventCount, runningSyncRunCount, truncatedEvents] = await Promise.all([
+  const [eventCount, personCount, guestRecordCount, lastGuest, lastEvent, lastRun, truncatedEventCount, errorEventCount, runningSyncRunCount, truncatedEvents] = await db.$transaction([
     db.lumaEvent.count(),
     db.lumaPerson.count(),
     db.lumaEventGuest.count(),
@@ -356,6 +486,46 @@ export async function upsertNormalizedLumaSnapshot({ rawEvent, event, guests = [
   };
 }
 
+export async function upsertNormalizedLumaEvents(snapshots: Array<{ rawEvent: AnyRecord; event: AnyRecord }>) {
+  if (!hasLumaDb() || !snapshots.length) return { skipped: !hasLumaDb(), eventCount: 0 };
+
+  const now = new Date();
+  const rows = snapshots.map(({ rawEvent, event }) => {
+    const data = normalizedEventData(event, rawEvent, now);
+    return { ...data, rawJson: JSON.stringify(data.raw) };
+  });
+
+  await prisma().$executeRaw(
+    Prisma.sql`
+      INSERT INTO "luma_events" (
+        "event_id", "title", "date", "starts_at", "location", "category",
+        "capacity", "luma_url", "raw", "last_seen_at", "synced_at"
+      )
+      VALUES ${Prisma.join(
+        rows.map(
+          (row) => Prisma.sql`(
+            ${row.eventId}, ${row.title}, ${row.date}, ${row.startsAt}, ${row.location}, ${row.category},
+            ${row.capacity}, ${row.lumaUrl}, ${row.rawJson}::jsonb, ${row.lastSeenAt}, ${row.syncedAt}
+          )`,
+        ),
+      )}
+      ON CONFLICT ("event_id") DO UPDATE SET
+        "title" = EXCLUDED."title",
+        "date" = EXCLUDED."date",
+        "starts_at" = EXCLUDED."starts_at",
+        "location" = EXCLUDED."location",
+        "category" = EXCLUDED."category",
+        "capacity" = EXCLUDED."capacity",
+        "luma_url" = EXCLUDED."luma_url",
+        "raw" = EXCLUDED."raw",
+        "last_seen_at" = EXCLUDED."last_seen_at",
+        "synced_at" = EXCLUDED."synced_at"
+    `,
+  );
+
+  return { skipped: false, eventCount: rows.length };
+}
+
 export async function upsertNormalizedLumaGuestActivity({ event, guest, rawGuest = {} }) {
   if (!hasLumaDb()) return { skipped: true, guestCount: 0, personCount: 0 };
   const uniquePeople = new Set();
@@ -377,13 +547,42 @@ function prisma() {
   }
 
   if (!globalThis[PRISMA_KEY]) {
-    globalThis[PRISMA_KEY] = new PrismaClient();
+    for (const legacyKey of LEGACY_PRISMA_KEYS) {
+      const legacyClient = globalThis[legacyKey];
+      if (legacyClient?.$disconnect) void legacyClient.$disconnect().catch(() => {});
+      delete globalThis[legacyKey];
+    }
+
+    const connectionLimit = safeInt("DB_CONNECTION_LIMIT", 2, 1, 10);
+    const poolTimeoutSeconds = safeInt("DB_POOL_TIMEOUT_SECONDS", 20, 1, 60);
+    const preferSupabaseTransactionPooler = process.env.DB_RUNTIME_POOL_MODE !== "session";
+    globalThis[PRISMA_KEY] = new PrismaClient({
+      datasources: {
+        db: {
+          url: databaseUrlWithPoolLimits(process.env.DB_RUNTIME_URL || process.env.DB_URL, {
+            connectionLimit,
+            poolTimeoutSeconds,
+            preferSupabaseTransactionPooler,
+          }),
+        },
+      },
+    });
   }
   return globalThis[PRISMA_KEY];
 }
 
 async function upsertEvent(tx, event, rawEvent = {}) {
-  const data = {
+  const data = normalizedEventData(event, rawEvent);
+
+  await tx.lumaEvent.upsert({
+    where: { eventId: data.eventId },
+    create: data,
+    update: data,
+  });
+}
+
+function normalizedEventData(event, rawEvent = {}, now = new Date()) {
+  return {
     eventId: event.id,
     title: event.title || "Untitled event",
     date: parseDateOnly(event.date || event.startsAt),
@@ -393,15 +592,9 @@ async function upsertEvent(tx, event, rawEvent = {}) {
     capacity: Number.isFinite(event.capacity) ? event.capacity : null,
     lumaUrl: event.lumaUrl || null,
     raw: sanitizeJson(rawEvent || {}),
-    lastSeenAt: new Date(),
-    syncedAt: new Date(),
+    lastSeenAt: now,
+    syncedAt: now,
   };
-
-  await tx.lumaEvent.upsert({
-    where: { eventId: data.eventId },
-    create: data,
-    update: data,
-  });
 }
 
 async function upsertGuestChunk(tx, event, guests, rawGuests, uniquePeople) {
@@ -453,6 +646,7 @@ function normalizeGuestRows(event, guest, rawGuest = {}, now = new Date()) {
       socialLinks: sanitizeJson(socialLinks || []),
       referrer: jsonOrNull(referrer),
       groups: sanitizeJson(person.groups || []),
+      tags: [],
       raw: sanitizeJson(rawGuest || {}),
       lastSeenAt: now,
       syncedAt: now,
@@ -501,6 +695,7 @@ async function bulkUpsertPeople(tx, rows) {
       social_links,
       referrer,
       groups,
+      tags,
       raw,
       last_seen_at,
       synced_at
@@ -521,6 +716,7 @@ async function bulkUpsertPeople(tx, rows) {
           ${toJsonString(row.socialLinks)}::jsonb,
           ${toNullableJsonString(row.referrer)}::jsonb,
           ${toJsonString(row.groups)}::jsonb,
+          ${toJsonString(row.tags)}::jsonb,
           ${toJsonString(row.raw)}::jsonb,
           ${row.lastSeenAt},
           ${row.syncedAt}
@@ -662,6 +858,7 @@ async function upsertGuest(tx, event, guest, rawGuest = {}) {
       socialLinks: sanitizeJson(socialLinks || []),
       referrer: jsonOrUndefined(referrer),
       groups: sanitizeJson(person.groups || []),
+      tags: [],
       raw: sanitizeJson(rawGuest || {}),
       lastSeenAt: now,
       syncedAt: now,
@@ -779,6 +976,7 @@ function indexedPersonToApiPerson(row: any, guestRow: any = {}) {
     socialLinks: row.socialLinks || guestRow.socialLinks || [],
     referrer: row.referrer || guestRow.referrer || null,
     groups: row.groups || [],
+    tags: row.tags || [],
     notes: row.bio || guestRow.profileDescription || "",
     source: "luma",
     dataSource: "luma-index",
@@ -841,12 +1039,7 @@ function indexedGuestToTraceRecord(row) {
 }
 
 function indexedRegisteredAt(row) {
-  const raw = row?.raw && typeof row.raw === "object" && !Array.isArray(row.raw) ? row.raw : {};
-  const hasRawRegistration = [raw.registered_at, raw.joined_at].some(
-    (value) => typeof value === "string" && value.trim(),
-  );
-
-  if (row?.status === "invited" && !hasRawRegistration) return null;
+  if (row?.status === "invited" && !row?.registeredAt) return null;
   return isoOrNull(row?.registeredAt);
 }
 

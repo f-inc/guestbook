@@ -1,0 +1,2 @@
+ALTER TABLE luma_people
+ADD COLUMN IF NOT EXISTS tags JSONB NOT NULL DEFAULT '[]'::jsonb;

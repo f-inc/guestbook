@@ -26,25 +26,32 @@ export async function GET(request: Request) {
   if (!personId || personId.length > 200) return new Response(null, { status: 400 });
 
   const missedAt = missCache.get(personId);
-  if (missedAt && Date.now() - missedAt < MISS_TTL_MS) return new Response(null, { status: 404 });
+  if (missedAt && Date.now() - missedAt < MISS_TTL_MS) return avatarMissResponse();
 
   try {
     const avatarUrl = await resolveAvatarOnce(personId);
     if (!avatarUrl) {
       missCache.set(personId, Date.now());
-      return new Response(null, { status: 404 });
+      return avatarMissResponse();
     }
     missCache.delete(personId);
     return new Response(null, {
       status: 307,
       headers: {
         location: avatarUrl,
-        "cache-control": "private, no-store",
+        "cache-control": "private, max-age=86400",
       },
     });
   } catch {
-    return new Response(null, { status: 404 });
+    return avatarMissResponse();
   }
+}
+
+function avatarMissResponse() {
+  return new Response(null, {
+    status: 404,
+    headers: { "cache-control": "private, max-age=21600" },
+  });
 }
 
 async function resolveAvatarOnce(personId) {

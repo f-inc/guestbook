@@ -5,6 +5,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowRight,
   BadgeCheck,
+  BarChart3,
   CircleCheck,
   CircleX,
   Clock3,
@@ -13,19 +14,27 @@ import {
   MailPlus,
   Mail,
   MapPin,
+  MessageSquare,
   Pencil,
   Plus,
   RefreshCw,
   Search,
+  Send,
+  Tag,
   Undo2,
+  UserMinus,
+  UserPlus,
+  Users,
   UserX,
   X,
 } from "lucide-react";
 import { activityRecordStatus } from "./activity-status";
 import { orderAvatarCandidates } from "./avatar-order";
 import { guestStatusDate, guestStatusTimestamp } from "./guest-status-date";
+import { MAX_INVITE_MESSAGE_LENGTH } from "./invite-message";
 import { MAX_GUEST_STATUS_MESSAGE_LENGTH } from "./guest-status-notification";
 import { lumaEventManageUrl } from "./luma-event-url";
+import { buildRegistrationQuestionAnalytics, eventWideAnalyticsCounts } from "./event-analytics";
 
 const statusLabels = {
   registered: "Registered",
@@ -58,6 +67,31 @@ const sourceStatusDefaults = ["going", "checked_in"];
 const LIVE_WRITE_CONFIRMATION = "CONFIRM_LUMA_WRITE";
 const EVENT_PAGE_SIZE = 10;
 const EVENT_SCROLL_THRESHOLD = 96;
+const GUEST_PAGE_SIZE = 50;
+const GUEST_SEARCH_DEBOUNCE_MS = 250;
+const UPCOMING_AUTO_SYNC_MAX_EVENTS = 100;
+const UPCOMING_AUTO_SYNC_STALE_MINUTES = 5;
+const guestFilterOptions = [
+  { value: "all", label: "All guests" },
+  { value: "checked_in", label: "Checked in" },
+  { value: "accepted", label: "Accepted" },
+  { value: "registered", label: "Registered" },
+  { value: "invited", label: "Invited" },
+  { value: "waitlisted", label: "Waitlisted" },
+  { value: "new_faces", label: "New faces" },
+  { value: "declined", label: "Declined" },
+  { value: "no_show", label: "No-show" },
+];
+const eventTabs = [
+  { id: "overview", label: "Overview", icon: Users },
+  { id: "invite", label: "Invite", icon: Send },
+  { id: "analytics", label: "Analytics", icon: BarChart3 },
+];
+const inviteMessageTemplates = [
+  { id: "past-attendee", label: "Past attendee", message: (event) => `We'd love to have you back for ${event?.title || "our next event"}. Hope you can join us.` },
+  { id: "builder-community", label: "Builder community", message: (event) => `${event?.title || "This event"} felt relevant to what you're building. We'd be glad to have you there.` },
+  { id: "personal-invite", label: "Personal invite", message: (event) => `I'd love for you to join us at ${event?.title || "this event"}. Let me know if you can make it.` },
+];
 const SESSION_KEY_STORAGE_KEY = "guestbook.sessionKey";
 const SESSION_KEY_HEADER = "x-guestbook-session-key";
 const SESSION_KEY_COOKIE = "guestbook_session_key";
@@ -70,6 +104,7 @@ const initialState = {
     event: "upcoming",
     guestStatus: "all",
     guestSearch: "",
+    guestTags: [],
     globalSearch: "",
     memberSearch: "",
   },
@@ -77,10 +112,15 @@ const initialState = {
     targetEventId: "",
     sourceEventId: "",
     sourceStatuses: ["going", "checked_in"],
+    includeEventIds: [],
+    excludeEventIds: [],
     includeGroups: [],
     excludeGroups: [],
+    includePeople: [],
+    excludePeople: [],
   },
   groups: [],
+  tags: [],
   people: [],
   events: [],
 };
@@ -90,14 +130,18 @@ export default function Home() {
   const [toastSequence, setToastSequence] = useState(0);
   const [toastVisible, setToastVisible] = useState(true);
   const [profilePanelOpen, setProfilePanelOpen] = useState(false);
+  const [activeEventTab, setActiveEventTab] = useState("overview");
   const [loadingGuestEvents, setLoadingGuestEvents] = useState([]);
   const [eventDraft, setEventDraft] = useState(null);
   const [guestStatusDraft, setGuestStatusDraft] = useState(null);
+  const [tagEditorDraft, setTagEditorDraft] = useState(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [universalQuery, setUniversalQuery] = useState("");
   const universalSearchInputRef = useRef(null);
   const guestRequestsRef = useRef(new Set());
+  const latestGuestRequestRef = useRef(new Map());
   const traceRequestsRef = useRef(new Set());
+  const upcomingSyncInFlightRef = useRef(false);
   const eventListRef = useRef(null);
   const eventEndRef = useRef(null);
   const eventWindowRef = useRef({ start: 0, end: EVENT_PAGE_SIZE });
@@ -107,6 +151,14 @@ export default function Home() {
   const [eventWindow, setEventWindow] = useState({ start: 0, end: EVENT_PAGE_SIZE });
   const [newGroup, setNewGroup] = useState({ name: "", color: "#0f766e" });
   const [audienceName, setAudienceName] = useState("");
+  const [inviteMessage, setInviteMessage] = useState("");
+  const [inviteTemplateId, setInviteTemplateId] = useState("");
+  const [debouncedGuestSearch, setDebouncedGuestSearch] = useState("");
+  const [selectedGuestIds, setSelectedGuestIds] = useState(new Set());
+  const [bulkSendEmail, setBulkSendEmail] = useState(false);
+  const [bulkMessage, setBulkMessage] = useState("");
+  const [bulkSubmitting, setBulkSubmitting] = useState(false);
+  const [upcomingSyncVersion, setUpcomingSyncVersion] = useState(0);
   const [sessionStatus, setSessionStatus] = useState("checking");
   const [sessionKey, setSessionKey] = useState("");
   const [sessionKeyDraft, setSessionKeyDraft] = useState("");
@@ -218,6 +270,66 @@ export default function Home() {
     return () => window.clearTimeout(timeout);
   }, [toastSequence, apiState.message, apiState.status]);
 
+  useEffect(() => {
+    const timeout = window.setTimeout(
+      () => setDebouncedGuestSearch(state.filters.guestSearch.trim()),
+      GUEST_SEARCH_DEBOUNCE_MS,
+    );
+    return () => window.clearTimeout(timeout);
+  }, [state.filters.guestSearch]);
+
+  const syncUpcomingEvents = async (events, { reason = "load" } = {}) => {
+    const eventIds = unique(
+      (events || [])
+        .filter((event) => event.source === "luma" && isUpcoming(event))
+        .map((event) => event.id)
+        .filter(Boolean),
+    ).slice(0, UPCOMING_AUTO_SYNC_MAX_EVENTS);
+    if (!eventIds.length || upcomingSyncInFlightRef.current) return null;
+
+    upcomingSyncInFlightRef.current = true;
+    try {
+      const response = await apiFetch("/api/luma/sync", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          scope: "upcoming",
+          trigger: reason,
+          eventIds,
+          maxEvents: eventIds.length,
+          staleAfterMinutes: UPCOMING_AUTO_SYNC_STALE_MINUTES,
+        }),
+      });
+      const data: any = await response.json();
+      if (!response.ok || (data.ok === false && data.status !== "partial_error")) {
+        throw new Error(withRequestId(data.error || "Unable to sync upcoming events.", data.requestId));
+      }
+      if (data.status === "already_running") return data;
+
+      if (data.refreshedEventCount > 0) {
+        setUpcomingSyncVersion((current) => current + 1);
+        setActivityTraces({});
+        setApiState({
+          status: "live",
+          message: data.failedEventCount
+            ? `Updated ${data.refreshedEventCount} upcoming event${data.refreshedEventCount === 1 ? "" : "s"}; skipped ${data.failedEventCount} unavailable event${data.failedEventCount === 1 ? "" : "s"}.`
+            : `Updated ${data.refreshedEventCount} upcoming event${data.refreshedEventCount === 1 ? "" : "s"}.`,
+        });
+      } else if (data.failedEventCount) {
+        setApiState({
+          status: "error",
+          message: withRequestId(`Skipped ${data.failedEventCount} unavailable upcoming event${data.failedEventCount === 1 ? "" : "s"}.`, data.requestId),
+        });
+      }
+      return data;
+    } catch (error) {
+      setApiState({ status: "error", message: error.message });
+      return null;
+    } finally {
+      upcomingSyncInFlightRef.current = false;
+    }
+  };
+
   const loadLumaEvents = async ({ cancelled = () => false }: { cancelled?: () => boolean } = {}) => {
     setApiState({ status: "loading", message: "Checking cached Luma events." });
     try {
@@ -230,8 +342,21 @@ export default function Home() {
       const cacheText = data.cached ? "Used cached Luma events." : `Loaded ${data.events.length} Luma events.`;
       const requestText = data.requestId ? ` Request ${data.requestId}.` : "";
       setApiState({ status: "live", message: `${cacheText}${truncatedText}${requestText}` });
+      return data;
     } catch (error) {
       if (cancelled()) return;
+      setApiState({ status: "error", message: error.message });
+      return null;
+    }
+  };
+
+  const loadAvailableTags = async () => {
+    try {
+      const response = await apiFetch("/api/tags", { cache: "no-store" });
+      const data: any = await response.json();
+      if (!response.ok) throw new Error(data.error || "Unable to load guest tags.");
+      setState((current) => normalizeState({ ...current, tags: data.tags || [] }));
+    } catch (error) {
       setApiState({ status: "error", message: error.message });
     }
   };
@@ -239,11 +364,27 @@ export default function Home() {
   useEffect(() => {
     if (sessionStatus !== "ready" || !sessionKey) return;
     let cancelled: boolean = false;
-    loadLumaEvents({ cancelled: () => cancelled });
+    loadLumaEvents({ cancelled: () => cancelled }).then((data) => {
+      if (!cancelled && data?.events) void syncUpcomingEvents(data.events, { reason: "load" });
+    });
     return () => {
       cancelled = true;
     };
   }, [sessionStatus, sessionKey]);
+
+  useEffect(() => {
+    if (sessionStatus !== "ready" || !sessionKey) return;
+    void loadAvailableTags();
+  }, [sessionStatus, sessionKey]);
+
+  useEffect(() => {
+    if (sessionStatus !== "ready" || !sessionKey) return;
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") void syncUpcomingEvents(state.events, { reason: "tab_active" });
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, [sessionStatus, sessionKey, state.events]);
 
   const selectedEvent = getEvent(state, state.selectedEventId);
   const selectedEventManageUrl = lumaEventManageUrl(selectedEvent);
@@ -251,24 +392,25 @@ export default function Home() {
   const selectedTrace = selectedPerson ? activityTraces[selectedPerson.id] || { status: "idle", records: [] } : { status: "idle", records: [] };
 
   const inviteAudience = useMemo(() => computeInviteAudience(state), [state]);
+  const selectedEventAnalytics = useMemo(() => buildEventAnalytics(state, selectedEvent), [state, selectedEvent]);
   const filteredEvents = useMemo(() => visibleEvents(state), [state]);
   const eventListKey = `${state.filters.event}:${state.filters.globalSearch.trim().toLowerCase()}`;
   const eventListSignature = filteredEvents.map((event) => `${event.id}:${event.date}`).join("|");
   const eventAnchorId = state.filters.event === "all" ? nearestUpcomingEventId(filteredEvents) : "";
   const renderedEvents = filteredEvents.slice(eventWindow.start, eventWindow.end);
   const visibleGuests = useMemo(() => eventGuests(state, selectedEvent), [state, selectedEvent]);
+  const guestTagFilterKey = state.filters.guestTags.join("\u0000");
   const universalResults = useMemo(() => universalSearchResults(state, universalQuery), [state, universalQuery]);
   const universalResultCount = universalResults.events.length + universalResults.people.length + universalResults.groups.length;
   const showGuestGroups = visibleGuests.some(({ person }) => person.groups.length > 0);
-  const guestTableColumnCount = 6 + Number(showGuestGroups);
+  const guestTableColumnCount = 9 + Number(showGuestGroups);
   const hasSelectedProfile = hasProfileContent(state, selectedPerson);
   const showProfilePanel = profilePanelOpen && hasSelectedProfile;
   const inviteTargetEvent = getEvent(state, state.invite.targetEventId);
-  const inviteSourceEvent = getEvent(state, state.invite.sourceEventId);
   const selectedEventLoadingGuests = selectedEvent ? loadingGuestEvents.includes(selectedEvent.id) : false;
   const selectedEventNeedsGuestLoad = selectedEvent?.source === "luma" && !selectedEvent.guestsLoaded;
-  const inviteSourceLoadingGuests = inviteSourceEvent ? loadingGuestEvents.includes(inviteSourceEvent.id) : false;
-  const inviteSourceNeedsGuestLoad = inviteSourceEvent?.source === "luma" && !inviteSourceEvent.guestsLoaded;
+  const selectedGuestRows = visibleGuests.filter(({ person }) => selectedGuestIds.has(person.id));
+  const allVisibleGuestsSelected = visibleGuests.length > 0 && visibleGuests.every(({ person }) => selectedGuestIds.has(person.id));
 
   const setEventWindowAndRef = (next) => {
     eventWindowRef.current = next;
@@ -388,7 +530,9 @@ export default function Home() {
     const eventChanged = eventId !== state.selectedEventId;
     updateState((draft) => {
       draft.selectedEventId = eventId;
+      draft.invite.targetEventId = eventId;
     });
+    setActiveEventTab("overview");
     if (eventChanged) setProfilePanelOpen(false);
   };
 
@@ -404,7 +548,17 @@ export default function Home() {
     });
   };
 
-  const loadEventGuests = async (eventId: string, { force = false }: { force?: boolean } = {}) => {
+  const loadEventGuests = async (
+    eventId: string,
+    {
+      force = false,
+      append = false,
+      status = state.filters.guestStatus,
+      search = debouncedGuestSearch,
+      tags = state.filters.guestTags,
+      cursor = "",
+    }: { force?: boolean; append?: boolean; status?: string; search?: string; tags?: string[]; cursor?: string } = {},
+  ) => {
     const event = getEvent(state, eventId);
     if (!event) {
       setApiState({ status: "error", message: "Could not find event " + eventId + ". Reload the page and try again." });
@@ -414,31 +568,58 @@ export default function Home() {
       setApiState({ status: "error", message: event.title + " is not linked to Luma, so there are no remote guests to load." });
       return;
     }
-    if (!force && event.guestsLoaded) {
-      return;
-    }
-    if (guestRequestsRef.current.has(eventId)) return;
+    const nextCursor = append ? cursor || event.guestPageInfo?.nextCursor || "" : "";
+    if (append && !nextCursor) return;
 
-    guestRequestsRef.current.add(eventId);
+    const params = new URLSearchParams({
+      event_id: eventId,
+      guest_status: status,
+      guest_limit: String(GUEST_PAGE_SIZE),
+    });
+    if (search) params.set("guest_search", search);
+    tags.forEach((tag) => params.append("guest_tag", tag));
+    if (nextCursor) params.set("guest_cursor", nextCursor);
+    if (force) params.set("refresh", "1");
+    const requestKey = params.toString();
+    if (guestRequestsRef.current.has(requestKey)) return;
+
+    const requestToken = Symbol(requestKey);
+    latestGuestRequestRef.current.set(eventId, requestToken);
+    guestRequestsRef.current.add(requestKey);
+    if (!append) {
+      setState((current) => ({
+        ...current,
+        events: current.events.map((item) => item.id === eventId ? { ...item, guests: [], guestQueryLoading: true } : item),
+      }));
+    }
+
     setLoadingGuestEvents((current) => unique([...current, eventId]));
     try {
-      const refresh = force ? "&refresh=1" : "";
-      const response = await apiFetch("/api/luma?event_id=" + encodeURIComponent(eventId) + refresh, { cache: "no-store" });
+      const response = await apiFetch("/api/luma?" + params.toString(), { cache: "no-store" });
       const data: any = await response.json();
       if (!response.ok) throw new Error(withRequestId(data.error || (force ? "Unable to sync the Luma event." : "Unable to load Luma guests."), data.requestId));
-      setState((current) => mergeLumaGuests(current, data));
+      if (latestGuestRequestRef.current.get(eventId) !== requestToken) return;
+      setState((current) => mergeLumaGuests(current, data, { append }));
       if (force) setActivityTraces({});
       const truncatedText = data.truncated ? " Showing the configured capped guest window only." : "";
       const requestText = data.requestId ? " Request " + data.requestId + "." : "";
       const resultText = force
-        ? `Synced ${data.event?.title || event.title} and ${data.guests.length} guests.`
+        ? `Synced ${data.event?.title || event.title} and ${data.pageInfo?.total ?? data.guests.length} matching guests.`
         : `${data.cached ? "Used cached guests for " : "Loaded guests for "}${event.title}.`;
       if (force) setApiState({ status: "live", message: resultText + truncatedText + requestText });
     } catch (error) {
-      setApiState({ status: "error", message: error.message });
+      if (latestGuestRequestRef.current.get(eventId) === requestToken) {
+        setState((current) => ({
+          ...current,
+          events: current.events.map((item) => item.id === eventId ? { ...item, guestQueryLoading: false } : item),
+        }));
+        setApiState({ status: "error", message: error.message });
+      }
     } finally {
-      guestRequestsRef.current.delete(eventId);
-      setLoadingGuestEvents((current) => current.filter((id) => id !== eventId));
+      guestRequestsRef.current.delete(requestKey);
+      if (latestGuestRequestRef.current.get(eventId) === requestToken) {
+        setLoadingGuestEvents((current) => current.filter((id) => id !== eventId));
+      }
     }
   };
 
@@ -498,14 +679,115 @@ export default function Home() {
   };
 
   useEffect(() => {
-    if (selectedEvent?.source !== "luma" || selectedEvent.guestsLoaded) return;
-    loadEventGuests(selectedEvent.id);
-  }, [selectedEvent?.id, selectedEvent?.source, selectedEvent?.guestsLoaded]);
+    setSelectedGuestIds(new Set());
+  }, [selectedEvent?.id, state.filters.guestStatus, debouncedGuestSearch, guestTagFilterKey]);
 
   useEffect(() => {
-    if (selectedPerson?.source !== "luma" || selectedTrace.status !== "idle") return;
+    if (sessionStatus !== "ready" || selectedEvent?.source !== "luma") return;
+    void loadEventGuests(selectedEvent.id, {
+      status: state.filters.guestStatus,
+      search: debouncedGuestSearch,
+      tags: state.filters.guestTags,
+    });
+  }, [sessionStatus, selectedEvent?.id, selectedEvent?.source, state.filters.guestStatus, debouncedGuestSearch, guestTagFilterKey, upcomingSyncVersion]);
+
+  const loadMoreGuests = () => {
+    if (!selectedEvent || selectedEvent.source !== "luma" || selectedEventLoadingGuests || !selectedEvent.guestPageInfo?.hasMore) return;
+    void loadEventGuests(selectedEvent.id, {
+      append: true,
+      status: state.filters.guestStatus,
+      search: debouncedGuestSearch,
+      tags: state.filters.guestTags,
+      cursor: selectedEvent.guestPageInfo.nextCursor,
+    });
+  };
+
+  const handleGuestListScroll = (event) => {
+    const target = event.currentTarget;
+    if (target.scrollHeight - target.scrollTop - target.clientHeight < 180) loadMoreGuests();
+  };
+
+  const selectGuestFilter = (filter) => {
+    setFilter("guestStatus", filter);
+    setActiveEventTab("overview");
+  };
+
+  const toggleGuestSelection = (personId, selected) => {
+    setSelectedGuestIds((current) => {
+      const next = new Set(current);
+      if (selected) next.add(personId);
+      else next.delete(personId);
+      return next;
+    });
+  };
+
+  const toggleAllVisibleGuests = (selected) => {
+    setSelectedGuestIds((current) => {
+      const next = new Set(current);
+      visibleGuests.forEach(({ person }) => {
+        if (selected) next.add(person.id);
+        else next.delete(person.id);
+      });
+      return next;
+    });
+  };
+
+  const openTagEditor = (person) => {
+    setTagEditorDraft({
+      personId: person.id,
+      tags: [...(person.tags || [])],
+      newTag: "",
+      submitting: false,
+    });
+  };
+
+  const closeTagEditor = () => {
+    setTagEditorDraft((current) => current?.submitting ? current : null);
+  };
+
+  const submitPersonTags = async (event) => {
+    event.preventDefault();
+    if (!tagEditorDraft || tagEditorDraft.submitting) return;
+    const pendingTag = cleanTagName(tagEditorDraft.newTag);
+    const tags = sortedTags(unique([
+      ...tagEditorDraft.tags,
+      ...(pendingTag ? [pendingTag] : []),
+    ]));
+    setTagEditorDraft((current) => current ? { ...current, submitting: true } : current);
+
+    try {
+      const response = await apiFetch("/api/tags", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ personId: tagEditorDraft.personId, tags }),
+      });
+      const data: any = await response.json();
+      if (!response.ok) throw new Error(data.error || "Unable to update guest tags.");
+      const savedTags = Array.isArray(data.tags) ? data.tags : tags;
+      setState((current) => normalizeState({
+        ...current,
+        tags: sortedTags(unique([...current.tags, ...savedTags])),
+        people: current.people.map((person) => person.id === data.personId ? { ...person, tags: savedTags } : person),
+      }));
+      setTagEditorDraft(null);
+      setApiState({ status: "live", message: `Updated tags for ${getPerson(state, data.personId)?.name || "guest"}.` });
+      if (selectedEvent?.source === "luma") {
+        void loadEventGuests(selectedEvent.id, {
+          status: state.filters.guestStatus,
+          search: debouncedGuestSearch,
+          tags: state.filters.guestTags,
+        });
+      }
+    } catch (error) {
+      setTagEditorDraft((current) => current ? { ...current, submitting: false } : current);
+      setApiState({ status: "error", message: error.message });
+    }
+  };
+
+  useEffect(() => {
+    if (!profilePanelOpen || selectedPerson?.source !== "luma" || selectedTrace.status !== "idle") return;
     tracePersonActivity(selectedPerson);
-  }, [selectedPerson?.id, selectedPerson?.source, selectedTrace.status]);
+  }, [profilePanelOpen, selectedPerson?.id, selectedPerson?.source, selectedTrace.status]);
 
   const setGuestStatus = async (personId: string, status: string, { sendEmail = false, message = "" }: { sendEmail?: boolean; message?: string } = {}) => {
     const event = getEvent(state, state.selectedEventId);
@@ -555,6 +837,59 @@ export default function Home() {
       draft.selectedPersonId = personId;
     });
     return true;
+  };
+
+  const runBulkGuestStatus = async (status: string, label: string) => {
+    const event = getEvent(state, state.selectedEventId);
+    const rows = selectedGuestRows.filter(({ guest }) => guest.lumaGuestId);
+    if (!event || event.source !== "luma" || !rows.length || bulkSubmitting) return;
+    if (!window.confirm(`${label} ${rows.length} selected guest${rows.length === 1 ? "" : "s"}?`)) return;
+
+    setBulkSubmitting(true);
+    try {
+      const data = await postBulkLumaAction({
+        action: "bulkUpdateGuestStatus",
+        confirm: LIVE_WRITE_CONFIRMATION,
+        eventId: event.id,
+        status,
+        guests: rows.map(({ guest }) => ({ lumaGuestId: guest.lumaGuestId })),
+        sendEmail: bulkSendEmail,
+        message: bulkSendEmail ? bulkMessage : "",
+      }, apiFetch);
+      const updatedGuestIds = new Set(data.updatedGuestIds || []);
+      const failedGuestIds = new Set((data.failures || []).map((failure) => failure.guestId));
+      const changedAt = new Date().toISOString();
+
+      setState((current) => ({
+        ...current,
+        events: current.events.map((item) => item.id !== event.id ? item : {
+          ...item,
+          guests: item.guests.map((guest) => !updatedGuestIds.has(guest.lumaGuestId) ? guest : {
+            ...guest,
+            status,
+            updatedAt: changedAt,
+            ...(status === "going" ? { approvedAt: changedAt } : {}),
+          }),
+        }),
+      }));
+      setSelectedGuestIds(new Set(rows.filter(({ guest }) => failedGuestIds.has(guest.lumaGuestId)).map(({ person }) => person.id)));
+      await loadEventGuests(event.id, {
+        status: state.filters.guestStatus,
+        search: debouncedGuestSearch,
+      });
+
+      const notificationText = bulkSendEmail ? " with a message" : "";
+      if (data.failed) {
+        setApiState({ status: "error", message: `${label} updated ${data.updated} guests${notificationText}; ${data.failed} failed. Request ${data.requestId}.` });
+      } else {
+        setApiState({ status: "live", message: `${label} updated ${data.updated} guests${notificationText}.` });
+        setBulkMessage("");
+      }
+    } catch (error) {
+      setApiState({ status: "error", message: error.message });
+    } finally {
+      setBulkSubmitting(false);
+    }
   };
 
   const requestGuestStatusChange = (personId, status, label) => {
@@ -631,6 +966,12 @@ export default function Home() {
     const guests = inviteAudience.map(({ person }) => ({ email: person.email, name: person.name, source: person.source })).filter((guest) => guest.email);
     const lumaGuests = guests.filter((guest) => guest.source === "luma");
     const guestsToQueue = target.source === "luma" ? lumaGuests : guests;
+    if (!guestsToQueue.length) {
+      setApiState({ status: "error", message: "Add at least one recipient before sending invitations." });
+      return;
+    }
+    const confirmed = window.confirm(`Send one invitation message to ${guestsToQueue.length} people for ${target.title}?`);
+    if (!confirmed) return;
 
     if (target.source === "luma") {
       try {
@@ -639,6 +980,7 @@ export default function Home() {
           confirm: LIVE_WRITE_CONFIRMATION,
           eventId: target.id,
           guests: lumaGuests,
+          message: inviteMessage.trim(),
         }, apiFetch);
       } catch (error) {
         setApiState({ status: "error", message: error.message });
@@ -656,13 +998,20 @@ export default function Home() {
           nextTarget.guests.push({
             personId: person.id,
             status: "invited",
-            registeredAt: new Date().toISOString(),
+            invitedAt: new Date().toISOString(),
           });
         }
       });
       draft.selectedEventId = nextTarget.id;
     });
-    window.alert(`Queued ${guestsToQueue.length} invites for ${target.title}. Existing guests were left unchanged.`);
+    setApiState({ status: "live", message: `Sent ${guestsToQueue.length} invitations for ${target.title}.` });
+  };
+
+  const applyInviteTemplate = (templateId) => {
+    setInviteTemplateId(templateId);
+    const template = inviteMessageTemplates.find((item) => item.id === templateId);
+    if (!template) return;
+    setInviteMessage(template.message(inviteTargetEvent).slice(0, MAX_INVITE_MESSAGE_LENGTH));
   };
 
   const saveAudienceAsGroup = (event) => {
@@ -713,6 +1062,7 @@ export default function Home() {
     updateState((draft) => {
       if (result.type === "event") {
         draft.selectedEventId = result.id;
+        draft.invite.targetEventId = result.id;
         draft.filters.event = "all";
       }
       if (result.type === "person") {
@@ -727,7 +1077,10 @@ export default function Home() {
       }
     });
     if (result.type === "person") setProfilePanelOpen(true);
-    if (eventChanged) setProfilePanelOpen(false);
+    if (eventChanged) {
+      setActiveEventTab("overview");
+      setProfilePanelOpen(false);
+    }
     setSearchOpen(false);
   };
 
@@ -844,7 +1197,11 @@ export default function Home() {
                       </a>
                     ) : null}
                   </div>
-                  <EventStats stats={eventStats(selectedEvent)} />
+                  <EventStats
+                    stats={selectedEvent.guestStats || eventStats(selectedEvent)}
+                    activeFilter={state.filters.guestStatus}
+                    onFilter={selectGuestFilter}
+                  />
                 </div>
                 {selectedEvent.source === "luma" ? (
                   <div className="summary-actions">
@@ -879,7 +1236,30 @@ export default function Home() {
               <div className="empty-state">Create an event to start managing guests.</div>
             )}
 
-            <div className="workbench-grid">
+            <nav className="event-tabs" aria-label="Event workspace">
+              {eventTabs.map((tab) => {
+                const TabIcon = tab.icon;
+                return (
+                  <button
+                    className={`event-tab ${activeEventTab === tab.id ? "active" : ""}`}
+                    type="button"
+                    role="tab"
+                    aria-selected={activeEventTab === tab.id}
+                    key={tab.id}
+                    onClick={() => {
+                      setActiveEventTab(tab.id);
+                      setProfilePanelOpen(false);
+                    }}
+                  >
+                    <TabIcon size={16} aria-hidden="true" />
+                    {tab.label}
+                  </button>
+                );
+              })}
+            </nav>
+
+            {activeEventTab === "overview" ? (
+            <div className="workbench-grid event-tab-panel" role="tabpanel" aria-label="Overview">
               <section className="guest-panel">
                 <div className="table-toolbar">
                   <div>
@@ -890,14 +1270,18 @@ export default function Home() {
                     <label>
                       <span>Status</span>
                       <select value={state.filters.guestStatus} onChange={(event) => setFilter("guestStatus", event.target.value)}>
-                        <option value="all">All</option>
-                        {Object.entries(statusLabels).map(([status, label]) => (
-                          <option value={status} key={status}>
+                        {guestFilterOptions.map(({ value, label }) => (
+                          <option value={value} key={value}>
                             {label}
                           </option>
                         ))}
                       </select>
                     </label>
+                    <TagFilter
+                      tags={state.tags}
+                      selected={state.filters.guestTags}
+                      onChange={(tags) => setFilter("guestTags", tags)}
+                    />
                     <label>
                       <span>Find</span>
                       <input
@@ -906,20 +1290,72 @@ export default function Home() {
                         value={state.filters.guestSearch}
                         onChange={(event) => setFilter("guestSearch", event.target.value)}
                       />
+                      {state.filters.guestSearch.trim() !== debouncedGuestSearch || selectedEvent?.guestQueryLoading ? (
+                        <small className="guest-search-state">Searching...</small>
+                      ) : null}
                     </label>
                   </div>
                 </div>
 
-                <div className="table-wrap">
+                {selectedGuestRows.length ? (
+                  <div className="bulk-toolbar" role="region" aria-label="Bulk guest actions">
+                    <strong className="bulk-selection-count">{selectedGuestRows.length} selected</strong>
+                    <label className="bulk-email-toggle">
+                      <input
+                        type="checkbox"
+                        checked={bulkSendEmail}
+                        disabled={bulkSubmitting}
+                        onChange={(event) => setBulkSendEmail(event.target.checked)}
+                      />
+                      <Mail size={15} aria-hidden="true" />
+                      <span>Send message</span>
+                    </label>
+                    <input
+                      className="bulk-message"
+                      type="text"
+                      placeholder="Optional status message"
+                      maxLength={MAX_GUEST_STATUS_MESSAGE_LENGTH}
+                      value={bulkMessage}
+                      disabled={!bulkSendEmail || bulkSubmitting}
+                      onChange={(event) => setBulkMessage(event.target.value)}
+                    />
+                    <div className="bulk-actions">
+                      <button className="guest-action guest-action-going" type="button" disabled={bulkSubmitting} onClick={() => runBulkGuestStatus("going", "Approve")}>
+                        <CircleCheck size={14} aria-hidden="true" />
+                        <span>Approve</span>
+                      </button>
+                      <button className="guest-action guest-action-waitlisted" type="button" disabled={bulkSubmitting} onClick={() => runBulkGuestStatus("waitlisted", "Waitlist")}>
+                        <Clock3 size={14} aria-hidden="true" />
+                        <span>Waitlist</span>
+                      </button>
+                      <button className="guest-action guest-action-declined" type="button" disabled={bulkSubmitting} onClick={() => runBulkGuestStatus("declined", "Decline")}>
+                        <CircleX size={14} aria-hidden="true" />
+                        <span>Decline</span>
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+
+                <div className="table-wrap guest-table-wrap" onScroll={handleGuestListScroll}>
                   <table>
                     <thead>
                       <tr>
-                        <th>Guest</th>
+                        <th className="select-cell">
+                          <input
+                            className="guest-select"
+                            type="checkbox"
+                            aria-label="Select all loaded guests"
+                            checked={allVisibleGuestsSelected}
+                            onChange={(event) => toggleAllVisibleGuests(event.target.checked)}
+                          />
+                        </th>
+                        <th className="guest-identity-column">Guest</th>
                         {showGuestGroups ? <th>Groups</th> : null}
+                        <th>Tags</th>
                         <th>Status</th>
                         <th className="whitespace-nowrap">Status date</th>
-                        <th className="whitespace-nowrap text-center">Events attended</th>
-                        <th className="whitespace-nowrap text-center">Events registered</th>
+                        <th className="event-count-heading text-center">Events attended</th>
+                        <th className="event-count-heading text-center">Events registered</th>
                         <th>Actions</th>
                       </tr>
                     </thead>
@@ -929,7 +1365,7 @@ export default function Home() {
                           const selectPerson = () => openPerson(person.id);
                           return (
                           <tr
-                            className={`guest-row ${state.selectedPersonId === person.id ? "selected" : ""}`}
+                            className={`guest-row ${state.selectedPersonId === person.id ? "selected" : ""} ${selectedGuestIds.has(person.id) ? "bulk-selected" : ""}`}
                             key={person.id}
                             tabIndex={0}
                             aria-label={`View ${person.name}'s profile`}
@@ -940,7 +1376,16 @@ export default function Home() {
                               selectPerson();
                             }}
                           >
-                            <td>
+                            <td className="select-cell" onClick={(event) => event.stopPropagation()}>
+                              <input
+                                className="guest-select"
+                                type="checkbox"
+                                aria-label={`Select ${person.name}`}
+                                checked={selectedGuestIds.has(person.id)}
+                                onChange={(event) => toggleGuestSelection(person.id, event.target.checked)}
+                              />
+                            </td>
+                            <td className="guest-identity-column">
                               <PersonButton
                                 person={person}
                                 onClick={(event) => {
@@ -954,6 +1399,9 @@ export default function Home() {
                                 <PersonChips person={person} groups={state.groups} emptyText="-" />
                               </td>
                             ) : null}
+                            <td className="tag-cell" onClick={(event) => event.stopPropagation()}>
+                              <PersonTags person={person} onEdit={() => openTagEditor(person)} />
+                            </td>
                             <td>
                               <StatusPill status={guest.status} />
                             </td>
@@ -966,8 +1414,8 @@ export default function Home() {
                                 <span className="whitespace-nowrap text-xs text-muted">-</span>
                               )}
                             </td>
-                            <td className="text-center text-sm font-semibold tabular-nums">{history.attendedCount}</td>
-                            <td className="text-center text-sm font-semibold tabular-nums">{history.registeredCount}</td>
+                            <td className="event-count-cell text-center text-sm font-semibold tabular-nums">{history.attendedCount}</td>
+                            <td className="event-count-cell text-center text-sm font-semibold tabular-nums">{history.registeredCount}</td>
                             <td>
                               <div className="row-actions" onClick={(event) => event.stopPropagation()}>
                                 {actionsForStatus(guest.status).map(([label, status]) => {
@@ -991,7 +1439,7 @@ export default function Home() {
                           </tr>
                           );
                         })
-                      ) : selectedEventNeedsGuestLoad ? (
+                      ) : selectedEventNeedsGuestLoad || selectedEvent?.guestQueryLoading ? (
                         <tr>
                           <td colSpan={guestTableColumnCount}>
                             <div className="guest-loading-state" role="status" aria-live="polite">
@@ -1007,220 +1455,63 @@ export default function Home() {
                           </td>
                         </tr>
                       )}
+                      {visibleGuests.length && selectedEventLoadingGuests && selectedEvent?.guestPageInfo?.hasMore ? (
+                        <tr>
+                          <td colSpan={guestTableColumnCount}>
+                            <div className="guest-loading-state compact" role="status">
+                              <span className="loading-spinner" aria-hidden="true" />
+                              <span>Loading more guests</span>
+                            </div>
+                          </td>
+                        </tr>
+                      ) : null}
                     </tbody>
                   </table>
                 </div>
+                {selectedEvent?.guestPageInfo ? (
+                  <p className="guest-list-progress">
+                    Showing {visibleGuests.length} of {selectedEvent.guestPageInfo.total} matching guests
+                  </p>
+                ) : null}
               </section>
 
             </div>
+            ) : null}
           </section>
 
-          <details className="accordion invite-shell">
-            <summary>
-              <span>Invite tooling</span>
-              <span>{inviteAudience.length} recipients</span>
-            </summary>
-            <section className="invite-grid">
-            <section className="panel invite-studio">
-              <div className="panel-heading">
-                <div>
-                  <p className="eyebrow">Invite tooling</p>
-                  <h2>Audience builder</h2>
-                </div>
-                <button className="button primary" type="button" onClick={sendInvites}>
-                  Send invites
-                </button>
-              </div>
-
-              <div className="builder-grid">
-                <div className="builder-card">
-                  <label className="field-label" htmlFor="inviteTarget">
-                    Target event
-                  </label>
-                  <select id="inviteTarget" value={state.invite.targetEventId} onChange={(event) => setInvite("targetEventId", event.target.value)}>
-                    {sortEvents(state.events).map((event) => (
-                      <option value={event.id} key={event.id}>
-                        {event.title} - {formatDate(event.date)}
-                      </option>
-                    ))}
-                  </select>
-
-                  <label className="field-label" htmlFor="sourceEvent">
-                    Pull attendees from event
-                  </label>
-                  <select id="sourceEvent" value={state.invite.sourceEventId} onChange={(event) => setInvite("sourceEventId", event.target.value)}>
-                    {sortEvents(state.events).map((event) => (
-                      <option value={event.id} key={event.id}>
-                        {event.title} - {formatDate(event.date)}
-                      </option>
-                    ))}
-                  </select>
-
-                  {inviteSourceEvent?.source === "luma" ? (
-                    <button
-                      className="button"
-                      type="button"
-                      disabled={inviteSourceLoadingGuests}
-                      onClick={() => loadEventGuests(inviteSourceEvent.id, { force: true })}
-                    >
-                      <RefreshCw className={inviteSourceLoadingGuests ? "animate-spin" : ""} size={16} aria-hidden="true" />
-                      {inviteSourceLoadingGuests ? "Syncing source..." : "Sync source event"}
-                    </button>
-                  ) : null}
-                  {inviteSourceNeedsGuestLoad ? <p className="quiet-note">Source event attendees are not loaded yet.</p> : null}
-
-                  <fieldset>
-                    <legend>Event statuses</legend>
-                    <div className="status-options">
-                      {Object.entries(statusLabels).map(([status, label]) => (
-                        <label className="check-chip" key={status}>
-                          <input
-                            type="checkbox"
-                            value={status}
-                            checked={state.invite.sourceStatuses.includes(status)}
-                            onChange={(event) => {
-                              const next = toggleValue(state.invite.sourceStatuses, status, event.target.checked);
-                              setInvite("sourceStatuses", next.length ? next : sourceStatusDefaults);
-                            }}
-                          />
-                          <span>{label}</span>
-                        </label>
-                      ))}
-                    </div>
-                  </fieldset>
-                </div>
-
-                <GroupChecklist
-                  title="Include groups"
-                  groups={state.groups}
-                  selected={state.invite.includeGroups}
-                  onChange={(next) => setInvite("includeGroups", next)}
-                />
-                <GroupChecklist
-                  title="Subtract groups"
-                  groups={state.groups}
-                  selected={state.invite.excludeGroups}
-                  onChange={(next) => setInvite("excludeGroups", next)}
-                />
-              </div>
-
-              <div className="preview-toolbar">
-                <div>
-                  <p className="eyebrow">Preview</p>
-                  <h3>
-                    {inviteAudience.length} recipients for {inviteTargetEvent?.title || "selected event"}
-                  </h3>
-                </div>
-                <form className="inline-form" onSubmit={saveAudienceAsGroup}>
-                  <input type="text" placeholder="Save as group" value={audienceName} onChange={(event) => setAudienceName(event.target.value)} />
-                  <button className="button" type="submit">
-                    Save result
-                  </button>
-                </form>
-              </div>
-
-              <div className="table-wrap preview-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Recipient</th>
-                      <th>Why included</th>
-                      <th>Last attended</th>
-                      <th>Attendance</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {inviteAudience.length ? (
-                      inviteAudience.map(({ person, reasons, history }) => (
-                        <tr key={person.id}>
-                          <td>
-                            <PersonButton person={person} onClick={() => openPerson(person.id)} />
-                          </td>
-                          <td>{reasons.join(", ")}</td>
-                          <td>{history.lastAttended ? formatDate(history.lastAttended.date) : "Never"}</td>
-                          <td>
-                            {history.attendedCount} / {history.totalInvited} records
-                          </td>
-                        </tr>
-                      ))
-                    ) : (
-                      <tr>
-                        <td colSpan={4}>
-                          <div className="empty-state">No one remains after source, group, and subtraction rules.</div>
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-
-            <section className="panel group-manager">
-              <div className="panel-heading">
-                <div>
-                  <p className="eyebrow">CRM labels</p>
-                  <h2>Groups</h2>
-                </div>
-              </div>
-              <form className="group-form" onSubmit={addGroup}>
-                <input
-                  type="text"
-                  placeholder="New group label"
-                  value={newGroup.name}
-                  onChange={(event) => setNewGroup((current) => ({ ...current, name: event.target.value }))}
-                />
-                <input
-                  type="color"
-                  value={newGroup.color}
-                  aria-label="Group color"
-                  onChange={(event) => setNewGroup((current) => ({ ...current, color: event.target.value }))}
-                />
-                <button className="button" type="submit">
-                  Add
-                </button>
-              </form>
-
-              <label className="field-label" htmlFor="manageGroup">
-                Manage membership
-              </label>
-              <select
-                id="manageGroup"
-                value={state.selectedGroupId}
-                onChange={(event) => updateState((draft) => void (draft.selectedGroupId = event.target.value))}
-              >
-                {state.groups.map((group) => (
-                  <option value={group.id} key={group.id}>
-                    {group.name}
-                  </option>
-                ))}
-              </select>
-
-              <label className="field-label" htmlFor="memberSearch">
-                Find people
-              </label>
-              <input
-                id="memberSearch"
-                type="search"
-                placeholder="Name or email"
-                value={state.filters.memberSearch}
-                onChange={(event) => setFilter("memberSearch", event.target.value)}
-              />
-              <div className="member-list">
-                {membersForGroup(state).map((person) => {
-                  const isMember = person.groups.includes(state.selectedGroupId);
-                  return (
-                    <div className="member-row" key={person.id}>
-                      <PersonButton person={person} onClick={() => openPerson(person.id)} />
-                      <button className="button small" type="button" onClick={() => toggleMember(person.id, state.selectedGroupId)}>
-                        {isMember ? "Remove" : "Add"}
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            </section>
-            </section>
-          </details>
+          {activeEventTab === "invite" ? (
+            <InviteTab
+              state={state}
+              audience={inviteAudience}
+              targetEvent={inviteTargetEvent}
+              loadingGuestEvents={loadingGuestEvents}
+              message={inviteMessage}
+              templateId={inviteTemplateId}
+              audienceName={audienceName}
+              onSetInvite={setInvite}
+              onLoadEvent={loadEventGuests}
+              onMessageChange={(value) => {
+                setInviteMessage(value);
+                setInviteTemplateId("");
+              }}
+              onTemplateChange={applyInviteTemplate}
+              onAudienceNameChange={setAudienceName}
+              onSaveAudience={saveAudienceAsGroup}
+              onOpenPerson={openPerson}
+              onSend={sendInvites}
+              newGroup={newGroup}
+              onNewGroupChange={setNewGroup}
+              onAddGroup={addGroup}
+              selectedGroupId={state.selectedGroupId}
+              onSelectedGroupChange={(groupId) => updateState((draft) => void (draft.selectedGroupId = groupId))}
+              memberSearch={state.filters.memberSearch}
+              onMemberSearchChange={(value) => setFilter("memberSearch", value)}
+              groupMembers={membersForGroup(state)}
+              onToggleMember={toggleMember}
+            />
+          ) : activeEventTab === "analytics" ? (
+            <AnalyticsTab event={selectedEvent} analytics={selectedEventAnalytics} />
+          ) : null}
         </section>
 
         {showProfilePanel ? (
@@ -1330,6 +1621,17 @@ export default function Home() {
           onChange={setGuestStatusDraft}
           onClose={closeGuestStatusDialog}
           onSubmit={submitGuestStatusChange}
+        />
+      ) : null}
+
+      {tagEditorDraft ? (
+        <TagEditorDialog
+          draft={tagEditorDraft}
+          person={getPerson(state, tagEditorDraft.personId)}
+          availableTags={state.tags}
+          onChange={setTagEditorDraft}
+          onClose={closeTagEditor}
+          onSubmit={submitPersonTags}
         />
       ) : null}
     </div>
@@ -1446,6 +1748,136 @@ function GuestStatusDialog({ draft, event, guest, person, onChange, onClose, onS
   );
 }
 
+function TagEditorDialog({ draft, person, availableTags, onChange, onClose, onSubmit }) {
+  if (!person) return null;
+  const tags = sortedTags(unique([...availableTags, ...draft.tags]));
+  const selected = new Set(draft.tags);
+  const addPendingTag = () => {
+    const value = cleanTagName(draft.newTag);
+    if (!value) return;
+    const existing = tags.find((tag) => tag.toLocaleLowerCase() === value.toLocaleLowerCase());
+    onChange((current) => ({
+      ...current,
+      tags: sortedTags(unique([...current.tags, existing || value])),
+      newTag: "",
+    }));
+  };
+
+  return (
+    <div className="modal-scrim" role="presentation" onMouseDown={onClose}>
+      <form
+        className="event-dialog tag-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="tag-dialog-title"
+        onSubmit={onSubmit}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="dialog-head">
+          <div>
+            <p className="eyebrow">Guest tags</p>
+            <h2 id="tag-dialog-title">Tag {person.name}</h2>
+          </div>
+          <button className="icon-button" type="button" disabled={draft.submitting} aria-label="Close tag editor" title="Close" onClick={onClose}>
+            <X size={18} aria-hidden="true" />
+          </button>
+        </div>
+
+        <div className="tag-create-row">
+          <input
+            autoFocus
+            type="text"
+            maxLength={40}
+            placeholder="New tag"
+            value={draft.newTag}
+            disabled={draft.submitting}
+            onChange={(event) => onChange((current) => ({ ...current, newTag: event.target.value }))}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter") return;
+              event.preventDefault();
+              addPendingTag();
+            }}
+          />
+          <button className="button" type="button" disabled={!cleanTagName(draft.newTag) || draft.submitting} onClick={addPendingTag}>
+            <Plus size={16} aria-hidden="true" />
+            Add
+          </button>
+        </div>
+
+        <fieldset className="tag-options">
+          <legend>Tags</legend>
+          {tags.length ? (
+            <div className="tag-option-grid">
+              {tags.map((tag) => (
+                <label className="tag-option" key={tag}>
+                  <input
+                    type="checkbox"
+                    checked={selected.has(tag)}
+                    disabled={draft.submitting}
+                    onChange={(event) => onChange((current) => ({
+                      ...current,
+                      tags: event.target.checked
+                        ? sortedTags(unique([...current.tags, tag]))
+                        : current.tags.filter((item) => item !== tag),
+                    }))}
+                  />
+                  <span>{tag}</span>
+                </label>
+              ))}
+            </div>
+          ) : (
+            <div className="empty-state compact">No tags yet.</div>
+          )}
+        </fieldset>
+
+        <div className="dialog-actions">
+          <button className="button ghost" type="button" disabled={draft.submitting} onClick={onClose}>Cancel</button>
+          <button className="button primary" type="submit" disabled={draft.submitting}>
+            {draft.submitting ? <RefreshCw className="animate-spin" size={16} aria-hidden="true" /> : <Tag size={16} aria-hidden="true" />}
+            {draft.submitting ? "Saving..." : "Save tags"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function TagFilter({ tags, selected, onChange }) {
+  const selectedTags = Array.isArray(selected) ? selected : [];
+  const selectedSet = new Set(selectedTags);
+  const label = selectedTags.length ? `${selectedTags.length} selected` : "All tags";
+
+  return (
+    <div className="tag-filter-control">
+      <span>Tags</span>
+      <details className="tag-filter-menu">
+        <summary>
+          <Tag size={14} aria-hidden="true" />
+          <span>{label}</span>
+        </summary>
+        <div className="tag-filter-popover">
+          <div className="tag-filter-head">
+            <strong>Match any tag</strong>
+            {selectedTags.length ? <button type="button" onClick={() => onChange([])}>Clear</button> : null}
+          </div>
+          {tags.length ? tags.map((tag) => (
+            <label className="tag-filter-option" key={tag}>
+              <input
+                type="checkbox"
+                checked={selectedSet.has(tag)}
+                onChange={(event) => onChange(event.target.checked
+                  ? sortedTags(unique([...selectedTags, tag]))
+                  : selectedTags.filter((item) => item !== tag))}
+              />
+              <span>{tag}</span>
+            </label>
+          )) : <span className="tag-filter-empty">No tags yet</span>}
+        </div>
+      </details>
+    </div>
+  );
+}
+
 function UniversalSearchModal({ query, results, resultCount, inputRef, onQueryChange, onClose, onSelect }) {
   const hasQuery = query.trim().length > 0;
   return (
@@ -1500,36 +1932,390 @@ function SearchSection({ title, results, onSelect }) {
   );
 }
 
-function EventStats({ stats }) {
+function EventStats({ stats, activeFilter, onFilter }) {
+  const items = [
+    { value: "checked_in", label: "Check-ins", count: stats.checkedIn },
+    { value: "accepted", label: "Accepted", count: stats.accepted ?? stats.confirmed ?? 0 },
+    { value: "registered", label: "Registered", count: stats.registered },
+    { value: "invited", label: "Invited", count: stats.invited },
+    { value: "waitlisted", label: "Waitlist", count: stats.waitlisted },
+    { value: "new_faces", label: "New faces", count: stats.newFaces ?? 0 },
+  ];
   return (
-    <div className="summary-stats">
-      <div className="summary-stat">
-        <strong>{stats.confirmed}</strong>
-        <span>Confirmed</span>
-      </div>
-      <div className="summary-stat">
-        <strong>{stats.registered}</strong>
-        <span>Registered</span>
-      </div>
-      <div className="summary-stat">
-        <strong>{stats.waitlisted}</strong>
-        <span>Waitlist</span>
-      </div>
-      <div className="summary-stat">
-        <strong>{stats.checkedIn}</strong>
-        <span>Checked in</span>
-      </div>
-      <div className="summary-stat">
-        <strong>{stats.invited}</strong>
-        <span>Invited</span>
-      </div>
+    <div className="summary-stats" aria-label="Guest status filters">
+      {items.map((item) => (
+        <button
+          className={`summary-stat ${activeFilter === item.value ? "active" : ""}`}
+          type="button"
+          aria-pressed={activeFilter === item.value}
+          key={item.value}
+          onClick={() => onFilter(item.value)}
+        >
+          <strong>{item.count || 0}</strong>
+          <span>{item.label}</span>
+        </button>
+      ))}
     </div>
+  );
+}
+
+function InviteTab({
+  state,
+  audience,
+  targetEvent,
+  loadingGuestEvents,
+  message,
+  templateId,
+  audienceName,
+  onSetInvite,
+  onLoadEvent,
+  onMessageChange,
+  onTemplateChange,
+  onAudienceNameChange,
+  onSaveAudience,
+  onOpenPerson,
+  onSend,
+  newGroup,
+  onNewGroupChange,
+  onAddGroup,
+  selectedGroupId,
+  onSelectedGroupChange,
+  memberSearch,
+  onMemberSearchChange,
+  groupMembers,
+  onToggleMember,
+}) {
+  const eventOptions = sortEvents(state.events).map((event) => ({
+    id: event.id,
+    label: `${event.title} - ${formatDate(event.date)}`,
+    meta: event.guestsLoaded ? `${event.guests.length} guests` : "Not loaded",
+  }));
+  const personOptions = [...state.people]
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((person) => ({ id: person.id, label: person.name, meta: person.email }));
+  const addEventRule = (key, eventId) => {
+    const next = unique([...(state.invite[key] || []), eventId]);
+    onSetInvite(key, next);
+    const event = getEvent(state, eventId);
+    if (event?.source === "luma" && !event.guestsLoaded && !loadingGuestEvents.includes(eventId)) {
+      void onLoadEvent(eventId);
+    }
+  };
+
+  return (
+    <section className="invite-tab panel" role="tabpanel" aria-label="Invite">
+      <header className="event-tab-heading">
+        <div>
+          <p className="eyebrow">Invite audience</p>
+          <h2>{targetEvent?.title || "Select an event"}</h2>
+        </div>
+        <div className="invite-send-summary">
+          <span><strong>{audience.length}</strong> recipients</span>
+          <button className="button primary" type="button" disabled={!audience.length} onClick={onSend}>
+            <Send size={16} aria-hidden="true" />
+            Send invites
+          </button>
+        </div>
+      </header>
+
+      <div className="invite-status-rule">
+        <div>
+          <strong>Event guest states</strong>
+          <span>Applied to every included and subtracted event.</span>
+        </div>
+        <div className="status-options">
+          {Object.entries(statusLabels).map(([status, label]) => (
+            <label className="check-chip" key={status}>
+              <input
+                type="checkbox"
+                checked={state.invite.sourceStatuses.includes(status)}
+                onChange={(event) => {
+                  const next = toggleValue(state.invite.sourceStatuses, status, event.target.checked);
+                  onSetInvite("sourceStatuses", next.length ? next : sourceStatusDefaults);
+                }}
+              />
+              <span>{label}</span>
+            </label>
+          ))}
+        </div>
+      </div>
+
+      <div className="invite-compose-grid">
+        <AudienceRuleColumn
+          tone="include"
+          icon={UserPlus}
+          title="Add to audience"
+          groups={state.groups}
+          selectedGroups={state.invite.includeGroups}
+          onGroupsChange={(next) => onSetInvite("includeGroups", next)}
+          eventOptions={eventOptions}
+          selectedEvents={state.invite.includeEventIds}
+          onEventAdd={(id) => addEventRule("includeEventIds", id)}
+          onEventsChange={(next) => onSetInvite("includeEventIds", next)}
+          personOptions={personOptions}
+          selectedPeople={state.invite.includePeople}
+          onPersonAdd={(id) => onSetInvite("includePeople", unique([...state.invite.includePeople, id]))}
+          onPeopleChange={(next) => onSetInvite("includePeople", next)}
+        />
+
+        <AudienceRuleColumn
+          tone="exclude"
+          icon={UserMinus}
+          title="Subtract from audience"
+          groups={state.groups}
+          selectedGroups={state.invite.excludeGroups}
+          onGroupsChange={(next) => onSetInvite("excludeGroups", next)}
+          eventOptions={eventOptions}
+          selectedEvents={state.invite.excludeEventIds}
+          onEventAdd={(id) => addEventRule("excludeEventIds", id)}
+          onEventsChange={(next) => onSetInvite("excludeEventIds", next)}
+          personOptions={personOptions}
+          selectedPeople={state.invite.excludePeople}
+          onPersonAdd={(id) => onSetInvite("excludePeople", unique([...state.invite.excludePeople, id]))}
+          onPeopleChange={(next) => onSetInvite("excludePeople", next)}
+        />
+
+        <section className="message-composer">
+          <div className="audience-column-head">
+            <span className="audience-column-icon"><MessageSquare size={17} aria-hidden="true" /></span>
+            <div>
+              <h3>Message</h3>
+              <p>One message for the full audience.</p>
+            </div>
+          </div>
+          <label className="field-label" htmlFor="inviteTemplate">
+            Template
+          </label>
+          <select id="inviteTemplate" value={templateId} onChange={(event) => onTemplateChange(event.target.value)}>
+            <option value="">Custom message</option>
+            {inviteMessageTemplates.map((template) => (
+              <option value={template.id} key={template.id}>{template.label}</option>
+            ))}
+          </select>
+          <label className="message-field" htmlFor="inviteMessage">
+            <span><strong>Invite message</strong><small>{message.length}/{MAX_INVITE_MESSAGE_LENGTH}</small></span>
+            <textarea
+              id="inviteMessage"
+              maxLength={MAX_INVITE_MESSAGE_LENGTH}
+              placeholder="Add a short note to the invitation"
+              value={message}
+              onChange={(event) => onMessageChange(event.target.value)}
+            />
+          </label>
+          <div className="delivery-channels">
+            <span><Mail size={15} aria-hidden="true" /> Email</span>
+            <span><MessageSquare size={15} aria-hidden="true" /> Linked messaging channels</span>
+          </div>
+        </section>
+      </div>
+
+      <div className="preview-toolbar">
+        <div>
+          <p className="eyebrow">Audience result</p>
+          <h3>{audience.length} people after subtraction</h3>
+        </div>
+        <form className="inline-form" onSubmit={onSaveAudience}>
+          <input type="text" placeholder="Save result as group" value={audienceName} onChange={(event) => onAudienceNameChange(event.target.value)} />
+          <button className="button" type="submit">Save group</button>
+        </form>
+      </div>
+
+      <div className="table-wrap preview-wrap">
+        <table className="invite-preview-table">
+          <thead>
+            <tr>
+              <th>Recipient</th>
+              <th>Why included</th>
+              <th>Last attended</th>
+              <th>Events attended</th>
+            </tr>
+          </thead>
+          <tbody>
+            {audience.length ? audience.map(({ person, reasons, history }) => (
+              <tr key={person.id}>
+                <td><PersonButton person={person} onClick={() => onOpenPerson(person.id)} /></td>
+                <td className="text-xs text-muted">{reasons.join(", ")}</td>
+                <td className="whitespace-nowrap text-xs">{history.lastAttended ? formatDate(history.lastAttended.date) : "Never"}</td>
+                <td className="text-center font-semibold tabular-nums">{history.attendedCount}</td>
+              </tr>
+            )) : (
+              <tr><td colSpan={4}><div className="empty-state">Add a person, group, or event cohort to build an audience.</div></td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <details className="group-tools">
+        <summary>
+          <span>Manage groups</span>
+          <span>{state.groups.length} groups</span>
+        </summary>
+        <div className="group-tools-grid">
+          <form className="group-form" onSubmit={onAddGroup}>
+            <input type="text" placeholder="New group label" value={newGroup.name} onChange={(event) => onNewGroupChange((current) => ({ ...current, name: event.target.value }))} />
+            <input type="color" value={newGroup.color} aria-label="Group color" onChange={(event) => onNewGroupChange((current) => ({ ...current, color: event.target.value }))} />
+            <button className="button" type="submit">Add group</button>
+          </form>
+          <div className="group-member-controls">
+            <select aria-label="Group to manage" value={selectedGroupId} onChange={(event) => onSelectedGroupChange(event.target.value)}>
+              {state.groups.map((group) => <option value={group.id} key={group.id}>{group.name}</option>)}
+            </select>
+            <input type="search" aria-label="Find group members" placeholder="Find people" value={memberSearch} onChange={(event) => onMemberSearchChange(event.target.value)} />
+          </div>
+        </div>
+        {selectedGroupId ? (
+          <div className="member-list">
+            {groupMembers.map((person) => {
+              const isMember = person.groups.includes(selectedGroupId);
+              return (
+                <div className="member-row" key={person.id}>
+                  <PersonButton person={person} onClick={() => onOpenPerson(person.id)} />
+                  <button className="button small" type="button" onClick={() => onToggleMember(person.id, selectedGroupId)}>{isMember ? "Remove" : "Add"}</button>
+                </div>
+              );
+            })}
+          </div>
+        ) : <div className="empty-state">Create a group to manage membership.</div>}
+      </details>
+    </section>
+  );
+}
+
+function AudienceRuleColumn({
+  tone,
+  icon: Icon,
+  title,
+  groups,
+  selectedGroups,
+  onGroupsChange,
+  eventOptions,
+  selectedEvents,
+  onEventAdd,
+  onEventsChange,
+  personOptions,
+  selectedPeople,
+  onPersonAdd,
+  onPeopleChange,
+}) {
+  return (
+    <section className={`audience-column audience-column-${tone}`}>
+      <div className="audience-column-head">
+        <span className="audience-column-icon"><Icon size={17} aria-hidden="true" /></span>
+        <div><h3>{title}</h3><p>{tone === "include" ? "Union these sources." : "Remove anyone matching these sources."}</p></div>
+      </div>
+      <GroupChecklist title="Groups" groups={groups} selected={selectedGroups} onChange={onGroupsChange} />
+      <RulePicker label="Events" options={eventOptions} selected={selectedEvents} onAdd={onEventAdd} onChange={onEventsChange} />
+      <RulePicker label="People" options={personOptions} selected={selectedPeople} onAdd={onPersonAdd} onChange={onPeopleChange} />
+    </section>
+  );
+}
+
+function RulePicker({ label, options, selected, onAdd, onChange }) {
+  const available = options.filter((option) => !selected.includes(option.id));
+  return (
+    <div className="rule-block">
+      <div className="builder-subhead"><span>{label}</span><span>{selected.length}</span></div>
+      <select value="" aria-label={`Add ${label.toLowerCase()}`} onChange={(event) => event.target.value && onAdd(event.target.value)}>
+        <option value="">Add {label.toLowerCase()}</option>
+        {available.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}
+      </select>
+      {selected.length ? (
+        <div className="rule-list">
+          {selected.map((id) => {
+            const option = options.find((item) => item.id === id);
+            if (!option) return null;
+            return (
+              <div className="rule-item" key={id}>
+                <span><strong>{option.label}</strong>{option.meta ? <small>{option.meta}</small> : null}</span>
+                <button className="icon-button" type="button" aria-label={`Remove ${option.label}`} title="Remove" onClick={() => onChange(selected.filter((value) => value !== id))}>
+                  <X size={14} aria-hidden="true" />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function AnalyticsTab({ event, analytics }) {
+  if (!event) return <section className="analytics-tab panel"><div className="empty-state">Select an event to view analytics.</div></section>;
+  const totalPeople = analytics.returning + analytics.newPeople;
+  return (
+    <section className="analytics-tab panel" role="tabpanel" aria-label="Analytics">
+      <header className="event-tab-heading">
+        <div><p className="eyebrow">Event analytics</p><h2>{event.title}</h2></div>
+        <span className="analytics-sample">{analytics.registrations} registrations</span>
+      </header>
+
+      <div className="analytics-overview-grid">
+        <article className="analytics-card returner-card">
+          <div className="chart-heading"><div><p className="eyebrow">Audience mix</p><h3>New and returning</h3></div><Users size={19} aria-hidden="true" /></div>
+          <div className="stacked-chart" aria-label={`${analytics.returning} returning and ${analytics.newPeople} new event goers`}>
+            {totalPeople ? (
+              <>
+                <span className="stacked-returning" style={{ width: `${(analytics.returning / totalPeople) * 100}%` }} />
+                <span className="stacked-new" style={{ width: `${(analytics.newPeople / totalPeople) * 100}%` }} />
+              </>
+            ) : null}
+          </div>
+          <div className="chart-legend">
+            <span><i className="legend-returning" /><strong>{analytics.returning}</strong> Returning</span>
+            <span><i className="legend-new" /><strong>{analytics.newPeople}</strong> New</span>
+          </div>
+        </article>
+
+        <article className="analytics-card funnel-card">
+          <div className="chart-heading"><div><p className="eyebrow">Conversion</p><h3>Registration funnel</h3></div><BarChart3 size={19} aria-hidden="true" /></div>
+          <ol className="funnel-chart">
+            {analytics.funnel.map((stage) => (
+              <li key={stage.id}>
+                <span style={{ width: `${stage.width}%` }}><strong>{stage.value}</strong><small>{stage.label}</small></span>
+                <em>{stage.rate}%</em>
+              </li>
+            ))}
+          </ol>
+        </article>
+      </div>
+
+      <section className="answer-analytics">
+        <div className="event-tab-heading compact">
+          <div><p className="eyebrow">First-time registrants</p><h2>Registration answers</h2></div>
+          <span className="analytics-sample">{analytics.newPeople} new people</span>
+        </div>
+        {analytics.questions.length ? (
+          <div className="question-grid">
+            {analytics.questions.map((question) => (
+              <article className="question-chart" key={question.id}>
+                <div className="question-chart-head"><h3>{question.label}</h3><span>{question.responseCount} responses</span></div>
+                {question.kind === "categorical" ? (
+                  <div className="bar-chart">
+                    {question.options.map((option) => (
+                      <div className="bar-row" key={option.label}>
+                        <span title={option.label}>{option.label}</span>
+                        <div><i style={{ width: `${option.percent}%` }} /></div>
+                        <strong>{option.count}</strong>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-response-list">
+                    {question.responses.map((response) => <blockquote key={response.id}>{response.value}</blockquote>)}
+                  </div>
+                )}
+              </article>
+            ))}
+          </div>
+        ) : <div className="empty-state">No registration answers from first-time registrants are available for this event.</div>}
+      </section>
+    </section>
   );
 }
 
 function GroupChecklist({ title, groups, selected, onChange }) {
   return (
-    <div className="builder-card">
+    <div className="rule-block">
       <div className="builder-subhead">
         <span>{title}</span>
         <span>{selected.length} selected</span>
@@ -1541,6 +2327,7 @@ function GroupChecklist({ title, groups, selected, onChange }) {
             <span>{group.name}</span>
           </label>
         ))}
+        {!groups.length ? <span className="quiet-note">No saved groups</span> : null}
       </div>
     </div>
   );
@@ -1756,9 +2543,9 @@ function Avatar({ person, large = false }) {
       orderAvatarCandidates(
         ...(person?.avatarCandidates || []),
         person?.avatarUrl,
-        person?.id ? `/api/luma/avatar?person_id=${encodeURIComponent(person.id)}` : "",
+        large && person?.id ? `/api/luma/avatar?person_id=${encodeURIComponent(person.id)}` : "",
       ),
-    [person?.id, person?.avatarUrl, person?.avatarCandidates],
+    [large, person?.id, person?.avatarUrl, person?.avatarCandidates],
   );
   const [candidateIndex, setCandidateIndex] = useState(0);
   const avatarUrl = candidates[candidateIndex] || "";
@@ -1813,6 +2600,23 @@ function PersonChips({ person, groups, emptyText = "" }) {
   );
 }
 
+function PersonTags({ person, onEdit }) {
+  const tags = Array.isArray(person.tags) ? person.tags : [];
+  const visibleTags = tags.slice(0, 2);
+  return (
+    <div className="person-tags">
+      <div className="tag-chip-list">
+        {visibleTags.map((tag) => <span className="tag-chip" key={tag}>{tag}</span>)}
+        {tags.length > visibleTags.length ? <span className="tag-chip tag-chip-more">+{tags.length - visibleTags.length}</span> : null}
+        {!tags.length ? <span className="person-email">-</span> : null}
+      </div>
+      <button className="tag-edit-button" type="button" aria-label={`Edit tags for ${person.name}`} title="Edit tags" onClick={onEdit}>
+        <Tag size={14} aria-hidden="true" />
+      </button>
+    </div>
+  );
+}
+
 function StatusPill({ status }) {
   return <span className={`status-pill status-${status}`}>{statusLabels[status] || status}</span>;
 }
@@ -1829,6 +2633,19 @@ async function postLumaAction(payload, apiFetch) {
   });
   const data: any = await response.json();
   if (!response.ok || data.ok === false) throw new Error(withRequestId(data.error || data.message || "Luma request failed.", data.requestId));
+  return data;
+}
+
+async function postBulkLumaAction(payload, apiFetch) {
+  const response = await apiFetch("/api/luma", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data: any = await response.json();
+  if ((!response.ok && response.status !== 207) || !Array.isArray(data.updatedGuestIds)) {
+    throw new Error(withRequestId(data.error || data.message || "Bulk Luma request failed.", data.requestId));
+  }
   return data;
 }
 
@@ -1862,7 +2679,7 @@ function clearSessionCookie() {
   document.cookie = `${SESSION_KEY_COOKIE}=; path=/; max-age=0; SameSite=Lax${secure}`;
 }
 
-function mergeLumaGuests(current, lumaData) {
+function mergeLumaGuests(current, lumaData, { append = false } = {}) {
   const existingPeople = new Map();
   current.people.forEach((person) => {
     existingPeople.set(person.id, person);
@@ -1870,23 +2687,29 @@ function mergeLumaGuests(current, lumaData) {
   });
 
   const peopleById = new Map(current.people.map((person) => [person.id, person]));
-  lumaData.people.forEach((person) => {
+  (lumaData.people || []).forEach((person) => {
     const existing = existingPeople.get(person.id) || existingPeople.get(person.email?.toLowerCase());
     peopleById.set(person.id, mergePersonRecord(existing, person));
   });
 
   const people = [...peopleById.values()];
-  const events = current.events.map((event) =>
-    event.id === lumaData.eventId
-      ? {
+  const events = current.events.map((event) => {
+    if (event.id !== lumaData.eventId) return event;
+    const guestsByPersonId = new Map((append ? event.guests : []).map((guest) => [guest.personId, guest]));
+    (lumaData.guests || []).forEach((guest) => guestsByPersonId.set(guest.personId, guest));
+    return {
           ...event,
           ...(lumaData.event || {}),
-          guests: lumaData.guests,
+          guests: [...guestsByPersonId.values()],
           guestsLoaded: true,
           guestLoadTruncated: lumaData.truncated,
-        }
-      : event,
-  );
+          guestStats: lumaData.stats || event.guestStats,
+          guestAnalyticsQuestions: lumaData.analyticsQuestions || event.guestAnalyticsQuestions || [],
+          guestPageInfo: lumaData.pageInfo || null,
+          guestQuery: lumaData.query || null,
+          guestQueryLoading: false,
+        };
+  });
 
   return normalizeState({
     ...current,
@@ -1937,6 +2760,7 @@ function mergePersonRecord(existing, incoming) {
   return {
     ...incoming,
     groups: existing?.groups || incoming.groups || [],
+    tags: Array.isArray(incoming.tags) ? incoming.tags : existing?.tags || [],
     notes: existingNote || incoming.notes,
     title: existing?.title && existing.title !== "Luma guest" ? existing.title : incoming.title,
     profileDescription: incoming.profileDescription || existing?.profileDescription || "",
@@ -1957,6 +2781,15 @@ function normalizeState(value) {
     filters: { ...initialState.filters, ...value?.filters },
     invite: { ...initialState.invite, ...value?.invite },
   };
+  next.people = next.people.map((person) => ({
+    ...person,
+    tags: Array.isArray(person.tags) ? person.tags : [],
+  }));
+  next.tags = sortedTags(unique([
+    ...(Array.isArray(next.tags) ? next.tags : []),
+    ...next.people.flatMap((person) => person.tags),
+  ]));
+  next.filters.guestTags = sortedTags(unique(Array.isArray(next.filters.guestTags) ? next.filters.guestTags : []));
   if (!next.events.some((event) => event.id === next.selectedEventId)) {
     next.selectedEventId = sortEvents(next.events)[0]?.id || "";
   }
@@ -2138,6 +2971,7 @@ function searchSnippet(text, query) {
 function eventGuests(state, event) {
   if (!event) return [];
   const query = state.filters.guestSearch.trim().toLowerCase();
+  const serverManaged = event.source === "luma" && event.guestQuery;
   return event.guests
     .map((guest) => ({
       guest,
@@ -2148,7 +2982,12 @@ function eventGuests(state, event) {
     }))
     .filter(({ guest, person }) => {
       if (!person) return false;
-      const matchesStatus = state.filters.guestStatus === "all" || guest.status === state.filters.guestStatus;
+      if (serverManaged) return true;
+      const selectedStatus = state.filters.guestStatus;
+      const matchesStatus = selectedStatus === "all"
+        || (selectedStatus === "accepted" && ["going", "checked_in", "no_show"].includes(guest.status))
+        || (selectedStatus === "new_faces" && guest.isNewFace === true)
+        || guest.status === selectedStatus;
       const matchesSearch = !query || searchableGuestText(person, guest).includes(query);
       return matchesStatus && matchesSearch;
     })
@@ -2310,18 +3149,91 @@ function hasProfileContent(state, person) {
   );
 }
 
+function buildEventAnalytics(state, event) {
+  const empty = {
+    registrations: 0,
+    returning: 0,
+    newPeople: 0,
+    funnel: [
+      { id: "registered", label: "Total registrations", value: 0, rate: 0, width: 100 },
+      { id: "accepted", label: "Accepted", value: 0, rate: 0, width: 0 },
+      { id: "checked-in", label: "Checked in", value: 0, rate: 0, width: 0 },
+    ],
+    questions: [],
+  };
+  if (!event) return empty;
+
+  const registrationStatuses = ["registered", "going", "waitlisted", "checked_in", "declined", "no_show"];
+  const registrationRows = event.guests
+    .filter((guest) => guest.registeredAt || registrationStatuses.includes(guest.status))
+    .map((guest) => ({
+      guest,
+      person: getPerson(state, guest.personId),
+      history: personHistoryForGuest(state, guest),
+    }))
+    .filter((row) => row.person);
+  const newRows = registrationRows.filter(({ history }) => history.registeredCount <= 1);
+  const returning = registrationRows.length - newRows.length;
+  const accepted = registrationRows.filter(({ guest }) =>
+    Boolean(guest.approvedAt || guest.checkedInAt || ["going", "checked_in", "no_show"].includes(guest.status)),
+  ).length;
+  const checkedIn = registrationRows.filter(({ guest }) => Boolean(guest.checkedInAt || guest.status === "checked_in")).length;
+  const loadedCounts = {
+    registrations: registrationRows.length,
+    returning,
+    newPeople: newRows.length,
+    accepted,
+    checkedIn,
+  };
+  const counts = eventWideAnalyticsCounts(event.guestStats, loadedCounts);
+  const registrations = counts.registrations;
+  const rate = (value) => registrations ? Math.round((value / registrations) * 100) : 0;
+  const width = (value) => registrations ? Math.max(value ? 18 : 0, Math.round((value / registrations) * 100)) : 0;
+
+  const questions = Array.isArray(event.guestAnalyticsQuestions)
+    ? event.guestAnalyticsQuestions
+    : buildRegistrationQuestionAnalytics(newRows.map(({ guest, person }) => ({
+        personId: person.id,
+        registrationAnswers: guest.registrationAnswers,
+      })));
+
+  return {
+    registrations,
+    returning: counts.returning,
+    newPeople: counts.newPeople,
+    funnel: [
+      { id: "registered", label: "Total registrations", value: registrations, rate: registrations ? 100 : 0, width: registrations ? 100 : 0 },
+      { id: "accepted", label: "Accepted", value: counts.accepted, rate: rate(counts.accepted), width: width(counts.accepted) },
+      { id: "checked-in", label: "Checked in", value: counts.checkedIn, rate: rate(counts.checkedIn), width: width(counts.checkedIn) },
+    ],
+    questions,
+  };
+}
+
 function computeInviteAudience(state) {
-  const sourceEvent = getEvent(state, state.invite.sourceEventId);
-  const exclude = new Set();
+  const statuses = state.invite.sourceStatuses || sourceStatusDefaults;
+  const exclude = new Set(state.invite.excludePeople || []);
   state.people.forEach((person) => {
     if (person.groups.some((groupId) => state.invite.excludeGroups.includes(groupId))) exclude.add(person.id);
   });
+  (state.invite.excludeEventIds || []).forEach((eventId) => {
+    const event = getEvent(state, eventId);
+    event?.guests.forEach((guest) => {
+      if (statuses.includes(guest.status)) exclude.add(guest.personId);
+    });
+  });
 
   const recipients = new Map();
-  sourceEvent?.guests.forEach((guest) => {
-    if (state.invite.sourceStatuses.includes(guest.status)) {
-      addRecipient(recipients, getPerson(state, guest.personId), `${sourceEvent.title}: ${statusLabels[guest.status]}`);
-    }
+  (state.invite.includePeople || []).forEach((personId) => {
+    addRecipient(recipients, getPerson(state, personId), "Selected person");
+  });
+  (state.invite.includeEventIds || []).forEach((eventId) => {
+    const event = getEvent(state, eventId);
+    event?.guests.forEach((guest) => {
+      if (statuses.includes(guest.status)) {
+        addRecipient(recipients, getPerson(state, guest.personId), `${event.title}: ${statusLabels[guest.status]}`);
+      }
+    });
   });
 
   state.people.forEach((person) => {
@@ -2346,7 +3258,8 @@ function computeInviteAudience(state) {
 function addRecipient(recipients, person, reason) {
   if (!person) return;
   if (!recipients.has(person.id)) recipients.set(person.id, { person, reasons: [] });
-  recipients.get(person.id).reasons.push(reason);
+  const reasons = recipients.get(person.id).reasons;
+  if (!reasons.includes(reason)) reasons.push(reason);
 }
 
 function membersForGroup(state) {
@@ -2393,17 +3306,21 @@ function getPersonHistory(state, personId) {
 function eventStats(event) {
   const stats = {
     confirmed: 0,
+    accepted: 0,
     registered: 0,
     waitlisted: 0,
     checkedIn: 0,
     invited: 0,
+    newFaces: 0,
   };
   event.guests.forEach((guest) => {
     if (["going", "checked_in"].includes(guest.status)) stats.confirmed += 1;
+    if (["going", "checked_in", "no_show"].includes(guest.status)) stats.accepted += 1;
     if (guest.status === "registered") stats.registered += 1;
     if (guest.status === "waitlisted") stats.waitlisted += 1;
     if (guest.status === "checked_in") stats.checkedIn += 1;
     if (guest.status === "invited") stats.invited += 1;
+    if (guest.isNewFace === true) stats.newFaces += 1;
   });
   return stats;
 }
@@ -2520,6 +3437,14 @@ function toggleValue(values, value, shouldInclude) {
 
 function unique(values) {
   return [...new Set(values)];
+}
+
+function cleanTagName(value) {
+  return String(value || "").trim().replace(/\s+/g, " ").slice(0, 40);
+}
+
+function sortedTags(tags) {
+  return [...tags].sort((left, right) => left.localeCompare(right));
 }
 
 function firstPresent(...values) {

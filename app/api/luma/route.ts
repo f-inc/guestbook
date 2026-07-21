@@ -1,12 +1,15 @@
 import { appendFile, mkdir } from "node:fs/promises";
+import { after } from "next/server";
 
 type AnyRecord = Record<string, any>;
 type HttpError = Error & { status?: number };
 import nodePath from "node:path";
-import { getIndexedTrace, hasLumaDb, listIndexedEventGuests, listIndexedEvents, removeIndexedEventGuestsMissingFromSnapshot, removeIndexedTraceRecordsMissingFromEvents, updateIndexedGuestStatus, upsertNormalizedLumaGuestActivity, upsertNormalizedLumaSnapshot } from "./db";
+import { getIndexedTrace, hasLumaDb, listIndexedEventGuests, listIndexedEvents, removeIndexedEventGuestsMissingFromSnapshot, removeIndexedTraceRecordsMissingFromEvents, updateIndexedGuestStatus, upsertNormalizedLumaEvents, upsertNormalizedLumaGuestActivity, upsertNormalizedLumaSnapshot } from "./db";
 import { lumaEventDate } from "./event-date";
+import { filterGuestPayload, parseGuestListQuery } from "./guest-query";
 import { orderAvatarCandidates } from "../../avatar-order";
 import { normalizeGuestStatusNotification } from "../../guest-status-notification";
+import { normalizeInviteMessage } from "../../invite-message";
 import { requireSessionKey } from "../session-auth";
 
 export const runtime = "nodejs";
@@ -82,11 +85,7 @@ export async function GET(request: Request) {
 
     if (eventId) {
       const cacheKey = "event-guests:" + eventId;
-      const cached = forceRefresh ? null : readCache(cacheKey);
-      if (cached) {
-        await debugLog(requestId, "event guests cache hit", { eventId, guestCount: cached.guests?.length || 0, cacheExpiresAt: cached.cacheExpiresAt });
-        return Response.json({ ...cached, requestId });
-      }
+      const guestQuery = parseGuestListQuery(url.searchParams);
 
       const pageSize = forceRefresh
         ? safeInt("LUMA_EVENT_SYNC_GUESTS_PAGE_SIZE", 100, 1, 100)
@@ -100,15 +99,35 @@ export async function GET(request: Request) {
 
       if (!forceRefresh && hasLumaDb()) {
         try {
-          const indexedGuests = await listIndexedEventGuests(eventId, { limit: maxEntries });
-          if (indexedGuests.guests.length) {
-            await debugLog(requestId, "event guests index hit", { eventId, guestCount: indexedGuests.guests.length });
+          const indexedGuests = await listIndexedEventGuests(eventId, guestQuery);
+          if (indexedGuests.stats.total > 0) {
+            await debugLog(requestId, "event guests index hit", {
+              eventId,
+              guestCount: indexedGuests.guests.length,
+              totalGuestCount: indexedGuests.stats.total,
+              filter: guestQuery.filter,
+              searchLength: guestQuery.search.length,
+              cursor: guestQuery.cursor,
+            });
             return Response.json({ ...indexedGuests, requestId });
           }
           await debugLog(requestId, "event guests index empty", { eventId });
         } catch (error) {
           await debugLog(requestId, "event guests index skipped", { eventId, status: error.status || 500, message: error.message }, "error");
         }
+      }
+
+      const cached = forceRefresh ? null : readCache(cacheKey);
+      if (cached) {
+        const filteredPayload = filterGuestPayload(cached, guestQuery);
+        await debugLog(requestId, "event guests cache hit", {
+          eventId,
+          guestCount: filteredPayload.guests.length,
+          filter: guestQuery.filter,
+          searchLength: guestQuery.search.length,
+          cacheExpiresAt: cached.cacheExpiresAt,
+        });
+        return Response.json({ ...filteredPayload, cached: true, requestId });
       }
 
       await debugLog(requestId, "event guests cache miss", { eventId, pageSize, maxEntries, maxPages, forceRefresh });
@@ -136,7 +155,7 @@ export async function GET(request: Request) {
         if (!peopleById.has(guest.person.id)) peopleById.set(guest.person.id, guest.person);
       });
 
-      let payload = {
+      const payload = {
         source: "luma",
         eventId,
         event: normalizedEvent,
@@ -154,12 +173,20 @@ export async function GET(request: Request) {
       });
       if (hasLumaDb()) {
         try {
-          const indexedGuests = await listIndexedEventGuests(eventId, { limit: maxEntries });
-          const countsByPerson = new Map(indexedGuests.guests.map((guest) => [guest.personId, guest.eventCounts]));
-          payload = {
-            ...payload,
-            guests: payload.guests.map((guest) => ({ ...guest, eventCounts: countsByPerson.get(guest.personId) || null })),
-          };
+          const indexedGuests = await listIndexedEventGuests(eventId, guestQuery);
+          if (forceRefresh) {
+            cacheStore().delete("events");
+            clearCachePrefix("trace-person:");
+          }
+          writeCache(cacheKey, payload, cacheTtlMs("LUMA_GUEST_CACHE_SECONDS", 600));
+          await debugLog(requestId, "event guests success", {
+            eventId,
+            guestCount: indexedGuests.guests.length,
+            peopleCount: indexedGuests.people.length,
+            truncated: rawGuests.truncated,
+            durationMs: Date.now() - startedAt,
+          });
+          return Response.json({ ...indexedGuests, event: normalizedEvent, truncated: rawGuests.truncated, cached: false, requestId });
         } catch (error) {
           await debugLog(requestId, "event guest counts skipped", { eventId, status: error.status || 500, message: error.message }, "error");
         }
@@ -169,14 +196,15 @@ export async function GET(request: Request) {
         clearCachePrefix("trace-person:");
       }
       writeCache(cacheKey, payload, cacheTtlMs("LUMA_GUEST_CACHE_SECONDS", 600));
+      const filteredPayload = filterGuestPayload(payload, guestQuery);
       await debugLog(requestId, "event guests success", {
         eventId,
-        guestCount: payload.guests.length,
-        peopleCount: payload.people.length,
+        guestCount: filteredPayload.guests.length,
+        peopleCount: filteredPayload.people.length,
         truncated: payload.truncated,
         durationMs: Date.now() - startedAt,
       });
-      return Response.json({ ...payload, cached: false, requestId });
+      return Response.json({ ...filteredPayload, cached: false, requestId });
     }
 
     const pageSize = refreshAll ? safeInt("LUMA_REFRESH_EVENTS_PAGE_SIZE", 50, 1, 50) : safeInt("LUMA_EVENTS_PAGE_SIZE", 25, 1, 50);
@@ -233,18 +261,23 @@ export async function GET(request: Request) {
       },
       ...(refreshSummary ? { refreshSummary } : {}),
     };
-    if (!refreshAll) {
-      for (const rawEvent of managedRawEvents) {
-        await writeSnapshotToIndex({
-          requestId,
-          rawEvent,
-          event: normalizeEvent(rawEvent),
-          guests: [],
-          rawGuests: [],
-        });
-      }
-    }
     writeCache("events", payload, cacheTtlMs("LUMA_EVENTS_CACHE_SECONDS", 300));
+    if (!refreshAll && hasLumaDb() && managedRawEvents.length) {
+      const snapshots = managedRawEvents.map((rawEvent, index) => ({ rawEvent, event: events[index] }));
+      after(async () => {
+        try {
+          const result = await upsertNormalizedLumaEvents(snapshots);
+          await debugLog(requestId, "luma event index batch written", { eventCount: result.eventCount });
+        } catch (error) {
+          await debugLog(
+            requestId,
+            "luma event index batch skipped",
+            { eventCount: snapshots.length, status: error.status || 500, message: error.message },
+            "error",
+          );
+        }
+      });
+    }
     await debugLog(requestId, refreshAll ? "foreground refresh success" : "events success", {
       eventCount: events.length,
       guestCount: refreshSummary?.guestCount || 0,
@@ -313,9 +346,93 @@ export async function POST(request: Request) {
       return Response.json({ ok: true, notificationSent: notification.sendEmail, requestId });
     }
 
+    if (body.action === "bulkUpdateGuestStatus") {
+      assertString(body.eventId, "eventId");
+      const lumaStatus = statusToApproval[body.status];
+      if (!lumaStatus || !["going", "waitlisted", "declined"].includes(body.status)) {
+        return Response.json({ ok: false, error: "Bulk status must be going, waitlisted, or declined.", requestId }, { status: 400 });
+      }
+
+      const updateLimit = safeInt("LUMA_MAX_BULK_STATUS_UPDATES", 50, 1, 200);
+      const guestIds = [...new Set(
+        (Array.isArray(body.guests) ? body.guests : [])
+          .map((guest) => firstString(guest?.lumaGuestId, guest?.guestId))
+          .filter(Boolean),
+      )];
+      if (!guestIds.length) {
+        return Response.json({ ok: false, error: "Select at least one Luma guest.", requestId }, { status: 400 });
+      }
+      if (guestIds.length > updateLimit) {
+        return Response.json({ ok: false, error: `Refusing to update ${guestIds.length} guests at once. Limit is ${updateLimit}.`, requestId }, { status: 400 });
+      }
+
+      const notification = normalizeGuestStatusNotification({ sendEmail: body.sendEmail, message: body.message });
+      const requestDelayMs = safeInt("LUMA_BULK_STATUS_REQUEST_DELAY_MS", 100, 0, 5000);
+      const updatedGuestIds = [];
+      const failures = [];
+      await debugLog(requestId, "bulk guest status start", {
+        eventId: body.eventId,
+        requestedStatus: body.status,
+        guestCount: guestIds.length,
+        sendEmail: notification.sendEmail,
+        hasMessage: Boolean(notification.message),
+      });
+
+      for (let index = 0; index < guestIds.length; index += 1) {
+        if (index > 0 && requestDelayMs) await wait(requestDelayMs);
+        const guestId = guestIds[index];
+        try {
+          await lumaFetch("/v1/events/guests/update-status", {
+            requestId,
+            method: "POST",
+            body: {
+              event_id: body.eventId,
+              guest_id: guestId,
+              status: lumaStatus,
+              send_email: notification.sendEmail,
+              message: notification.message,
+            },
+          });
+          updatedGuestIds.push(guestId);
+          if (hasLumaDb()) {
+            try {
+              await updateIndexedGuestStatus({ eventId: body.eventId, lumaGuestId: guestId, status: body.status, lumaApprovalStatus: lumaStatus });
+            } catch (error) {
+              await debugLog(requestId, "bulk guest status index update skipped", { eventId: body.eventId, status: error.status || 500, message: error.message }, "error");
+            }
+          }
+        } catch (error) {
+          failures.push({ guestId, error: error.message || "Luma update failed." });
+        }
+      }
+
+      cacheStore().delete("event-guests:" + body.eventId);
+      clearCachePrefix("trace-person:");
+      await debugLog(requestId, "bulk guest status complete", {
+        eventId: body.eventId,
+        requestedStatus: body.status,
+        updatedCount: updatedGuestIds.length,
+        failedCount: failures.length,
+        durationMs: Date.now() - startedAt,
+      }, failures.length ? "error" : "info");
+      return Response.json(
+        {
+          ok: failures.length === 0,
+          updated: updatedGuestIds.length,
+          failed: failures.length,
+          updatedGuestIds,
+          failures,
+          notificationSent: notification.sendEmail,
+          requestId,
+        },
+        { status: failures.length ? 207 : 200 },
+      );
+    }
+
     if (body.action === "sendInvites") {
       assertString(body.eventId, "eventId");
       const inviteLimit = safeInt("LUMA_MAX_INVITES_PER_REQUEST", 50, 1, 200);
+      const message = normalizeInviteMessage(body.message);
       const guests = (body.guests || [])
         .filter((guest) => guest.source === "luma" && guest.email)
         .map((guest) => ({
@@ -323,7 +440,7 @@ export async function POST(request: Request) {
           name: guest.name || null,
         }));
 
-      await debugLog(requestId, "send invites prepared", { eventId: body.eventId, requestedCount: body.guests?.length || 0, lumaRecipientCount: guests.length, inviteLimit });
+      await debugLog(requestId, "send invites prepared", { eventId: body.eventId, requestedCount: body.guests?.length || 0, lumaRecipientCount: guests.length, inviteLimit, hasMessage: Boolean(message) });
 
       if (!guests.length) {
         return Response.json({ ok: false, error: "No Luma-origin recipients were provided.", requestId }, { status: 400 });
@@ -338,7 +455,7 @@ export async function POST(request: Request) {
         body: {
           event_id: body.eventId,
           guests,
-          message: body.message || null,
+          message,
         },
       });
       await debugLog(requestId, "send invites success", { eventId: body.eventId, invited: guests.length, durationMs: Date.now() - startedAt });

@@ -4,22 +4,102 @@ import { buildRegistrationQuestionAnalytics, eventWideAnalyticsCounts } from "..
 
 test("uses event-wide stats instead of the currently loaded guest page", () => {
   const counts = eventWideAnalyticsCounts(
-    { total: 66, invited: 0, accepted: 43, checkedIn: 21, newFaces: 20 },
-    { registrations: 20, accepted: 12, checkedIn: 8, newPeople: 20, returning: 0 },
+    {
+      total: 66,
+      invited: 0,
+      registered: 51,
+      accepted: 43,
+      checkedIn: 21,
+      firstRegisters: 20,
+      newFaces: 9,
+      referredRegistrations: 14,
+      referredAccepted: 11,
+      referredCheckedIn: 7,
+      referredFirstRegisters: 4,
+      referredReturning: 7,
+    },
+    {
+      registrations: 20,
+      accepted: 12,
+      checkedIn: 8,
+      firstRegisters: 12,
+      newFaces: 4,
+      returningAccepted: 0,
+      referredRegistrations: 2,
+      referredAccepted: 1,
+      referredCheckedIn: 1,
+      referredFirstRegisters: 1,
+      referredReturning: 0,
+    },
   );
 
   assert.deepEqual(counts, {
-    registrations: 66,
+    registrations: 51,
     accepted: 43,
     checkedIn: 21,
-    newPeople: 20,
-    returning: 46,
+    firstRegisters: 20,
+    newFaces: 9,
+    referredRegistrations: 14,
+    referredAccepted: 11,
+    referredCheckedIn: 7,
+    referredFirstRegisters: 4,
+    referredReturning: 7,
+    returningAccepted: 23,
   });
 });
 
 test("falls back to loaded rows when event-wide stats are unavailable", () => {
-  const fallback = { registrations: 4, accepted: 3, checkedIn: 2, newPeople: 1, returning: 3 };
+  const fallback = {
+    registrations: 4,
+    accepted: 3,
+    checkedIn: 2,
+    firstRegisters: 1,
+    newFaces: 1,
+    returningAccepted: 2,
+    referredRegistrations: 2,
+    referredAccepted: 2,
+    referredCheckedIn: 1,
+    referredFirstRegisters: 0,
+    referredReturning: 2,
+  };
   assert.equal(eventWideAnalyticsCounts(null, fallback), fallback);
+});
+
+test("keeps referral cohorts inside their parent funnel stages", () => {
+  const counts = eventWideAnalyticsCounts(
+    {
+      total: 10,
+      registered: 8,
+      accepted: 6,
+      checkedIn: 3,
+      firstRegisters: 2,
+      newFaces: 1,
+      referredRegistrations: 20,
+      referredAccepted: 10,
+      referredCheckedIn: 8,
+      referredFirstRegisters: 4,
+      referredReturning: 9,
+    },
+    {
+      registrations: 0,
+      accepted: 0,
+      checkedIn: 0,
+      firstRegisters: 0,
+      newFaces: 0,
+      returningAccepted: 0,
+      referredRegistrations: 0,
+      referredAccepted: 0,
+      referredCheckedIn: 0,
+      referredFirstRegisters: 0,
+      referredReturning: 0,
+    },
+  );
+
+  assert.equal(counts.referredRegistrations, 8);
+  assert.equal(counts.referredAccepted, 6);
+  assert.equal(counts.referredCheckedIn, 3);
+  assert.equal(counts.referredFirstRegisters, 2);
+  assert.equal(counts.referredReturning, 4);
 });
 
 test("aggregates registration answers independently of guest-list filters", () => {

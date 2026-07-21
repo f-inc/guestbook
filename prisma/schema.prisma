@@ -12,6 +12,8 @@ model LumaEvent {
   title       String
   date        DateTime? @db.Date
   startsAt    DateTime? @map("starts_at") @db.Timestamptz(6)
+  endsAt      DateTime? @map("ends_at") @db.Timestamptz(6)
+  visibility  String?
   location    String?
   category    String?
   capacity    Int?
@@ -25,34 +27,83 @@ model LumaEvent {
   syncState LumaEventSyncState?
 
   @@index([startsAt(sort: Desc)])
+  @@index([visibility, startsAt(sort: Desc)])
   @@map("luma_events")
 }
 
 model LumaPerson {
-  personId        String   @id @map("person_id")
-  lumaUserId      String?  @map("luma_user_id")
-  lumaUserIdLower String?  @map("luma_user_id_lower")
-  email           String?
-  emailLower      String?  @map("email_lower")
-  name            String
-  title           String?
-  bio             String?
-  avatarUrl       String?  @map("avatar_url")
-  profileUrl      String?  @map("profile_url")
-  socialLinks     Json     @default("[]") @map("social_links")
-  referrer        Json?
-  groups          Json     @default("[]")
-  tags            Json     @default("[]")
-  raw             Json     @default("{}")
-  firstSeenAt     DateTime @default(now()) @map("first_seen_at") @db.Timestamptz(6)
-  lastSeenAt      DateTime @default(now()) @map("last_seen_at") @db.Timestamptz(6)
-  syncedAt        DateTime @default(now()) @map("synced_at") @db.Timestamptz(6)
+  personId          String    @id @map("person_id")
+  lumaUserId        String?   @map("luma_user_id")
+  lumaUserIdLower   String?   @map("luma_user_id_lower")
+  email             String?
+  emailLower        String?   @map("email_lower")
+  name              String
+  title             String?
+  bio               String?
+  avatarUrl         String?   @map("avatar_url")
+  profileUrl        String?   @map("profile_url")
+  socialLinks       Json      @default("[]") @map("social_links")
+  referrer          Json?
+  groups            Json      @default("[]")
+  tags              Json      @default("[]")
+  manualTags        Json      @default("[]") @map("manual_tags")
+  automaticTags     Json      @default("[]") @map("automatic_tags")
+  crmNotes          String    @default("") @map("crm_notes") @db.Text
+  crmNotesUpdatedAt DateTime? @map("crm_notes_updated_at") @db.Timestamptz(6)
+  raw               Json      @default("{}")
+  firstSeenAt       DateTime  @default(now()) @map("first_seen_at") @db.Timestamptz(6)
+  lastSeenAt        DateTime  @default(now()) @map("last_seen_at") @db.Timestamptz(6)
+  syncedAt          DateTime  @default(now()) @map("synced_at") @db.Timestamptz(6)
 
-  eventGuests LumaEventGuest[]
+  eventGuests         LumaEventGuest[]
+  automaticTagMatches AutomaticTagAssignment[]
 
   @@index([lumaUserIdLower])
   @@index([emailLower])
   @@map("luma_people")
+}
+
+model GuestTag {
+  id        String   @id
+  name      String
+  color     String   @default("#0f766e")
+  managed   Boolean  @default(false)
+  ruleKey   String?  @unique @map("rule_key")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  automaticAssignments AutomaticTagAssignment[]
+
+  @@map("guest_tags")
+}
+
+model AutomaticTagAssignment {
+  personId    String   @map("person_id")
+  tagId       String   @map("tag_id")
+  ruleKey     String   @map("rule_key")
+  evidence    Json     @default("{}")
+  assignedAt  DateTime @default(now()) @map("assigned_at") @db.Timestamptz(6)
+  evaluatedAt DateTime @default(now()) @map("evaluated_at") @db.Timestamptz(6)
+
+  person LumaPerson @relation(fields: [personId], references: [personId], onDelete: Cascade)
+  tag    GuestTag   @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([personId, ruleKey])
+  @@index([tagId, personId])
+  @@index([personId])
+  @@map("automatic_tag_assignments")
+}
+
+model AutomaticTagState {
+  id                     String   @id
+  publicEventFingerprint String   @default("") @map("public_event_fingerprint")
+  lastMode               String?  @map("last_mode")
+  lastEvaluatedCount     Int      @default(0) @map("last_evaluated_count")
+  lastChangedCount       Int      @default(0) @map("last_changed_count")
+  lastDurationMs         Int      @default(0) @map("last_duration_ms")
+  lastRunAt              DateTime @default(now()) @map("last_run_at") @db.Timestamptz(6)
+
+  @@map("automatic_tag_state")
 }
 
 model LumaEventGuest {
@@ -65,6 +116,7 @@ model LumaEventGuest {
   emailLower          String?   @map("email_lower")
   status              String?
   lumaApprovalStatus  String?   @map("luma_approval_status")
+  operatorDecision    String?   @map("operator_decision")
   registeredAt        DateTime? @map("registered_at") @db.Timestamptz(6)
   invitedAt           DateTime? @map("invited_at") @db.Timestamptz(6)
   createdAt           DateTime? @map("created_at") @db.Timestamptz(6)
@@ -86,6 +138,7 @@ model LumaEventGuest {
 
   @@id([eventId, personId])
   @@index([eventId])
+  @@index([eventId, status, operatorDecision])
   @@index([personId])
   @@index([lumaUserIdLower])
   @@index([emailLower])

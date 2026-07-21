@@ -2,6 +2,7 @@ import { parseTagFilters } from "./person-tags";
 
 export const GUEST_FILTER_VALUES = [
   "all",
+  "to_decide",
   "checked_in",
   "accepted",
   "registered",
@@ -9,8 +10,13 @@ export const GUEST_FILTER_VALUES = [
   "waitlisted",
   "declined",
   "no_show",
+  "first_registers",
   "new_faces",
 ] as const;
+
+export const GUEST_REGISTRATION_STATUSES = ["registered", "going", "waitlisted", "checked_in", "declined", "no_show"];
+export const GUEST_ACCEPTED_STATUSES = ["going", "checked_in", "no_show"];
+export const GUEST_REGISTERED_STATUSES = ["registered", "waitlisted", ...GUEST_ACCEPTED_STATUSES];
 
 export type GuestFilter = (typeof GUEST_FILTER_VALUES)[number];
 
@@ -20,6 +26,13 @@ export type GuestListQuery = {
   tags: string[];
   cursor: number;
   pageSize: number;
+  includeSummary?: boolean;
+  includeEventCounts?: boolean;
+};
+
+export type EventChronologyBoundary = {
+  startsAt?: Date | string | null;
+  date?: Date | string | null;
 };
 
 export function parseGuestListQuery(params: URLSearchParams): GuestListQuery {
@@ -31,32 +44,62 @@ export function parseGuestListQuery(params: URLSearchParams): GuestListQuery {
     tags: parseTagFilters(params.getAll("guest_tag")),
     cursor: boundedInteger(params.get("guest_cursor"), 0, 0, 1_000_000),
     pageSize: boundedInteger(params.get("guest_limit"), 50, 10, 100),
+    includeSummary: params.get("guest_summary") !== "0",
   };
 }
 
-export function eventGuestWhere(eventId: string, query: GuestListQuery): Record<string, any> {
-  const filters = [guestStatusWhere(eventId, query.filter), guestSearchWhere(query.search), guestTagsWhere(query.tags)].filter(Boolean);
+export function eventGuestWhere(
+  eventId: string,
+  query: GuestListQuery,
+  boundary?: EventChronologyBoundary | null,
+): Record<string, any> {
+  const filters = [guestStatusWhere(eventId, query.filter, boundary), guestSearchWhere(query.search), guestTagsWhere(query.tags)].filter(Boolean);
   return {
     eventId,
     ...(filters.length ? { AND: filters } : {}),
   };
 }
 
-export function guestStatusWhere(eventId: string, filter: GuestFilter): Record<string, any> | null {
+export function guestStatusWhere(
+  eventId: string,
+  filter: GuestFilter,
+  boundary?: EventChronologyBoundary | null,
+): Record<string, any> | null {
   if (filter === "all") return null;
-  if (filter === "accepted") return { status: { in: ["going", "checked_in", "no_show"] } };
-  if (filter === "new_faces") {
+  if (filter === "to_decide") {
     return {
-      person: {
-        is: {
-          eventGuests: {
-            none: { eventId: { not: eventId } },
-          },
+      OR: [
+        { status: "registered" },
+        {
+          AND: [
+            { status: "waitlisted" },
+            { OR: [{ operatorDecision: null }, { operatorDecision: { not: "waitlisted" } }] },
+          ],
         },
-      },
+      ],
     };
   }
+  if (filter === "accepted") return { status: { in: GUEST_ACCEPTED_STATUSES } };
+  if (filter === "registered") return { status: { in: GUEST_REGISTERED_STATUSES } };
+  if (filter === "first_registers") {
+    return { AND: [{ status: { in: GUEST_ACCEPTED_STATUSES } }, firstRegistrationPersonWhere(eventId, boundary)] };
+  }
+  if (filter === "new_faces") return { AND: [{ status: "checked_in" }, firstRegistrationPersonWhere(eventId, boundary)] };
   return { status: filter };
+}
+
+export function priorEventWhere(boundary?: EventChronologyBoundary | null): Record<string, any> | null {
+  const startsAt = validDate(boundary?.startsAt);
+  const date = validDate(boundary?.date);
+  if (startsAt) {
+    return {
+      OR: [
+        { startsAt: { lt: startsAt } },
+        ...(date ? [{ startsAt: null, date: { lt: date } }] : []),
+      ],
+    };
+  }
+  return date ? { date: { lt: date } } : null;
 }
 
 export function filterGuestPayload(payload: any, query: GuestListQuery) {
@@ -88,14 +131,33 @@ export function filterGuestPayload(payload: any, query: GuestListQuery) {
 }
 
 export function summarizeGuests(guests: any[]) {
+  const firstRegisters = guests.filter(isFirstRegister);
   return {
     total: guests.length,
     checkedIn: guests.filter((guest) => guest.status === "checked_in").length,
-    accepted: guests.filter((guest) => ["going", "checked_in", "no_show"].includes(guest.status)).length,
-    registered: guests.filter((guest) => guest.status === "registered").length,
+    accepted: guests.filter((guest) => GUEST_ACCEPTED_STATUSES.includes(guest.status)).length,
+    registered: guests.filter((guest) => GUEST_REGISTERED_STATUSES.includes(guest.status)).length,
     invited: guests.filter((guest) => guest.status === "invited").length,
+    toDecide: guests.filter((guest) => guest.status === "registered" || (guest.status === "waitlisted" && guest.operatorDecision !== "waitlisted")).length,
     waitlisted: guests.filter((guest) => guest.status === "waitlisted").length,
-    newFaces: guests.filter((guest) => guest.isNewFace === true).length,
+    firstRegisters: firstRegisters.length,
+    newFaces: guests.filter((guest) => guest.status === "checked_in" && isFirstRegistration(guest)).length,
+  };
+}
+
+function firstRegistrationPersonWhere(eventId: string, boundary?: EventChronologyBoundary | null): Record<string, any> {
+  const priorEvent = priorEventWhere(boundary);
+  return {
+    person: {
+      is: {
+        eventGuests: {
+          none: {
+            eventId: { not: eventId },
+            ...(priorEvent ? { event: { is: priorEvent } } : {}),
+          },
+        },
+      },
+    },
   };
 }
 
@@ -134,9 +196,24 @@ function guestTagsWhere(tags: string[]): Record<string, any> | null {
 
 function guestMatchesFilter(guest: any, filter: GuestFilter): boolean {
   if (filter === "all") return true;
-  if (filter === "accepted") return ["going", "checked_in", "no_show"].includes(guest.status);
-  if (filter === "new_faces") return guest.isNewFace === true;
+  if (filter === "to_decide") {
+    return guest.status === "registered"
+      || (guest.status === "waitlisted" && guest.operatorDecision !== "waitlisted");
+  }
+  if (filter === "accepted") return GUEST_ACCEPTED_STATUSES.includes(guest.status);
+  if (filter === "registered") return GUEST_REGISTERED_STATUSES.includes(guest.status);
+  if (filter === "first_registers") return isFirstRegister(guest);
+  if (filter === "new_faces") return guest.status === "checked_in" && isFirstRegistration(guest);
   return guest.status === filter;
+}
+
+function isFirstRegister(guest: any): boolean {
+  return GUEST_ACCEPTED_STATUSES.includes(guest.status) && isFirstRegistration(guest);
+}
+
+function isFirstRegistration(guest: any): boolean {
+  return GUEST_REGISTRATION_STATUSES.includes(guest.status)
+    && (guest.isFirstRegistration === true || guest.isNewFace === true);
 }
 
 function guestMatchesSearch(guest: any, person: any, search: string): boolean {
@@ -159,4 +236,10 @@ function boundedInteger(value: string | null, fallback: number, min: number, max
   const parsed = Number.parseInt(value || "", 10);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.min(max, Math.max(min, parsed));
+}
+
+function validDate(value: Date | string | null | undefined): Date | null {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
 }

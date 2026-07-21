@@ -4,12 +4,20 @@ import { after } from "next/server";
 type AnyRecord = Record<string, any>;
 type HttpError = Error & { status?: number };
 import nodePath from "node:path";
-import { getIndexedTrace, hasLumaDb, listIndexedEventGuests, listIndexedEvents, removeIndexedEventGuestsMissingFromSnapshot, removeIndexedTraceRecordsMissingFromEvents, updateIndexedGuestStatus, upsertNormalizedLumaEvents, upsertNormalizedLumaGuestActivity, upsertNormalizedLumaSnapshot } from "./db";
+import { getIndexedEventAnalytics, getIndexedLifetimeEventCounts, getIndexedTrace, hasLumaDb, listIndexedEventGuests, listIndexedEvents, recordEventSyncState, removeIndexedEventGuestsMissingFromSnapshot, removeIndexedTraceRecordsMissingFromEvents, runAutomaticTagClassifier, updateIndexedGuestStatus, upsertNormalizedLumaEvents, upsertNormalizedLumaGuestActivity, upsertNormalizedLumaSnapshot } from "./db";
 import { lumaEventDate } from "./event-date";
 import { filterGuestPayload, parseGuestListQuery } from "./guest-query";
 import { orderAvatarCandidates } from "../../avatar-order";
 import { normalizeGuestStatusNotification } from "../../guest-status-notification";
 import { normalizeInviteMessage } from "../../invite-message";
+import {
+  EVENT_SWITCH_DIAGNOSTICS_ACTION,
+  EVENT_SWITCH_DIAGNOSTICS_PARAM,
+  EVENT_SWITCH_DIAGNOSTICS_PREFIX,
+  normalizeClientEventSwitchDiagnostic,
+  normalizeEventSwitchDiagnosticId,
+  type EventSwitchDiagnosticReporter,
+} from "../../event-switch-diagnostics";
 import { requireSessionKey } from "../session-auth";
 
 export const runtime = "nodejs";
@@ -50,8 +58,20 @@ export async function GET(request: Request) {
     const traceEmail = url.searchParams.get("trace_email") || url.searchParams.get("email");
     const forceRefresh = url.searchParams.get("refresh") === "1";
     const refreshAll = url.searchParams.get("refresh_all") === "1";
+    const analyticsOnly = url.searchParams.get("event_analytics") === "1";
+    const guestHistoryOnly = url.searchParams.get("guest_history") === "1";
     const traceScope = url.searchParams.get("trace_scope") === "all" ? "all" : "known";
-    await debugLog(requestId, "GET /api/luma start", { eventId, tracePerson: Boolean(tracePersonId || traceEmail), forceRefresh, refreshAll, traceScope });
+    // EVENT_SWITCH_DIAGNOSTICS: this ID correlates the browser lifecycle with server and DB phases.
+    const eventSwitchDiagnosticId = normalizeEventSwitchDiagnosticId(url.searchParams.get(EVENT_SWITCH_DIAGNOSTICS_PARAM));
+    const knownEventBoundary = parseKnownEventBoundary(url.searchParams);
+    await debugLog(requestId, "GET /api/luma start", {
+      eventId,
+      tracePerson: Boolean(tracePersonId || traceEmail),
+      forceRefresh,
+      refreshAll,
+      traceScope,
+      ...(eventSwitchDiagnosticId ? { eventSwitchDiagnosticId } : {}),
+    });
 
     if (tracePersonId || traceEmail) {
       if (!forceRefresh && hasLumaDb()) {
@@ -83,9 +103,58 @@ export async function GET(request: Request) {
       return Response.json({ ...payload, requestId });
     }
 
+    if (eventId && guestHistoryOnly && hasLumaDb()) {
+      const historyStartedAt = Date.now();
+      const personIds = [...new Set(
+        url.searchParams.getAll("person_id")
+          .map((value) => value.trim())
+          .filter((value) => /^[a-z0-9@._-]{1,160}$/i.test(value)),
+      )].slice(0, 100);
+      if (!personIds.length) return Response.json({ error: "At least one person_id is required.", requestId }, { status: 400 });
+      const diagnostic = createEventSwitchDiagnosticCollector(eventSwitchDiagnosticId, "history.db");
+      const history = await getIndexedLifetimeEventCounts(eventId, personIds, diagnostic.report);
+      if (eventSwitchDiagnosticId) {
+        await debugLog(requestId, `${EVENT_SWITCH_DIAGNOSTICS_PREFIX}.server_history`, {
+          diagnosticId: eventSwitchDiagnosticId,
+          eventId,
+          phases: diagnostic.phases,
+          durationMs: Date.now() - historyStartedAt,
+        });
+      }
+      await debugLog(requestId, "event guest history index hit", {
+        eventId,
+        personCount: personIds.length,
+        durationMs: Date.now() - historyStartedAt,
+      });
+      return Response.json({ ...history, requestId });
+    }
+
+    if (eventId && analyticsOnly && hasLumaDb()) {
+      const analyticsStartedAt = Date.now();
+      const diagnostic = createEventSwitchDiagnosticCollector(eventSwitchDiagnosticId, "analytics.db");
+      const analytics = await getIndexedEventAnalytics(eventId, diagnostic.report, knownEventBoundary);
+      if (!analytics) return Response.json({ error: "Event not found in the Luma index.", requestId }, { status: 404 });
+      if (eventSwitchDiagnosticId) {
+        await debugLog(requestId, `${EVENT_SWITCH_DIAGNOSTICS_PREFIX}.server_analytics`, {
+          diagnosticId: eventSwitchDiagnosticId,
+          eventId,
+          phases: diagnostic.phases,
+          durationMs: Date.now() - analyticsStartedAt,
+        });
+      }
+      await debugLog(requestId, "event analytics index hit", {
+        eventId,
+        registrationCount: analytics.stats.registered,
+        questionCount: analytics.analyticsQuestions.length,
+        durationMs: Date.now() - analyticsStartedAt,
+      });
+      return Response.json({ ...analytics, requestId });
+    }
+
     if (eventId) {
-      const cacheKey = "event-guests:" + eventId;
+      const cacheKey = eventGuestCacheKey(eventId);
       const guestQuery = parseGuestListQuery(url.searchParams);
+      const prioritizePage = url.searchParams.get("guest_mode") === "page";
 
       const pageSize = forceRefresh
         ? safeInt("LUMA_EVENT_SYNC_GUESTS_PAGE_SIZE", 100, 1, 100)
@@ -97,37 +166,66 @@ export async function GET(request: Request) {
         ? safeInt("LUMA_EVENT_SYNC_MAX_GUEST_PAGES", 1000, 1, 1000)
         : safeInt("LUMA_MAX_GUEST_PAGES_PER_EVENT", 3, 1, 10);
 
-      if (!forceRefresh && hasLumaDb()) {
-        try {
-          const indexedGuests = await listIndexedEventGuests(eventId, guestQuery);
-          if (indexedGuests.stats.total > 0) {
-            await debugLog(requestId, "event guests index hit", {
-              eventId,
-              guestCount: indexedGuests.guests.length,
-              totalGuestCount: indexedGuests.stats.total,
-              filter: guestQuery.filter,
-              searchLength: guestQuery.search.length,
-              cursor: guestQuery.cursor,
-            });
-            return Response.json({ ...indexedGuests, requestId });
-          }
-          await debugLog(requestId, "event guests index empty", { eventId });
-        } catch (error) {
-          await debugLog(requestId, "event guests index skipped", { eventId, status: error.status || 500, message: error.message }, "error");
-        }
-      }
-
-      const cached = forceRefresh ? null : readCache(cacheKey);
+      // The To Decide view depends on the local operator-decision marker, which
+      // is intentionally not present in Luma's remote guest payload cache.
+      const cached = forceRefresh || guestQuery.filter === "to_decide" ? null : readCache(cacheKey);
       if (cached) {
         const filteredPayload = filterGuestPayload(cached, guestQuery);
+        if (eventSwitchDiagnosticId) {
+          await debugLog(requestId, `${EVENT_SWITCH_DIAGNOSTICS_PREFIX}.server_guest_cache`, {
+            diagnosticId: eventSwitchDiagnosticId,
+            eventId,
+            guestCount: filteredPayload.guests.length,
+            durationMs: Date.now() - startedAt,
+          });
+        }
         await debugLog(requestId, "event guests cache hit", {
           eventId,
           guestCount: filteredPayload.guests.length,
           filter: guestQuery.filter,
           searchLength: guestQuery.search.length,
           cacheExpiresAt: cached.cacheExpiresAt,
+          durationMs: Date.now() - startedAt,
         });
-        return Response.json({ ...filteredPayload, cached: true, requestId });
+        return Response.json({ ...filteredPayload, cached: true, snapshotReady: true, requestId });
+      }
+
+      if (!forceRefresh && hasLumaDb()) {
+        try {
+          const indexStartedAt = Date.now();
+          const diagnostic = createEventSwitchDiagnosticCollector(eventSwitchDiagnosticId, prioritizePage ? "overview.db" : "snapshot.db");
+          const indexedResult = prioritizePage
+            ? await loadIndexedGuestPage(eventId, guestQuery, diagnostic.report, knownEventBoundary)
+            : await loadIndexedGuestPayload(eventId, guestQuery, cacheKey, diagnostic.report, knownEventBoundary);
+          if (indexedResult) {
+            const { payload: indexedPayload, snapshotCached } = indexedResult;
+            if (eventSwitchDiagnosticId) {
+              await debugLog(requestId, `${EVENT_SWITCH_DIAGNOSTICS_PREFIX}.server_guests`, {
+                diagnosticId: eventSwitchDiagnosticId,
+                eventId,
+                prioritizePage,
+                phases: diagnostic.phases,
+                durationMs: Date.now() - indexStartedAt,
+              });
+            }
+            await debugLog(requestId, "event guests index hit", {
+              eventId,
+              guestCount: indexedPayload.guests.length,
+              totalGuestCount: indexedPayload.stats?.total ?? null,
+              filter: guestQuery.filter,
+              searchLength: guestQuery.search.length,
+              cursor: guestQuery.cursor,
+              includeSummary: guestQuery.includeSummary !== false,
+              prioritizePage,
+              snapshotCached,
+              durationMs: Date.now() - indexStartedAt,
+            });
+            return Response.json({ ...indexedPayload, snapshotReady: snapshotCached, requestId });
+          }
+          await debugLog(requestId, "event guests index empty", { eventId });
+        } catch (error) {
+          await debugLog(requestId, "event guests index skipped", { eventId, status: error.status || 500, message: error.message }, "error");
+        }
       }
 
       await debugLog(requestId, "event guests cache miss", { eventId, pageSize, maxEntries, maxPages, forceRefresh });
@@ -164,29 +262,50 @@ export async function GET(request: Request) {
         truncated: rawGuests.truncated,
         loadedAt: new Date().toISOString(),
       };
-      await writeSnapshotToIndex({
+      const indexWrite = await writeSnapshotToIndex({
         requestId,
         rawEvent: event,
         event: normalizedEvent,
         guests: eventGuests,
         rawGuests: rawGuests.entries,
       });
+      let automaticTags = null;
+      if (forceRefresh && indexWrite && hasLumaDb()) {
+        await recordEventSyncState({
+          eventId,
+          guestCount: eventGuests.length,
+          status: rawGuests.truncated ? "truncated" : "success",
+          truncated: rawGuests.truncated,
+        });
+        if (!rawGuests.truncated) {
+          const reconciliation = await removeIndexedEventGuestsMissingFromSnapshot({
+            eventId,
+            personIds: eventGuests.map((guest) => guest.personId),
+          });
+          automaticTags = await classifyAfterEventSync({
+            requestId,
+            eventId,
+            personIds: [...eventGuests.map((guest) => guest.personId), ...reconciliation.personIds],
+          });
+        }
+      }
       if (hasLumaDb()) {
         try {
-          const indexedGuests = await listIndexedEventGuests(eventId, guestQuery);
+          const indexedResult = await loadIndexedGuestPayload(eventId, guestQuery, cacheKey);
+          if (!indexedResult) throw new Error("The refreshed event guest index is empty.");
+          const { payload: indexedPayload } = indexedResult;
           if (forceRefresh) {
             cacheStore().delete("events");
             clearCachePrefix("trace-person:");
           }
-          writeCache(cacheKey, payload, cacheTtlMs("LUMA_GUEST_CACHE_SECONDS", 600));
           await debugLog(requestId, "event guests success", {
             eventId,
-            guestCount: indexedGuests.guests.length,
-            peopleCount: indexedGuests.people.length,
+            guestCount: indexedPayload.guests.length,
+            peopleCount: indexedPayload.people.length,
             truncated: rawGuests.truncated,
             durationMs: Date.now() - startedAt,
           });
-          return Response.json({ ...indexedGuests, event: normalizedEvent, truncated: rawGuests.truncated, cached: false, requestId });
+          return Response.json({ ...indexedPayload, event: normalizedEvent, truncated: rawGuests.truncated, cached: false, snapshotReady: true, automaticTags, requestId });
         } catch (error) {
           await debugLog(requestId, "event guest counts skipped", { eventId, status: error.status || 500, message: error.message }, "error");
         }
@@ -204,7 +323,7 @@ export async function GET(request: Request) {
         truncated: payload.truncated,
         durationMs: Date.now() - startedAt,
       });
-      return Response.json({ ...filteredPayload, cached: false, requestId });
+      return Response.json({ ...filteredPayload, cached: false, automaticTags, requestId });
     }
 
     const pageSize = refreshAll ? safeInt("LUMA_REFRESH_EVENTS_PAGE_SIZE", 50, 1, 50) : safeInt("LUMA_EVENTS_PAGE_SIZE", 25, 1, 50);
@@ -297,8 +416,18 @@ export async function POST(request: Request) {
 
   try {
     requireSessionKey(request);
-    assertApiKey();
     const body: any = await request.json();
+    // EVENT_SWITCH_DIAGNOSTICS: read-only client lifecycle ingest; deliberately bypasses Luma write confirmation.
+    if (body.action === EVENT_SWITCH_DIAGNOSTICS_ACTION) {
+      const diagnostic = normalizeClientEventSwitchDiagnostic(body);
+      if (!diagnostic.diagnosticId) {
+        return Response.json({ error: "Invalid event switch diagnostic ID.", requestId }, { status: 400 });
+      }
+      await debugLog(requestId, `${EVENT_SWITCH_DIAGNOSTICS_PREFIX}.client`, diagnostic);
+      return Response.json({ ok: true, requestId });
+    }
+
+    assertApiKey();
     await debugLog(requestId, "POST /api/luma start", { action: body.action, eventId: body.eventId });
     requireLiveWriteConfirmation(body);
 
@@ -335,7 +464,7 @@ export async function POST(request: Request) {
       if (hasLumaDb()) {
         try {
           const indexedUpdate = await updateIndexedGuestStatus({ eventId: body.eventId, lumaGuestId: body.guestId, status: body.status, lumaApprovalStatus: status });
-          cacheStore().delete("event-guests:" + body.eventId);
+          clearEventGuestCache(body.eventId);
           clearCachePrefix("trace-person:");
           await debugLog(requestId, "guest status index updated", { eventId: body.eventId, updatedCount: indexedUpdate.updatedCount });
         } catch (error) {
@@ -406,7 +535,7 @@ export async function POST(request: Request) {
         }
       }
 
-      cacheStore().delete("event-guests:" + body.eventId);
+      clearEventGuestCache(body.eventId);
       clearCachePrefix("trace-person:");
       await debugLog(requestId, "bulk guest status complete", {
         eventId: body.eventId,
@@ -475,6 +604,8 @@ function normalizeEvent(event) {
     title: event.name || "Untitled event",
     date: lumaEventDate(event),
     startsAt: event.start_at || null,
+    endsAt: event.end_at || null,
+    visibility: event.visibility || null,
     location: formatLocation(event),
     category: firstTag(event) || event.calendar?.name || "Luma",
     capacity: event.max_capacity || event.guest_capacity || event.guest_count || 1,
@@ -635,10 +766,102 @@ function writeCache(key, value, ttlMs) {
   cacheStore().set(key, { value, expiresAt: Date.now() + ttlMs });
 }
 
+function eventGuestCacheKey(eventId) {
+  return "event-guests:v3:" + eventId;
+}
+
+function clearEventGuestCache(eventId) {
+  cacheStore().delete(eventGuestCacheKey(eventId));
+  cacheStore().delete("event-guests:v2:" + eventId);
+  cacheStore().delete("event-guests:" + eventId);
+}
+
 function clearCachePrefix(prefix) {
   for (const key of cacheStore().keys()) {
     if (key.startsWith(prefix)) cacheStore().delete(key);
   }
+}
+
+async function loadIndexedGuestPayload(
+  eventId,
+  guestQuery,
+  cacheKey,
+  diagnosticReporter?: EventSwitchDiagnosticReporter,
+  knownEventBoundary?: { startsAt: Date | null; date: Date | null } | null,
+) {
+  const snapshotLimit = safeInt("LUMA_INDEX_GUEST_CACHE_MAX_ENTRIES", 1000, 25, 5000);
+  const snapshotResult = await listIndexedEventGuests(eventId, {
+    filter: "all",
+    search: "",
+    tags: [],
+    cursor: 0,
+    pageSize: snapshotLimit,
+    includeSummary: false,
+  }, prefixEventSwitchDiagnosticReporter(diagnosticReporter, "snapshot"), knownEventBoundary);
+  const { indexHasGuests, ...snapshot } = snapshotResult;
+  if (!indexHasGuests) return null;
+
+  if (!snapshot.pageInfo.hasMore) {
+    writeCache(cacheKey, snapshot, cacheTtlMs("LUMA_GUEST_CACHE_SECONDS", 600));
+    return {
+      payload: filterGuestPayload(snapshot, guestQuery),
+      snapshotCached: true,
+    };
+  }
+
+  const requestedResult = await listIndexedEventGuests(eventId, {
+    ...guestQuery,
+    includeSummary: false,
+  }, prefixEventSwitchDiagnosticReporter(diagnosticReporter, "requested_page"), knownEventBoundary);
+  const { indexHasGuests: _indexHasGuests, ...requestedPayload } = requestedResult;
+  return {
+    payload: {
+      ...requestedPayload,
+      ...(guestQuery.includeSummary === false
+        ? {}
+        : { stats: snapshot.stats, analyticsQuestions: snapshot.analyticsQuestions }),
+    },
+    snapshotCached: false,
+  };
+}
+
+async function loadIndexedGuestPage(
+  eventId,
+  guestQuery,
+  diagnosticReporter?: EventSwitchDiagnosticReporter,
+  knownEventBoundary?: { startsAt: Date | null; date: Date | null } | null,
+) {
+  const indexedResult = await listIndexedEventGuests(eventId, {
+    ...guestQuery,
+    includeSummary: false,
+    includeEventCounts: false,
+  }, diagnosticReporter, knownEventBoundary);
+  const { indexHasGuests: _indexHasGuests, ...payload } = indexedResult;
+  return { payload, snapshotCached: false };
+}
+
+// EVENT_SWITCH_DIAGNOSTICS: temporary collector keeps timing instrumentation out of normal response payloads.
+function createEventSwitchDiagnosticCollector(diagnosticId: string, prefix: string) {
+  const phases: Array<Record<string, any>> = [];
+  const report: EventSwitchDiagnosticReporter | undefined = diagnosticId
+    ? (stage, durationMs, details = {}) => phases.push({ stage: `${prefix}.${stage}`, durationMs, ...details })
+    : undefined;
+  return { phases, report };
+}
+
+function prefixEventSwitchDiagnosticReporter(reporter: EventSwitchDiagnosticReporter | undefined, prefix: string) {
+  if (!reporter) return undefined;
+  return (stage: string, durationMs: number, details = {}) => reporter(`${prefix}.${stage}`, durationMs, details);
+}
+
+function parseKnownEventBoundary(params: URLSearchParams) {
+  const startsAtValue = params.get("event_starts_at") || "";
+  const dateValue = params.get("event_date") || "";
+  const startsAt = startsAtValue ? new Date(startsAtValue) : null;
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(dateValue) ? new Date(`${dateValue}T00:00:00.000Z`) : null;
+  const validStartsAt = startsAt && !Number.isNaN(startsAt.getTime()) ? startsAt : null;
+  const validDate = date && !Number.isNaN(date.getTime()) ? date : null;
+  return validStartsAt || validDate ? { startsAt: validStartsAt, date: validDate } : null;
 }
 
 async function refreshManagedData({ requestId, rawEvents }: AnyRecord) {
@@ -679,7 +902,7 @@ async function refreshManagedData({ requestId, rawEvents }: AnyRecord) {
         const reconciliation = await removeIndexedEventGuestsMissingFromSnapshot({ eventId: event.id, personIds: guests.map((guest) => guest.personId) });
         deletedStaleGuestCount += reconciliation.deletedCount;
       }
-      cacheStore().delete("event-guests:" + event.id);
+      clearEventGuestCache(event.id);
       guestCount += guests.length;
       personCount += result?.personCount || 0;
       refreshedEventCount += 1;
@@ -787,7 +1010,7 @@ async function tracePersonActivity({ requestId, tracePersonId, traceEmail, force
       records.push(normalizeTraceRecord(event, guest));
       if (useKnownScope) await upsertNormalizedLumaGuestActivity({ event, guest, rawGuest });
       else await writeSnapshotToIndex({ requestId, rawEvent, event, guests: [guest], rawGuests: [rawGuest] });
-      cacheStore().delete("event-guests:" + event.id);
+      clearEventGuestCache(event.id);
     } catch (error) {
       failedEventCount += 1;
       await debugLog(requestId, "trace direct lookup error", { eventId: event.id, status: error.status || 500, message: error.message }, "error");
@@ -871,6 +1094,35 @@ async function writeSnapshotToIndex({ requestId, rawEvent, event, guests, rawGue
   } catch (error) {
     await debugLog(requestId, "luma index snapshot skipped", { eventId: event.id, status: error.status || 500, message: error.message }, "error");
     return null;
+  }
+}
+
+async function classifyAfterEventSync({ requestId, eventId, personIds }: AnyRecord) {
+  const startedAt = Date.now();
+  try {
+    const result = await runAutomaticTagClassifier({ personIds });
+    if (result.changedCount) {
+      clearEventGuestCache(eventId);
+      clearCachePrefix("trace-person:");
+    }
+    await debugLog(requestId, "auto-tags event classification success", {
+      eventId,
+      mode: result.mode,
+      evaluatedCount: result.evaluatedCount,
+      matchedCount: result.matchedCount,
+      addedCount: result.addedCount,
+      removedCount: result.removedCount,
+      durationMs: Date.now() - startedAt,
+    });
+    return result;
+  } catch (error) {
+    await debugLog(requestId, "auto-tags event classification error", {
+      eventId,
+      status: error.status || 500,
+      message: error.message,
+      durationMs: Date.now() - startedAt,
+    }, "error");
+    return { ok: false, status: "error", error: error.message };
   }
 }
 

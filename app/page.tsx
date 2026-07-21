@@ -2,24 +2,39 @@
 
 import type { CSSProperties } from "react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   ArrowRight,
   BadgeCheck,
   BarChart3,
+  Bold,
+  ChevronDown,
   CircleCheck,
   CircleX,
   Clock3,
+  Code2,
+  Eye,
   ExternalLink,
+  FileText,
+  Gem,
+  Italic,
+  Link2,
+  List,
   Lock,
+  ListFilter,
   MailPlus,
   Mail,
   MapPin,
   MessageSquare,
   Pencil,
   Plus,
+  Quote,
   RefreshCw,
   Search,
   Send,
+  Settings2,
   Tag,
   Undo2,
   UserMinus,
@@ -34,11 +49,16 @@ import { guestStatusDate, guestStatusTimestamp } from "./guest-status-date";
 import { MAX_INVITE_MESSAGE_LENGTH } from "./invite-message";
 import { MAX_GUEST_STATUS_MESSAGE_LENGTH } from "./guest-status-notification";
 import { lumaEventManageUrl } from "./luma-event-url";
-import { buildRegistrationQuestionAnalytics, eventWideAnalyticsCounts } from "./event-analytics";
+import { buildRegistrationQuestionAnalytics, eventWideAnalyticsCounts, REFERRED_PERSON_TAG } from "./event-analytics";
+import {
+  EVENT_SWITCH_DIAGNOSTICS_ACTION,
+  EVENT_SWITCH_DIAGNOSTICS_PARAM,
+} from "./event-switch-diagnostics";
+import { buildWorkspaceUrlSearch, parseWorkspaceUrl, type WorkspaceUrlState } from "./workspace-url";
 
 const statusLabels = {
   registered: "Registered",
-  going: "Going",
+  going: "Accepted",
   invited: "Invited",
   waitlisted: "Waitlisted",
   checked_in: "Checked in",
@@ -64,20 +84,26 @@ const guestActionIcons = {
 };
 
 const sourceStatusDefaults = ["going", "checked_in"];
+const acceptedStatuses = ["going", "checked_in", "no_show"];
+const registeredStatuses = ["registered", "waitlisted", ...acceptedStatuses];
+const registrationStatuses = ["registered", "going", "waitlisted", "checked_in", "declined", "no_show"];
 const LIVE_WRITE_CONFIRMATION = "CONFIRM_LUMA_WRITE";
 const EVENT_PAGE_SIZE = 10;
 const EVENT_SCROLL_THRESHOLD = 96;
-const GUEST_PAGE_SIZE = 50;
+const GUEST_PAGE_SIZE = 25;
 const GUEST_SEARCH_DEBOUNCE_MS = 250;
+const MAX_GUEST_NOTE_LENGTH = 20_000;
 const UPCOMING_AUTO_SYNC_MAX_EVENTS = 100;
 const UPCOMING_AUTO_SYNC_STALE_MINUTES = 5;
 const guestFilterOptions = [
   { value: "all", label: "All guests" },
+  { value: "to_decide", label: "To Decide" },
   { value: "checked_in", label: "Checked in" },
   { value: "accepted", label: "Accepted" },
   { value: "registered", label: "Registered" },
   { value: "invited", label: "Invited" },
   { value: "waitlisted", label: "Waitlisted" },
+  { value: "first_registers", label: "First Registers" },
   { value: "new_faces", label: "New faces" },
   { value: "declined", label: "Declined" },
   { value: "no_show", label: "No-show" },
@@ -95,6 +121,14 @@ const inviteMessageTemplates = [
 const SESSION_KEY_STORAGE_KEY = "guestbook.sessionKey";
 const SESSION_KEY_HEADER = "x-guestbook-session-key";
 const SESSION_KEY_COOKIE = "guestbook_session_key";
+const TAG_COLOR_PALETTE = ["#0f766e", "#2563eb", "#7c3aed", "#db2777", "#dc2626", "#d97706", "#65a30d", "#475569"];
+const AUTOMATIC_TAG_EMOJIS = {
+  "superpower user": "🚀",
+  "power user": "⚡",
+  "festival dweller": "🎪",
+  flaker: "👻",
+  superflaker: "💀",
+};
 
 const initialState = {
   selectedEventId: "",
@@ -121,25 +155,40 @@ const initialState = {
   },
   groups: [],
   tags: [],
+  tagDefinitions: [],
   people: [],
   events: [],
 };
 export default function Home() {
   const [state, setState] = useState(initialState);
+  const [workspaceUrlReady, setWorkspaceUrlReady] = useState(false);
+  const [guestPageTarget, setGuestPageTarget] = useState(1);
+  const workspaceUrlModeRef = useRef<"push" | "replace">("replace");
+  const pendingProfileIdRef = useRef("");
   const [apiState, setApiStateValue] = useState({ status: "loading", message: "Checking Luma API" });
   const [toastSequence, setToastSequence] = useState(0);
   const [toastVisible, setToastVisible] = useState(true);
   const [profilePanelOpen, setProfilePanelOpen] = useState(false);
+  const [avatarPreview, setAvatarPreview] = useState<{ person: any; url: string } | null>(null);
+  const avatarPreviewRef = useRef<{ person: any; url: string } | null>(null);
   const [activeEventTab, setActiveEventTab] = useState("overview");
   const [loadingGuestEvents, setLoadingGuestEvents] = useState([]);
   const [eventDraft, setEventDraft] = useState(null);
   const [guestStatusDraft, setGuestStatusDraft] = useState(null);
-  const [tagEditorDraft, setTagEditorDraft] = useState(null);
+  const [guestNoteDraft, setGuestNoteDraft] = useState(null);
+  const [openTagPersonId, setOpenTagPersonId] = useState("");
+  const [savingTagPersonId, setSavingTagPersonId] = useState("");
+  const [tagSettingsOpen, setTagSettingsOpen] = useState(false);
+  const [tagSettingsSaving, setTagSettingsSaving] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [universalQuery, setUniversalQuery] = useState("");
   const universalSearchInputRef = useRef(null);
   const guestRequestsRef = useRef(new Set());
   const latestGuestRequestRef = useRef(new Map());
+  const analyticsRequestsRef = useRef(new Set());
+  const guestHistoryRequestsRef = useRef(new Set());
+  // EVENT_SWITCH_DIAGNOSTICS: temporary per-navigation state; remove with the shared diagnostics module.
+  const eventSwitchDiagnosticRef = useRef<any>(null);
   const traceRequestsRef = useRef(new Set());
   const upcomingSyncInFlightRef = useRef(false);
   const eventListRef = useRef(null);
@@ -169,6 +218,43 @@ export default function Home() {
     setToastSequence((current) => current + 1);
   };
 
+  const applyWorkspaceUrlState = (urlState: WorkspaceUrlState) => {
+    workspaceUrlModeRef.current = "replace";
+    pendingProfileIdRef.current = urlState.profileId;
+    setGuestPageTarget(urlState.guestPage);
+    setActiveEventTab(urlState.tab);
+    setProfilePanelOpen(Boolean(urlState.profileId));
+    setState((current) => ({
+      ...current,
+      selectedEventId: urlState.eventId || current.selectedEventId,
+      selectedPersonId: urlState.profileId || current.selectedPersonId,
+      filters: {
+        ...current.filters,
+        event: urlState.eventView,
+        globalSearch: urlState.eventSearch,
+        guestStatus: urlState.guestStatus,
+        guestSearch: urlState.guestSearch,
+        guestTags: urlState.guestTags,
+      },
+      invite: {
+        ...current.invite,
+        targetEventId: urlState.eventId || current.invite.targetEventId,
+      },
+    }));
+  };
+
+  useLayoutEffect(() => {
+    applyWorkspaceUrlState(parseWorkspaceUrl(window.location.search));
+    setWorkspaceUrlReady(true);
+    const handlePopState = () => applyWorkspaceUrlState(parseWorkspaceUrl(window.location.search));
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  useEffect(() => {
+    avatarPreviewRef.current = avatarPreview;
+  }, [avatarPreview]);
+
   const lockSession = (message = "") => {
     window.localStorage.removeItem(SESSION_KEY_STORAGE_KEY);
     clearSessionCookie();
@@ -179,6 +265,7 @@ export default function Home() {
     setActivityTraces({});
     setSearchOpen(false);
     setProfilePanelOpen(false);
+    setAvatarPreview(null);
   };
 
   const apiFetch = async (input: RequestInfo | URL, init: RequestInit = {}) => {
@@ -248,9 +335,17 @@ export default function Home() {
         setSearchOpen(true);
       }
       if (event.key === "Escape") {
+        if (avatarPreviewRef.current) {
+          event.preventDefault();
+          setAvatarPreview(null);
+          return;
+        }
         setSearchOpen(false);
         setProfilePanelOpen(false);
         setGuestStatusDraft((current) => current?.submitting ? current : null);
+        setGuestNoteDraft((current) => current?.saving ? current : null);
+        setOpenTagPersonId("");
+        setTagSettingsOpen(false);
       }
     };
     window.addEventListener("keydown", handleKeyDown);
@@ -355,14 +450,19 @@ export default function Home() {
       const response = await apiFetch("/api/tags", { cache: "no-store" });
       const data: any = await response.json();
       if (!response.ok) throw new Error(data.error || "Unable to load guest tags.");
-      setState((current) => normalizeState({ ...current, tags: data.tags || [] }));
+      const tagDefinitions = Array.isArray(data.tags) ? data.tags : [];
+      setState((current) => normalizeState({
+        ...current,
+        tags: tagDefinitions.map((tag) => tag.name),
+        tagDefinitions,
+      }));
     } catch (error) {
       setApiState({ status: "error", message: error.message });
     }
   };
 
   useEffect(() => {
-    if (sessionStatus !== "ready" || !sessionKey) return;
+    if (!workspaceUrlReady || sessionStatus !== "ready" || !sessionKey) return;
     let cancelled: boolean = false;
     loadLumaEvents({ cancelled: () => cancelled }).then((data) => {
       if (!cancelled && data?.events) void syncUpcomingEvents(data.events, { reason: "load" });
@@ -370,7 +470,7 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [sessionStatus, sessionKey]);
+  }, [workspaceUrlReady, sessionStatus, sessionKey]);
 
   useEffect(() => {
     if (sessionStatus !== "ready" || !sessionKey) return;
@@ -403,7 +503,7 @@ export default function Home() {
   const universalResults = useMemo(() => universalSearchResults(state, universalQuery), [state, universalQuery]);
   const universalResultCount = universalResults.events.length + universalResults.people.length + universalResults.groups.length;
   const showGuestGroups = visibleGuests.some(({ person }) => person.groups.length > 0);
-  const guestTableColumnCount = 9 + Number(showGuestGroups);
+  const guestTableColumnCount = 10 + Number(showGuestGroups);
   const hasSelectedProfile = hasProfileContent(state, selectedPerson);
   const showProfilePanel = profilePanelOpen && hasSelectedProfile;
   const inviteTargetEvent = getEvent(state, state.invite.targetEventId);
@@ -411,6 +511,59 @@ export default function Home() {
   const selectedEventNeedsGuestLoad = selectedEvent?.source === "luma" && !selectedEvent.guestsLoaded;
   const selectedGuestRows = visibleGuests.filter(({ person }) => selectedGuestIds.has(person.id));
   const allVisibleGuestsSelected = visibleGuests.length > 0 && visibleGuests.every(({ person }) => selectedGuestIds.has(person.id));
+  const loadedGuestPage = Math.max(1, Math.ceil((selectedEvent?.guests?.length || 0) / GUEST_PAGE_SIZE));
+
+  useEffect(() => {
+    const pendingProfileId = pendingProfileIdRef.current;
+    if (!workspaceUrlReady || !pendingProfileId) return;
+    const pendingPerson = getPerson(state, pendingProfileId);
+    if (!pendingPerson) return;
+    if (state.selectedPersonId === pendingProfileId) {
+      pendingProfileIdRef.current = "";
+      return;
+    }
+    setState((current) => ({ ...current, selectedPersonId: pendingProfileId }));
+    setProfilePanelOpen(true);
+  }, [workspaceUrlReady, state.people, state.selectedPersonId]);
+
+  useEffect(() => {
+    if (!workspaceUrlReady || !state.events.length || !selectedEvent) return;
+    const profileId = profilePanelOpen
+      ? pendingProfileIdRef.current || selectedPerson?.id || ""
+      : "";
+    const nextSearch = buildWorkspaceUrlSearch(window.location.search, {
+      eventId: selectedEvent.id,
+      eventView: state.filters.event as WorkspaceUrlState["eventView"],
+      eventSearch: state.filters.globalSearch.trim(),
+      tab: activeEventTab as WorkspaceUrlState["tab"],
+      guestStatus: state.filters.guestStatus,
+      guestSearch: state.filters.guestSearch.trim(),
+      guestTags: state.filters.guestTags,
+      guestPage: Math.max(guestPageTarget, loadedGuestPage),
+      profileId,
+    });
+    const currentSearch = window.location.search.replace(/^\?/, "");
+    const mode = workspaceUrlModeRef.current;
+    workspaceUrlModeRef.current = "replace";
+    if (nextSearch === currentSearch) return;
+    const nextUrl = new URL(window.location.href);
+    nextUrl.search = nextSearch;
+    window.history[mode === "push" ? "pushState" : "replaceState"]({}, "", nextUrl);
+  }, [
+    workspaceUrlReady,
+    state.events.length,
+    selectedEvent?.id,
+    activeEventTab,
+    profilePanelOpen,
+    selectedPerson?.id,
+    state.filters.event,
+    state.filters.globalSearch,
+    state.filters.guestStatus,
+    state.filters.guestSearch,
+    guestTagFilterKey,
+    guestPageTarget,
+    loadedGuestPage,
+  ]);
 
   const setEventWindowAndRef = (next) => {
     eventWindowRef.current = next;
@@ -451,7 +604,7 @@ export default function Home() {
   };
 
   useLayoutEffect(() => {
-    const next = initialEventWindow(filteredEvents, state.filters.event);
+    const next = initialEventWindow(filteredEvents, state.filters.event, selectedEvent?.id);
     eventPrependSnapshotRef.current = null;
     suppressEventScrollRef.current = true;
     setEventWindowAndRef(next);
@@ -479,7 +632,7 @@ export default function Home() {
       window.cancelAnimationFrame(releaseFrame);
       suppressEventScrollRef.current = false;
     };
-  }, [eventListKey, eventListSignature, eventAnchorId]);
+  }, [eventListKey, eventListSignature, eventAnchorId, selectedEvent?.id]);
 
   useLayoutEffect(() => {
     const snapshot = eventPrependSnapshotRef.current;
@@ -518,7 +671,65 @@ export default function Home() {
     });
   };
 
+  // EVENT_SWITCH_DIAGNOSTICS: all browser lifecycle instrumentation is contained in these helpers.
+  const beginEventSwitchDiagnostic = (eventId: string) => {
+    eventSwitchDiagnosticRef.current = {
+      id: `switch-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      eventId,
+      tab: activeEventTab,
+      startedAt: window.performance.now(),
+      expiresAt: Date.now() + 5_000,
+      timings: { click: 0 },
+      completed: false,
+      serverRequestId: "",
+      cached: false,
+      rowCount: 0,
+    };
+  };
+
+  const eventSwitchDiagnosticForEvent = (eventId: string) => {
+    const diagnostic = eventSwitchDiagnosticRef.current;
+    return diagnostic && diagnostic.eventId === eventId && Date.now() < diagnostic.expiresAt ? diagnostic : null;
+  };
+
+  const activeEventSwitchDiagnostic = (eventId: string) => {
+    const diagnostic = eventSwitchDiagnosticForEvent(eventId);
+    return diagnostic && !diagnostic.completed ? diagnostic : null;
+  };
+
+  const markEventSwitchDiagnostic = (eventId: string, stage: string, details: Record<string, any> = {}) => {
+    const diagnostic = activeEventSwitchDiagnostic(eventId);
+    if (!diagnostic) return null;
+    diagnostic.timings[stage] = Math.round((window.performance.now() - diagnostic.startedAt) * 10) / 10;
+    Object.assign(diagnostic, details);
+    return diagnostic;
+  };
+
+  const completeEventSwitchDiagnostic = (eventId: string, outcome: "rendered" | "error" = "rendered") => {
+    const diagnostic = markEventSwitchDiagnostic(eventId, outcome === "rendered" ? "active_tab_painted" : "failed");
+    if (!diagnostic) return;
+    diagnostic.completed = true;
+    void apiFetch("/api/luma", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: EVENT_SWITCH_DIAGNOSTICS_ACTION,
+        diagnosticId: diagnostic.id,
+        eventId: diagnostic.eventId,
+        tab: diagnostic.tab,
+        outcome,
+        serverRequestId: diagnostic.serverRequestId,
+        cached: diagnostic.cached,
+        rowCount: diagnostic.rowCount,
+        timings: diagnostic.timings,
+      }),
+      keepalive: true,
+    }).catch(() => {});
+  };
+
   const openPerson = (personId: string, eventId = "") => {
+    workspaceUrlModeRef.current = "push";
+    pendingProfileIdRef.current = "";
     updateState((draft) => {
       draft.selectedPersonId = personId;
       if (eventId) draft.selectedEventId = eventId;
@@ -528,15 +739,19 @@ export default function Home() {
 
   const selectEvent = (eventId) => {
     const eventChanged = eventId !== state.selectedEventId;
+    if (eventChanged) beginEventSwitchDiagnostic(eventId);
+    if (eventChanged) workspaceUrlModeRef.current = "push";
+    pendingProfileIdRef.current = "";
+    setGuestPageTarget(1);
     updateState((draft) => {
       draft.selectedEventId = eventId;
       draft.invite.targetEventId = eventId;
     });
-    setActiveEventTab("overview");
     if (eventChanged) setProfilePanelOpen(false);
   };
 
   const setFilter = (key, value) => {
+    if (["guestStatus", "guestSearch", "guestTags"].includes(key)) setGuestPageTarget(1);
     updateState((draft) => {
       draft.filters[key] = value;
     });
@@ -557,7 +772,9 @@ export default function Home() {
       search = debouncedGuestSearch,
       tags = state.filters.guestTags,
       cursor = "",
-    }: { force?: boolean; append?: boolean; status?: string; search?: string; tags?: string[]; cursor?: string } = {},
+      priority = false,
+      background = false,
+    }: { force?: boolean; append?: boolean; status?: string; search?: string; tags?: string[]; cursor?: string; priority?: boolean; background?: boolean } = {},
   ) => {
     const event = getEvent(state, eventId);
     if (!event) {
@@ -577,9 +794,20 @@ export default function Home() {
       guest_limit: String(GUEST_PAGE_SIZE),
     });
     if (search) params.set("guest_search", search);
+    if (event.startsAt) params.set("event_starts_at", event.startsAt);
+    if (event.date) params.set("event_date", String(event.date).slice(0, 10));
     tags.forEach((tag) => params.append("guest_tag", tag));
     if (nextCursor) params.set("guest_cursor", nextCursor);
+    if (!force && event.guestStats) params.set("guest_summary", "0");
+    if (priority && !force) params.set("guest_mode", "page");
     if (force) params.set("refresh", "1");
+    // EVENT_SWITCH_DIAGNOSTICS: only the active event navigation receives the correlation parameter.
+    const eventSwitchDiagnostic = eventSwitchDiagnosticForEvent(eventId);
+    const eventSwitchStage = background ? "snapshot" : priority ? "overview" : "guests";
+    if (eventSwitchDiagnostic) {
+      params.set(EVENT_SWITCH_DIAGNOSTICS_PARAM, eventSwitchDiagnostic.id);
+      markEventSwitchDiagnostic(eventId, `${eventSwitchStage}_request_started`);
+    }
     const requestKey = params.toString();
     if (guestRequestsRef.current.has(requestKey)) return;
 
@@ -589,17 +817,30 @@ export default function Home() {
     if (!append) {
       setState((current) => ({
         ...current,
-        events: current.events.map((item) => item.id === eventId ? { ...item, guests: [], guestQueryLoading: true } : item),
+        events: current.events.map((item) => item.id === eventId ? {
+          ...item,
+          ...(background ? { guestSnapshotWarming: true } : { guests: [], guestQueryLoading: true }),
+        } : item),
       }));
     }
 
-    setLoadingGuestEvents((current) => unique([...current, eventId]));
+    if (!background) setLoadingGuestEvents((current) => unique([...current, eventId]));
     try {
       const response = await apiFetch("/api/luma?" + params.toString(), { cache: "no-store" });
       const data: any = await response.json();
       if (!response.ok) throw new Error(withRequestId(data.error || (force ? "Unable to sync the Luma event." : "Unable to load Luma guests."), data.requestId));
+      markEventSwitchDiagnostic(eventId, `${eventSwitchStage}_response_received`, {
+        serverRequestId: data.requestId || "",
+        cached: Boolean(data.cached),
+        rowCount: Array.isArray(data.guests) ? data.guests.length : 0,
+      });
       if (latestGuestRequestRef.current.get(eventId) !== requestToken) return;
       setState((current) => mergeLumaGuests(current, data, { append }));
+      if (append) {
+        const loadedThrough = (Number.parseInt(nextCursor, 10) || 0) + (Array.isArray(data.guests) ? data.guests.length : 0);
+        setGuestPageTarget(Math.max(1, Math.ceil(loadedThrough / GUEST_PAGE_SIZE)));
+      }
+      markEventSwitchDiagnostic(eventId, `${eventSwitchStage}_state_update_queued`);
       if (force) setActivityTraces({});
       const truncatedText = data.truncated ? " Showing the configured capped guest window only." : "";
       const requestText = data.requestId ? " Request " + data.requestId + "." : "";
@@ -608,18 +849,113 @@ export default function Home() {
         : `${data.cached ? "Used cached guests for " : "Loaded guests for "}${event.title}.`;
       if (force) setApiState({ status: "live", message: resultText + truncatedText + requestText });
     } catch (error) {
+      if (activeEventSwitchDiagnostic(eventId)) completeEventSwitchDiagnostic(eventId, "error");
       if (latestGuestRequestRef.current.get(eventId) === requestToken) {
         setState((current) => ({
           ...current,
-          events: current.events.map((item) => item.id === eventId ? { ...item, guestQueryLoading: false } : item),
+          events: current.events.map((item) => item.id === eventId ? { ...item, guestQueryLoading: false, guestSnapshotWarming: false } : item),
         }));
-        setApiState({ status: "error", message: error.message });
+        if (!background) setApiState({ status: "error", message: error.message });
       }
     } finally {
       guestRequestsRef.current.delete(requestKey);
       if (latestGuestRequestRef.current.get(eventId) === requestToken) {
-        setLoadingGuestEvents((current) => current.filter((id) => id !== eventId));
+        if (!background) setLoadingGuestEvents((current) => current.filter((id) => id !== eventId));
       }
+    }
+  };
+
+  const loadEventAnalytics = async (eventId: string) => {
+    const event = getEvent(state, eventId);
+    if (!event || event.source !== "luma" || analyticsRequestsRef.current.has(eventId)) return;
+    analyticsRequestsRef.current.add(eventId);
+    setState((current) => ({
+      ...current,
+      events: current.events.map((item) => item.id === eventId ? { ...item, analyticsLoading: true } : item),
+    }));
+
+    try {
+      const params = new URLSearchParams({ event_id: eventId, event_analytics: "1" });
+      if (event.startsAt) params.set("event_starts_at", event.startsAt);
+      if (event.date) params.set("event_date", String(event.date).slice(0, 10));
+      const eventSwitchDiagnostic = eventSwitchDiagnosticForEvent(eventId);
+      if (eventSwitchDiagnostic) {
+        params.set(EVENT_SWITCH_DIAGNOSTICS_PARAM, eventSwitchDiagnostic.id);
+        markEventSwitchDiagnostic(eventId, "analytics_request_started");
+      }
+      const response = await apiFetch("/api/luma?" + params.toString(), { cache: "no-store" });
+      const data: any = await response.json();
+      if (!response.ok) throw new Error(withRequestId(data.error || "Unable to load event analytics.", data.requestId));
+      markEventSwitchDiagnostic(eventId, "analytics_response_received", {
+        serverRequestId: data.requestId || "",
+        rowCount: Number(data.stats?.registered) || 0,
+      });
+      setState((current) => ({
+        ...current,
+        events: current.events.map((item) => item.id === eventId ? {
+          ...item,
+          guestStats: data.stats || item.guestStats,
+          guestAnalyticsQuestions: data.analyticsQuestions || item.guestAnalyticsQuestions || [],
+          analyticsLoaded: true,
+          analyticsLoading: false,
+        } : item),
+      }));
+      markEventSwitchDiagnostic(eventId, "analytics_state_update_queued");
+    } catch (error) {
+      if (activeEventSwitchDiagnostic(eventId)) completeEventSwitchDiagnostic(eventId, "error");
+      setState((current) => ({
+        ...current,
+        events: current.events.map((item) => item.id === eventId ? { ...item, analyticsLoading: false } : item),
+      }));
+      setApiState({ status: "error", message: error.message });
+    } finally {
+      analyticsRequestsRef.current.delete(eventId);
+    }
+  };
+
+  const loadEventGuestHistory = async (eventId: string, personIds: string[]) => {
+    const boundedPersonIds = [...new Set(personIds.filter(Boolean))].slice(0, GUEST_PAGE_SIZE);
+    if (!boundedPersonIds.length) return;
+    const requestKey = `${eventId}:${boundedPersonIds.join(",")}`;
+    if (guestHistoryRequestsRef.current.has(requestKey)) return;
+    guestHistoryRequestsRef.current.add(requestKey);
+    setState((current) => ({
+      ...current,
+      events: current.events.map((item) => item.id === eventId ? { ...item, guestHistoryLoading: true } : item),
+    }));
+
+    try {
+      const params = new URLSearchParams({ event_id: eventId, guest_history: "1" });
+      boundedPersonIds.forEach((personId) => params.append("person_id", personId));
+      const eventSwitchDiagnostic = eventSwitchDiagnosticForEvent(eventId);
+      if (eventSwitchDiagnostic) params.set(EVENT_SWITCH_DIAGNOSTICS_PARAM, eventSwitchDiagnostic.id);
+      const response = await apiFetch("/api/luma?" + params.toString(), { cache: "no-store" });
+      const data: any = await response.json();
+      if (!response.ok) throw new Error(withRequestId(data.error || "Unable to load guest event history.", data.requestId));
+      const countsByPerson = new Map((data.counts || []).map((counts) => [counts.personId, counts]));
+      setState((current) => ({
+        ...current,
+        events: current.events.map((item) => item.id === eventId ? {
+          ...item,
+          guests: item.guests.map((guest) => {
+            const counts: any = countsByPerson.get(guest.personId);
+            return counts ? { ...guest, eventCounts: { attended: counts.attended, registered: counts.registered } } : guest;
+          }),
+          guestHistoryLoaded: true,
+          guestHistoryLoading: false,
+        } : item),
+      }));
+    } catch {
+      setState((current) => ({
+        ...current,
+        events: current.events.map((item) => item.id === eventId ? {
+          ...item,
+          guestHistoryLoaded: true,
+          guestHistoryLoading: false,
+        } : item),
+      }));
+    } finally {
+      guestHistoryRequestsRef.current.delete(requestKey);
     }
   };
 
@@ -682,14 +1018,86 @@ export default function Home() {
     setSelectedGuestIds(new Set());
   }, [selectedEvent?.id, state.filters.guestStatus, debouncedGuestSearch, guestTagFilterKey]);
 
+  // EVENT_SWITCH_DIAGNOSTICS: records the first React commit containing the newly selected event shell.
+  useLayoutEffect(() => {
+    if (selectedEvent?.id) markEventSwitchDiagnostic(selectedEvent.id, "event_shell_committed");
+  }, [selectedEvent?.id]);
+
   useEffect(() => {
-    if (sessionStatus !== "ready" || selectedEvent?.source !== "luma") return;
+    if (sessionStatus !== "ready" || selectedEvent?.source !== "luma" || activeEventTab !== "overview") return;
     void loadEventGuests(selectedEvent.id, {
       status: state.filters.guestStatus,
       search: debouncedGuestSearch,
       tags: state.filters.guestTags,
+      priority: !selectedEvent.guestsLoaded,
     });
-  }, [sessionStatus, selectedEvent?.id, selectedEvent?.source, state.filters.guestStatus, debouncedGuestSearch, guestTagFilterKey, upcomingSyncVersion]);
+  }, [sessionStatus, selectedEvent?.id, selectedEvent?.source, activeEventTab, state.filters.guestStatus, debouncedGuestSearch, guestTagFilterKey, upcomingSyncVersion]);
+
+  useEffect(() => {
+    if (
+      sessionStatus !== "ready" ||
+      selectedEvent?.source !== "luma" ||
+      activeEventTab !== "overview" ||
+      !selectedEvent.guestsLoaded ||
+      selectedEvent.guestQueryLoading ||
+      selectedEvent.guestHistoryLoaded !== false ||
+      selectedEvent.guestHistoryLoading
+    ) return;
+    const personIds = selectedEvent.guests
+      .filter((guest) => !guest.eventCounts)
+      .map((guest) => guest.personId)
+      .slice(0, GUEST_PAGE_SIZE);
+    if (!personIds.length) return;
+    void loadEventGuestHistory(selectedEvent.id, personIds);
+  }, [sessionStatus, selectedEvent?.id, selectedEvent?.source, selectedEvent?.guestsLoaded, selectedEvent?.guestQueryLoading, selectedEvent?.guestHistoryLoaded, selectedEvent?.guestHistoryLoading, activeEventTab]);
+
+  useEffect(() => {
+    if (sessionStatus !== "ready" || selectedEvent?.source !== "luma" || selectedEvent.analyticsLoaded || selectedEvent.analyticsLoading) return;
+    if (activeEventTab === "analytics") {
+      void loadEventAnalytics(selectedEvent.id);
+      return;
+    }
+    if (
+      activeEventTab !== "overview" ||
+      !selectedEvent.guestsLoaded ||
+      selectedEvent.guestQueryLoading ||
+      selectedEvent.guestHistoryLoading ||
+      selectedEvent.guestHistoryLoaded === false
+    ) return;
+    const timer = window.setTimeout(() => void loadEventAnalytics(selectedEvent.id), 120);
+    return () => window.clearTimeout(timer);
+  }, [sessionStatus, selectedEvent?.id, selectedEvent?.source, selectedEvent?.guestsLoaded, selectedEvent?.guestQueryLoading, selectedEvent?.guestHistoryLoaded, selectedEvent?.guestHistoryLoading, selectedEvent?.analyticsLoaded, selectedEvent?.analyticsLoading, activeEventTab]);
+
+  useEffect(() => {
+    if (
+      sessionStatus !== "ready" ||
+      selectedEvent?.source !== "luma" ||
+      !selectedEvent.analyticsLoaded ||
+      selectedEvent.guestSnapshotReady ||
+      selectedEvent.guestSnapshotWarming
+    ) return;
+    const timer = window.setTimeout(() => {
+      void loadEventGuests(selectedEvent.id, {
+        status: state.filters.guestStatus,
+        search: debouncedGuestSearch,
+        tags: state.filters.guestTags,
+        background: true,
+      });
+    }, 220);
+    return () => window.clearTimeout(timer);
+  }, [sessionStatus, selectedEvent?.id, selectedEvent?.source, selectedEvent?.analyticsLoaded, selectedEvent?.guestSnapshotReady, selectedEvent?.guestSnapshotWarming, state.filters.guestStatus, debouncedGuestSearch, guestTagFilterKey]);
+
+  // EVENT_SWITCH_DIAGNOSTICS: completes after the active tab's data has committed and reached a paint frame.
+  useEffect(() => {
+    const diagnostic = selectedEvent ? activeEventSwitchDiagnostic(selectedEvent.id) : null;
+    if (!diagnostic || diagnostic.tab !== activeEventTab) return;
+    const activeTabReady = diagnostic.tab === "invite"
+      || (diagnostic.tab === "analytics" && selectedEvent.analyticsLoaded && !selectedEvent.analyticsLoading)
+      || (diagnostic.tab === "overview" && selectedEvent.guestsLoaded && !selectedEvent.guestQueryLoading);
+    if (!activeTabReady) return;
+    const frame = window.requestAnimationFrame(() => completeEventSwitchDiagnostic(selectedEvent.id));
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeEventTab, selectedEvent?.id, selectedEvent?.guestsLoaded, selectedEvent?.guestQueryLoading, selectedEvent?.analyticsLoaded, selectedEvent?.analyticsLoading]);
 
   const loadMoreGuests = () => {
     if (!selectedEvent || selectedEvent.source !== "luma" || selectedEventLoadingGuests || !selectedEvent.guestPageInfo?.hasMore) return;
@@ -701,6 +1109,31 @@ export default function Home() {
       cursor: selectedEvent.guestPageInfo.nextCursor,
     });
   };
+
+  useEffect(() => {
+    if (
+      guestPageTarget <= loadedGuestPage ||
+      sessionStatus !== "ready" ||
+      activeEventTab !== "overview" ||
+      selectedEvent?.source !== "luma" ||
+      !selectedEvent.guestsLoaded ||
+      selectedEvent.guestQueryLoading ||
+      selectedEventLoadingGuests ||
+      !selectedEvent.guestPageInfo?.hasMore
+    ) return;
+    loadMoreGuests();
+  }, [
+    guestPageTarget,
+    loadedGuestPage,
+    sessionStatus,
+    activeEventTab,
+    selectedEvent?.id,
+    selectedEvent?.source,
+    selectedEvent?.guestsLoaded,
+    selectedEvent?.guestQueryLoading,
+    selectedEvent?.guestPageInfo?.hasMore,
+    selectedEventLoadingGuests,
+  ]);
 
   const handleGuestListScroll = (event) => {
     const target = event.currentTarget;
@@ -732,55 +1165,160 @@ export default function Home() {
     });
   };
 
-  const openTagEditor = (person) => {
-    setTagEditorDraft({
+  const openGuestNote = (person) => {
+    setOpenTagPersonId("");
+    setGuestNoteDraft({
       personId: person.id,
-      tags: [...(person.tags || [])],
-      newTag: "",
-      submitting: false,
+      notes: person.crmNotes || "",
+      updatedAt: person.crmNotesUpdatedAt || null,
+      saving: false,
     });
   };
 
-  const closeTagEditor = () => {
-    setTagEditorDraft((current) => current?.submitting ? current : null);
+  const closeGuestNote = () => {
+    setGuestNoteDraft((current) => current?.saving ? current : null);
   };
 
-  const submitPersonTags = async (event) => {
+  const saveGuestNote = async (event) => {
     event.preventDefault();
-    if (!tagEditorDraft || tagEditorDraft.submitting) return;
-    const pendingTag = cleanTagName(tagEditorDraft.newTag);
-    const tags = sortedTags(unique([
-      ...tagEditorDraft.tags,
-      ...(pendingTag ? [pendingTag] : []),
-    ]));
-    setTagEditorDraft((current) => current ? { ...current, submitting: true } : current);
+    if (!guestNoteDraft || guestNoteDraft.saving) return;
+    const personId = guestNoteDraft.personId;
+    setGuestNoteDraft((current) => current ? { ...current, saving: true } : current);
+    try {
+      const response = await apiFetch("/api/notes", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ personId, notes: guestNoteDraft.notes }),
+      });
+      const data: any = await response.json();
+      if (!response.ok) throw new Error(data.error || "Unable to save guest notes.");
+      setState((current) => ({
+        ...current,
+        people: current.people.map((person) => person.id === personId ? {
+          ...person,
+          crmNotes: data.notes || "",
+          crmNotesUpdatedAt: data.updatedAt || null,
+        } : person),
+      }));
+      setGuestNoteDraft(null);
+    } catch (error) {
+      setGuestNoteDraft((current) => current ? { ...current, saving: false } : current);
+      setApiState({ status: "error", message: error.message });
+    }
+  };
+
+  const savePersonTags = async (personId, tags, { lockAlreadyHeld = false } = {}) => {
+    if (savingTagPersonId && !lockAlreadyHeld) return false;
+    if (!lockAlreadyHeld) setSavingTagPersonId(personId);
+    const previousPerson = getPerson(state, personId);
+    const optimisticTags = sortedTags(unique(tags));
+    const automaticTagNames = new Set(
+      (Array.isArray(previousPerson?.automaticTags) ? previousPerson.automaticTags : [])
+        .map((tag) => tag.toLocaleLowerCase()),
+    );
+    const optimisticManualTags = optimisticTags.filter((tag) => !automaticTagNames.has(tag.toLocaleLowerCase()));
+
+    setState((current) => normalizeState({
+      ...current,
+      tags: sortedTags(unique([...current.tags, ...optimisticTags])),
+      people: current.people.map((person) => person.id === personId ? {
+        ...person,
+        tags: optimisticTags,
+        manualTags: optimisticManualTags,
+      } : person),
+    }));
 
     try {
       const response = await apiFetch("/api/tags", {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ personId: tagEditorDraft.personId, tags }),
+        body: JSON.stringify({ personId, tags: optimisticTags }),
       });
       const data: any = await response.json();
       if (!response.ok) throw new Error(data.error || "Unable to update guest tags.");
-      const savedTags = Array.isArray(data.tags) ? data.tags : tags;
+      const savedTags = Array.isArray(data.tags) ? data.tags : optimisticTags;
       setState((current) => normalizeState({
         ...current,
         tags: sortedTags(unique([...current.tags, ...savedTags])),
-        people: current.people.map((person) => person.id === data.personId ? { ...person, tags: savedTags } : person),
+        people: current.people.map((person) => person.id === (data.personId || personId) ? {
+          ...person,
+          tags: savedTags,
+          manualTags: Array.isArray(data.manualTags) ? data.manualTags : person.manualTags || [],
+          automaticTags: Array.isArray(data.automaticTags) ? data.automaticTags : person.automaticTags || [],
+        } : person),
       }));
-      setTagEditorDraft(null);
-      setApiState({ status: "live", message: `Updated tags for ${getPerson(state, data.personId)?.name || "guest"}.` });
-      if (selectedEvent?.source === "luma") {
-        void loadEventGuests(selectedEvent.id, {
-          status: state.filters.guestStatus,
-          search: debouncedGuestSearch,
-          tags: state.filters.guestTags,
-        });
-      }
+      setApiState({ status: "live", message: `Updated tags for ${previousPerson?.name || "guest"}.` });
+      return true;
     } catch (error) {
-      setTagEditorDraft((current) => current ? { ...current, submitting: false } : current);
+      if (previousPerson) {
+        setState((current) => normalizeState({
+          ...current,
+          people: current.people.map((person) => person.id === personId ? {
+            ...person,
+            tags: previousPerson.tags || [],
+            manualTags: previousPerson.manualTags || [],
+            automaticTags: previousPerson.automaticTags || [],
+          } : person),
+        }));
+      }
       setApiState({ status: "error", message: error.message });
+      return false;
+    } finally {
+      setSavingTagPersonId("");
+    }
+  };
+
+  const createAndAssignTag = async (personId, name, personTags) => {
+    if (savingTagPersonId) return false;
+    setSavingTagPersonId(personId);
+    try {
+      const response = await apiFetch("/api/tags", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name, color: tagColorForName(name) }),
+      });
+      const data: any = await response.json();
+      if (!response.ok) throw new Error(data.error || "Unable to create tag.");
+      const definition = data.tag;
+      setState((current) => normalizeState({
+        ...current,
+        tags: sortedTags(unique([...current.tags, definition.name])),
+        tagDefinitions: mergeTagDefinition(current.tagDefinitions, definition),
+      }));
+      return savePersonTags(personId, sortedTags(unique([...personTags, definition.name])), { lockAlreadyHeld: true });
+    } catch (error) {
+      setApiState({ status: "error", message: error.message });
+      setSavingTagPersonId("");
+      return false;
+    }
+  };
+
+  const saveTagSettings = async (drafts) => {
+    if (tagSettingsSaving) return;
+    setTagSettingsSaving(true);
+    try {
+      const changed = drafts.filter((draft) => {
+        const current = state.tagDefinitions.find((tag) => tag.id === draft.id);
+        return current && (current.name !== cleanTagName(draft.name) || current.color !== draft.color);
+      });
+      const saved: any[] = [];
+      for (const draft of changed) {
+        const response = await apiFetch("/api/tags", {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id: draft.id, name: cleanTagName(draft.name), color: draft.color }),
+        });
+        const data: any = await response.json();
+        if (!response.ok) throw new Error(data.error || "Unable to update tag settings.");
+        saved.push(data.tag);
+      }
+      setState((current) => normalizeState(applyTagDefinitionUpdates(current, saved)));
+      setTagSettingsOpen(false);
+      setApiState({ status: "live", message: changed.length ? "Saved tag settings." : "Tag settings are up to date." });
+    } catch (error) {
+      setApiState({ status: "error", message: error.message });
+    } finally {
+      setTagSettingsSaving(false);
     }
   };
 
@@ -829,6 +1367,7 @@ export default function Home() {
       if (!guest) return;
       const changedAt = new Date().toISOString();
       guest.status = status;
+      guest.operatorDecision = status;
       guest.updatedAt = changedAt;
       if (status === "registered" && !guest.registeredAt) guest.registeredAt = changedAt;
       if (status === "going") guest.approvedAt = changedAt;
@@ -867,6 +1406,7 @@ export default function Home() {
           guests: item.guests.map((guest) => !updatedGuestIds.has(guest.lumaGuestId) ? guest : {
             ...guest,
             status,
+            operatorDecision: status,
             updatedAt: changedAt,
             ...(status === "going" ? { approvedAt: changedAt } : {}),
           }),
@@ -1059,6 +1599,8 @@ export default function Home() {
 
   const selectUniversalResult = (result) => {
     const eventChanged = result.type === "event" && result.id !== state.selectedEventId;
+    if (result.type === "event" || result.type === "person") workspaceUrlModeRef.current = "push";
+    if (result.type === "person") pendingProfileIdRef.current = "";
     updateState((draft) => {
       if (result.type === "event") {
         draft.selectedEventId = result.id;
@@ -1078,7 +1620,6 @@ export default function Home() {
     });
     if (result.type === "person") setProfilePanelOpen(true);
     if (eventChanged) {
-      setActiveEventTab("overview");
       setProfilePanelOpen(false);
     }
     setSearchOpen(false);
@@ -1111,6 +1652,10 @@ export default function Home() {
           <kbd aria-label="Command K"><span aria-hidden="true">⌘</span><span>K</span></kbd>
         </button>
         <div className="topbar-actions">
+          <button className="button" type="button" onClick={() => setTagSettingsOpen(true)}>
+            <Settings2 size={17} aria-hidden="true" />
+            Tag settings
+          </button>
           <button className="button" type="button" onClick={() => lockSession()}>
             <Lock size={17} aria-hidden="true" />
             Lock
@@ -1133,18 +1678,23 @@ export default function Home() {
           </div>
           <label className="calendar-search">
             <span>Filter events</span>
-            <input
-              type="search"
-              placeholder="Event name, category, location"
-              value={state.filters.globalSearch}
-              onChange={(event) => setFilter("globalSearch", event.target.value)}
-            />
+            <span className="calendar-search-field">
+              <Search size={15} aria-hidden="true" />
+              <input
+                type="search"
+                placeholder="Search events"
+                value={state.filters.globalSearch}
+                onChange={(event) => setFilter("globalSearch", event.target.value)}
+              />
+            </span>
           </label>
           <div className="segmented" role="tablist" aria-label="Event filter">
             {["upcoming", "past", "all"].map((filter) => (
               <button
                 className={`segment ${state.filters.event === filter ? "active" : ""}`}
                 type="button"
+                role="tab"
+                aria-selected={state.filters.event === filter}
                 key={filter}
                 onClick={() => setFilter("event", filter)}
               >
@@ -1181,47 +1731,67 @@ export default function Home() {
         <section className="main-stack">
           <section className="workbench panel">
             {selectedEvent ? (
-              <div className="event-summary">
+              <div className="event-summary" key={selectedEvent.id}>
                 <EventArtwork event={selectedEvent} large />
                 <div className="event-summary-content">
+                  {selectedEvent.source === "luma" ? (
+                    <div className="event-header-actions" aria-label="Event actions">
+                      {selectedEvent.lumaUrl ? (
+                        <a
+                          className="icon-button event-action-tooltip"
+                          href={selectedEvent.lumaUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          aria-label="View event on Luma"
+                          data-tooltip="View event on Luma"
+                        >
+                          <ExternalLink size={18} aria-hidden="true" />
+                        </a>
+                      ) : null}
+                      <button
+                        className="icon-button event-action-tooltip"
+                        type="button"
+                        aria-label={selectedEventLoadingGuests ? "Syncing event" : "Sync event"}
+                        data-tooltip={selectedEventLoadingGuests ? "Syncing guest data…" : "Refresh guest data"}
+                        disabled={selectedEventLoadingGuests}
+                        onClick={() => loadEventGuests(selectedEvent.id, { force: true })}
+                      >
+                        <RefreshCw
+                          className={selectedEventLoadingGuests ? "animate-spin" : ""}
+                          size={18}
+                          aria-hidden="true"
+                        />
+                      </button>
+                      {selectedEventManageUrl ? (
+                        <a
+                          className="icon-button event-action-tooltip"
+                          href={selectedEventManageUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          aria-label="Edit event"
+                          data-tooltip="Edit event on Luma"
+                        >
+                          <Pencil size={18} aria-hidden="true" />
+                        </a>
+                      ) : null}
+                    </div>
+                  ) : null}
                   <p className="eyebrow">
                     {selectedEvent.category} - {formatDate(selectedEvent.date)}
                   </p>
                   <h2>{selectedEvent.title}</h2>
                   <div className="event-meta">
                     <span><MapPin size={15} aria-hidden="true" />{selectedEvent.location}</span>
-                    <span>{selectedEvent.capacity} capacity</span>
-                    {selectedEvent.lumaUrl ? (
-                      <a href={selectedEvent.lumaUrl} target="_blank" rel="noreferrer">
-                        View on Luma <ExternalLink size={14} aria-hidden="true" />
-                      </a>
-                    ) : null}
                   </div>
                   <EventStats
                     stats={selectedEvent.guestStats || eventStats(selectedEvent)}
+                    upcoming={isUpcoming(selectedEvent)}
+                    loading={selectedEvent.source === "luma" && !selectedEvent.analyticsLoaded}
                     activeFilter={state.filters.guestStatus}
                     onFilter={selectGuestFilter}
                   />
                 </div>
-                {selectedEvent.source === "luma" ? (
-                  <div className="summary-actions">
-                    <button
-                      className="button"
-                      type="button"
-                      disabled={selectedEventLoadingGuests}
-                      onClick={() => loadEventGuests(selectedEvent.id, { force: true })}
-                    >
-                      <RefreshCw className={selectedEventLoadingGuests ? "animate-spin" : ""} size={16} aria-hidden="true" />
-                      {selectedEventLoadingGuests ? "Syncing event..." : "Sync event"}
-                    </button>
-                    {selectedEventManageUrl ? (
-                      <a className="button" href={selectedEventManageUrl} target="_blank" rel="noreferrer">
-                        <Pencil size={16} aria-hidden="true" />
-                        Edit event
-                      </a>
-                    ) : null}
-                  </div>
-                ) : (
+                {selectedEvent.source !== "luma" ? (
                   <div className="summary-actions">
                     <button className="button" type="button" onClick={() => setEventDraft(eventToDraft(selectedEvent))}>
                       Edit event
@@ -1230,7 +1800,7 @@ export default function Home() {
                       Delete
                     </button>
                   </div>
-                )}
+                ) : null}
               </div>
             ) : (
               <div className="empty-state">Create an event to start managing guests.</div>
@@ -1247,7 +1817,9 @@ export default function Home() {
                     aria-selected={activeEventTab === tab.id}
                     key={tab.id}
                     onClick={() => {
+                      if (tab.id !== activeEventTab) workspaceUrlModeRef.current = "push";
                       setActiveEventTab(tab.id);
+                      pendingProfileIdRef.current = "";
                       setProfilePanelOpen(false);
                     }}
                   >
@@ -1278,7 +1850,7 @@ export default function Home() {
                       </select>
                     </label>
                     <TagFilter
-                      tags={state.tags}
+                      definitions={state.tagDefinitions}
                       selected={state.filters.guestTags}
                       onChange={(tags) => setFilter("guestTags", tags)}
                     />
@@ -1351,12 +1923,17 @@ export default function Home() {
                         </th>
                         <th className="guest-identity-column">Guest</th>
                         {showGuestGroups ? <th>Groups</th> : null}
-                        <th>Tags</th>
+                        <th className="tag-cell">Tags</th>
                         <th>Status</th>
-                        <th className="whitespace-nowrap">Status date</th>
-                        <th className="event-count-heading text-center">Events attended</th>
-                        <th className="event-count-heading text-center">Events registered</th>
+                        <th className="event-count-heading text-center">
+                          <abbr className="table-header-abbr" data-tooltip="Events attended" aria-label="Events attended" tabIndex={0}>EA</abbr>
+                        </th>
+                        <th className="event-count-heading text-center">
+                          <abbr className="table-header-abbr" data-tooltip="Events registered" aria-label="Events registered" tabIndex={0}>ER</abbr>
+                        </th>
                         <th>Actions</th>
+                        <th className="note-cell">Notes</th>
+                        <th className="whitespace-nowrap">Status date</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1388,6 +1965,7 @@ export default function Home() {
                             <td className="guest-identity-column">
                               <PersonButton
                                 person={person}
+                                onAvatarClick={setAvatarPreview}
                                 onClick={(event) => {
                                   event.stopPropagation();
                                   selectPerson();
@@ -1400,22 +1978,26 @@ export default function Home() {
                               </td>
                             ) : null}
                             <td className="tag-cell" onClick={(event) => event.stopPropagation()}>
-                              <PersonTags person={person} onEdit={() => openTagEditor(person)} />
+                              <PersonTags
+                                person={person}
+                                definitions={state.tagDefinitions}
+                                open={openTagPersonId === person.id}
+                                saving={savingTagPersonId === person.id}
+                                onOpen={() => setOpenTagPersonId(person.id)}
+                                onClose={() => setOpenTagPersonId("")}
+                                onChange={(tags) => savePersonTags(person.id, tags)}
+                                onCreate={(name, tags) => createAndAssignTag(person.id, name, tags)}
+                              />
                             </td>
                             <td>
                               <StatusPill status={guest.status} />
                             </td>
-                            <td>
-                              {statusDate ? (
-                                <time className="whitespace-nowrap text-xs text-muted" dateTime={statusDate}>
-                                  {formatDateTime(statusDate)}
-                                </time>
-                              ) : (
-                                <span className="whitespace-nowrap text-xs text-muted">-</span>
-                              )}
+                            <td className="event-count-cell text-center text-sm font-semibold tabular-nums">
+                              {history.countsLoaded ? history.attendedCount : <span aria-label="Loading events attended">&hellip;</span>}
                             </td>
-                            <td className="event-count-cell text-center text-sm font-semibold tabular-nums">{history.attendedCount}</td>
-                            <td className="event-count-cell text-center text-sm font-semibold tabular-nums">{history.registeredCount}</td>
+                            <td className="event-count-cell text-center text-sm font-semibold tabular-nums">
+                              {history.countsLoaded ? history.registeredCount : <span aria-label="Loading events registered">&hellip;</span>}
+                            </td>
                             <td>
                               <div className="row-actions" onClick={(event) => event.stopPropagation()}>
                                 {actionsForStatus(guest.status).map(([label, status]) => {
@@ -1435,6 +2017,27 @@ export default function Home() {
                                   );
                                 })}
                               </div>
+                            </td>
+                            <td className="note-cell" onClick={(event) => event.stopPropagation()}>
+                              <button
+                                className={`guest-note-trigger ${person.crmNotes ? "has-note" : ""}`}
+                                type="button"
+                                aria-label={`${person.crmNotes ? "Open notes" : "Add a note"} for ${person.name}`}
+                                title={person.crmNotes ? "Open notes" : "Add note"}
+                                onClick={() => openGuestNote(person)}
+                              >
+                                <FileText size={15} aria-hidden="true" />
+                                <span>{guestNoteSummary(person.crmNotes)}</span>
+                              </button>
+                            </td>
+                            <td>
+                              {statusDate ? (
+                                <time className="whitespace-nowrap text-xs text-muted" dateTime={statusDate}>
+                                  {formatDateTime(statusDate)}
+                                </time>
+                              ) : (
+                                <span className="whitespace-nowrap text-xs text-muted">-</span>
+                              )}
                             </td>
                           </tr>
                           );
@@ -1498,6 +2101,7 @@ export default function Home() {
               onAudienceNameChange={setAudienceName}
               onSaveAudience={saveAudienceAsGroup}
               onOpenPerson={openPerson}
+              onAvatarClick={setAvatarPreview}
               onSend={sendInvites}
               newGroup={newGroup}
               onNewGroupChange={setNewGroup}
@@ -1510,7 +2114,11 @@ export default function Home() {
               onToggleMember={toggleMember}
             />
           ) : activeEventTab === "analytics" ? (
-            <AnalyticsTab event={selectedEvent} analytics={selectedEventAnalytics} />
+            <AnalyticsTab
+              event={selectedEvent}
+              analytics={selectedEventAnalytics}
+              loading={selectedEvent?.source === "luma" && !selectedEvent.analyticsLoaded}
+            />
           ) : null}
         </section>
 
@@ -1521,7 +2129,12 @@ export default function Home() {
             trace={selectedTrace}
             onTraceActivity={() => tracePersonActivity(selectedPerson, { force: true })}
             onSelectEvent={selectEvent}
-            onClose={() => setProfilePanelOpen(false)}
+            onAvatarClick={setAvatarPreview}
+            onClose={() => {
+              workspaceUrlModeRef.current = "push";
+              pendingProfileIdRef.current = "";
+              setProfilePanelOpen(false);
+            }}
           />
         ) : null}
       </main>
@@ -1553,6 +2166,10 @@ export default function Home() {
           onClose={() => setSearchOpen(false)}
           onSelect={selectUniversalResult}
         />
+      ) : null}
+
+      {avatarPreview ? (
+        <AvatarPhotoViewer preview={avatarPreview} onClose={() => setAvatarPreview(null)} />
       ) : null}
 
       {eventDraft ? (
@@ -1624,14 +2241,22 @@ export default function Home() {
         />
       ) : null}
 
-      {tagEditorDraft ? (
-        <TagEditorDialog
-          draft={tagEditorDraft}
-          person={getPerson(state, tagEditorDraft.personId)}
-          availableTags={state.tags}
-          onChange={setTagEditorDraft}
-          onClose={closeTagEditor}
-          onSubmit={submitPersonTags}
+      {guestNoteDraft ? (
+        <GuestNoteDialog
+          draft={guestNoteDraft}
+          person={getPerson(state, guestNoteDraft.personId)}
+          onChange={setGuestNoteDraft}
+          onClose={closeGuestNote}
+          onSubmit={saveGuestNote}
+        />
+      ) : null}
+
+      {tagSettingsOpen ? (
+        <TagSettingsDialog
+          definitions={state.tagDefinitions}
+          saving={tagSettingsSaving}
+          onClose={() => setTagSettingsOpen(false)}
+          onSave={saveTagSettings}
         />
       ) : null}
     </div>
@@ -1669,6 +2294,57 @@ function SessionKeyGate({ value, error, checking, onChange, onSubmit }) {
         </form>
       </section>
     </main>
+  );
+}
+
+function AvatarPhotoViewer({ preview, onClose }) {
+  const [imageFailed, setImageFailed] = useState(false);
+  const closeButtonRef = useRef(null);
+
+  useEffect(() => {
+    const previousFocus = document.activeElement;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    closeButtonRef.current?.focus();
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      if (previousFocus instanceof HTMLElement) previousFocus.focus();
+    };
+  }, []);
+
+  return (
+    <div className="photo-viewer-scrim" role="presentation" onMouseDown={onClose}>
+      <section
+        className="photo-viewer"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="photo-viewer-title"
+        onMouseDown={(event) => event.stopPropagation()}
+        onKeyDown={(event) => {
+          if (event.key !== "Tab") return;
+          event.preventDefault();
+          closeButtonRef.current?.focus();
+        }}
+      >
+        <button ref={closeButtonRef} className="photo-viewer-close" type="button" aria-label="Close profile photo" title="Close" onClick={onClose}>
+          <X size={22} aria-hidden="true" />
+        </button>
+        <div className="photo-viewer-frame">
+          {imageFailed ? (
+            <span className="photo-viewer-fallback" aria-hidden="true">{initials(preview.person?.name || "")}</span>
+          ) : (
+            <img
+              className="photo-viewer-image"
+              src={preview.url}
+              alt={`${preview.person?.name || "Guest"}'s profile photo`}
+              onError={() => setImageFailed(true)}
+            />
+          )}
+        </div>
+        <h2 id="photo-viewer-title" className="photo-viewer-name">{preview.person?.name || "Guest"}</h2>
+      </section>
+    </div>
   );
 }
 
@@ -1748,93 +2424,120 @@ function GuestStatusDialog({ draft, event, guest, person, onChange, onClose, onS
   );
 }
 
-function TagEditorDialog({ draft, person, availableTags, onChange, onClose, onSubmit }) {
+function GuestNoteDialog({ draft, person, onChange, onClose, onSubmit }) {
+  const [mode, setMode] = useState("write");
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   if (!person) return null;
-  const tags = sortedTags(unique([...availableTags, ...draft.tags]));
-  const selected = new Set(draft.tags);
-  const addPendingTag = () => {
-    const value = cleanTagName(draft.newTag);
-    if (!value) return;
-    const existing = tags.find((tag) => tag.toLocaleLowerCase() === value.toLocaleLowerCase());
-    onChange((current) => ({
-      ...current,
-      tags: sortedTags(unique([...current.tags, existing || value])),
-      newTag: "",
-    }));
+
+  const updateNotes = (notes) => onChange((current) => current ? { ...current, notes } : current);
+  const formatSelection = ({ before = "", after = "", placeholder = "text", linePrefix = "" }) => {
+    const textarea = textareaRef.current;
+    if (!textarea || draft.saving) return;
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const selected = draft.notes.slice(start, end) || placeholder;
+    const formatted = linePrefix
+      ? selected.split("\n").map((line) => `${linePrefix}${line}`).join("\n")
+      : `${before}${selected}${after}`;
+    const nextNotes = `${draft.notes.slice(0, start)}${formatted}${draft.notes.slice(end)}`.slice(0, MAX_GUEST_NOTE_LENGTH);
+    updateNotes(nextNotes);
+    window.requestAnimationFrame(() => {
+      textarea.focus();
+      const selectionStart = start + (linePrefix ? linePrefix.length : before.length);
+      textarea.setSelectionRange(selectionStart, Math.min(start + formatted.length - after.length, nextNotes.length));
+    });
   };
+
+  const markdownActions = [
+    { label: "Bold", icon: Bold, format: { before: "**", after: "**", placeholder: "bold text" } },
+    { label: "Italic", icon: Italic, format: { before: "_", after: "_", placeholder: "italic text" } },
+    { label: "Link", icon: Link2, format: { before: "[", after: "](https://)", placeholder: "link text" } },
+    { label: "Bulleted list", icon: List, format: { linePrefix: "- ", placeholder: "list item" } },
+    { label: "Quote", icon: Quote, format: { linePrefix: "> ", placeholder: "quote" } },
+    { label: "Inline code", icon: Code2, format: { before: "`", after: "`", placeholder: "code" } },
+  ];
 
   return (
     <div className="modal-scrim" role="presentation" onMouseDown={onClose}>
       <form
-        className="event-dialog tag-dialog"
+        className="event-dialog guest-note-dialog"
         role="dialog"
         aria-modal="true"
-        aria-labelledby="tag-dialog-title"
+        aria-labelledby="guest-note-dialog-title"
         onSubmit={onSubmit}
         onMouseDown={(event) => event.stopPropagation()}
       >
-        <div className="dialog-head">
-          <div>
-            <p className="eyebrow">Guest tags</p>
-            <h2 id="tag-dialog-title">Tag {person.name}</h2>
+        <div className="dialog-head guest-note-head">
+          <div className="guest-note-person">
+            <Avatar person={person} />
+            <div>
+              <p className="eyebrow">Guest notes</p>
+              <h2 id="guest-note-dialog-title">{person.name}</h2>
+              <p>{person.email}</p>
+            </div>
           </div>
-          <button className="icon-button" type="button" disabled={draft.submitting} aria-label="Close tag editor" title="Close" onClick={onClose}>
+          <button className="icon-button" type="button" disabled={draft.saving} aria-label="Close guest notes" title="Close" onClick={onClose}>
             <X size={18} aria-hidden="true" />
           </button>
         </div>
 
-        <div className="tag-create-row">
-          <input
-            autoFocus
-            type="text"
-            maxLength={40}
-            placeholder="New tag"
-            value={draft.newTag}
-            disabled={draft.submitting}
-            onChange={(event) => onChange((current) => ({ ...current, newTag: event.target.value }))}
-            onKeyDown={(event) => {
-              if (event.key !== "Enter") return;
-              event.preventDefault();
-              addPendingTag();
-            }}
-          />
-          <button className="button" type="button" disabled={!cleanTagName(draft.newTag) || draft.submitting} onClick={addPendingTag}>
-            <Plus size={16} aria-hidden="true" />
-            Add
+        <div className="guest-note-tabs" role="tablist" aria-label="Guest note view">
+          <button className={mode === "write" ? "active" : ""} type="button" role="tab" aria-selected={mode === "write"} onClick={() => setMode("write")}>
+            <Pencil size={15} aria-hidden="true" />
+            Write
+          </button>
+          <button className={mode === "preview" ? "active" : ""} type="button" role="tab" aria-selected={mode === "preview"} onClick={() => setMode("preview")}>
+            <Eye size={15} aria-hidden="true" />
+            Preview
           </button>
         </div>
 
-        <fieldset className="tag-options">
-          <legend>Tags</legend>
-          {tags.length ? (
-            <div className="tag-option-grid">
-              {tags.map((tag) => (
-                <label className="tag-option" key={tag}>
-                  <input
-                    type="checkbox"
-                    checked={selected.has(tag)}
-                    disabled={draft.submitting}
-                    onChange={(event) => onChange((current) => ({
-                      ...current,
-                      tags: event.target.checked
-                        ? sortedTags(unique([...current.tags, tag]))
-                        : current.tags.filter((item) => item !== tag),
-                    }))}
-                  />
-                  <span>{tag}</span>
-                </label>
+        {mode === "write" ? (
+          <div className="guest-note-editor" role="tabpanel" aria-label="Write note">
+            <div className="markdown-toolbar" aria-label="Markdown formatting">
+              {markdownActions.map(({ label, icon: FormatIcon, format }) => (
+                <button type="button" title={label} aria-label={label} disabled={draft.saving} key={label} onClick={() => formatSelection(format)}>
+                  <FormatIcon size={15} aria-hidden="true" />
+                </button>
               ))}
+              <span>Markdown</span>
             </div>
-          ) : (
-            <div className="empty-state compact">No tags yet.</div>
-          )}
-        </fieldset>
+            <textarea
+              ref={textareaRef}
+              autoFocus
+              rows={14}
+              maxLength={MAX_GUEST_NOTE_LENGTH}
+              value={draft.notes}
+              disabled={draft.saving}
+              placeholder="Add context, follow-ups, links, or anything useful about this guest..."
+              aria-label={`Notes for ${person.name}`}
+              onChange={(event) => updateNotes(event.target.value)}
+            />
+          </div>
+        ) : (
+          <div className={`markdown-preview ${draft.notes.trim() ? "" : "empty"}`} role="tabpanel" aria-label="Note preview">
+            {draft.notes.trim() ? (
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noreferrer" />,
+                }}
+              >
+                {draft.notes}
+              </ReactMarkdown>
+            ) : <p>No notes yet.</p>}
+          </div>
+        )}
 
+        <div className="guest-note-footer">
+          <span>{draft.notes.length.toLocaleString()}/{MAX_GUEST_NOTE_LENGTH.toLocaleString()}</span>
+          {draft.updatedAt ? <span>Last saved {formatDateTime(draft.updatedAt)}</span> : <span>Not saved yet</span>}
+        </div>
         <div className="dialog-actions">
-          <button className="button ghost" type="button" disabled={draft.submitting} onClick={onClose}>Cancel</button>
-          <button className="button primary" type="submit" disabled={draft.submitting}>
-            {draft.submitting ? <RefreshCw className="animate-spin" size={16} aria-hidden="true" /> : <Tag size={16} aria-hidden="true" />}
-            {draft.submitting ? "Saving..." : "Save tags"}
+          <button className="button ghost" type="button" disabled={draft.saving} onClick={onClose}>Cancel</button>
+          <button className="button primary" type="submit" disabled={draft.saving}>
+            {draft.saving ? <RefreshCw className="animate-spin" size={16} aria-hidden="true" /> : <FileText size={16} aria-hidden="true" />}
+            {draft.saving ? "Saving..." : "Save note"}
           </button>
         </div>
       </form>
@@ -1842,7 +2545,85 @@ function TagEditorDialog({ draft, person, availableTags, onChange, onClose, onSu
   );
 }
 
-function TagFilter({ tags, selected, onChange }) {
+function TagSettingsDialog({ definitions, saving, onClose, onSave }) {
+  const [drafts, setDrafts] = useState(() => definitions.map((tag) => ({ ...tag })));
+  const hasInvalidName = drafts.some((tag) => !cleanTagName(tag.name));
+  return (
+    <div className="modal-scrim" role="presentation" onMouseDown={onClose}>
+      <form
+        className="event-dialog tag-settings-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="tag-settings-title"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onSave(drafts);
+        }}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="dialog-head">
+          <div>
+            <p className="eyebrow">Settings</p>
+            <h2 id="tag-settings-title">Tags</h2>
+            <p className="dialog-description">Names and colors update everywhere a tag is used.</p>
+          </div>
+          <button className="icon-button" type="button" disabled={saving} aria-label="Close tag settings" title="Close" onClick={onClose}>
+            <X size={18} aria-hidden="true" />
+          </button>
+        </div>
+        {drafts.length ? (
+          <div className="tag-settings-list">
+            {drafts.map((tag, index) => (
+              <div className={`tag-settings-row ${tag.managed ? "managed" : ""}`} key={tag.id}>
+                <span className="tag-color-preview" style={{ backgroundColor: tag.color }} aria-hidden="true" />
+                <label className="tag-settings-name">
+                  <span className="sr-only">Tag name</span>
+                  {tag.managed ? <Lock size={15} aria-label="Automatically managed tag" /> : null}
+                  <input
+                    type="text"
+                    maxLength={40}
+                    value={tag.name}
+                    disabled={saving || tag.managed}
+                    aria-label={`Name for ${tag.name}`}
+                    onChange={(event) => setDrafts((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item))}
+                  />
+                </label>
+                <div className="tag-color-options" aria-label={`Color for ${tag.name}`}>
+                  <label
+                    className="tag-custom-color"
+                    style={{ "--tag-color": tag.color } as CSSProperties}
+                    title={tag.managed ? "Automatically managed color" : "Choose a custom color"}
+                  >
+                    <input
+                      type="color"
+                      value={tag.color}
+                      disabled={saving || tag.managed}
+                      aria-label={`Choose a custom color for ${tag.name}`}
+                      onChange={(event) => {
+                        const color = event.target.value;
+                        setDrafts((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, color } : item));
+                      }}
+                    />
+                  </label>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : <div className="empty-state compact">Create your first tag from any guest’s Tags cell.</div>}
+        <div className="dialog-actions">
+          <button className="button ghost" type="button" disabled={saving} onClick={onClose}>Cancel</button>
+          <button className="button primary" type="submit" disabled={saving || hasInvalidName}>
+            {saving ? <RefreshCw className="animate-spin" size={16} aria-hidden="true" /> : <Settings2 size={16} aria-hidden="true" />}
+            {saving ? "Saving..." : "Save changes"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function TagFilter({ definitions, selected, onChange }) {
+  const tags = definitions.map((tag) => tag.name);
   const selectedTags = Array.isArray(selected) ? selected : [];
   const selectedSet = new Set(selectedTags);
   const label = selectedTags.length ? `${selectedTags.length} selected` : "All tags";
@@ -1869,7 +2650,8 @@ function TagFilter({ tags, selected, onChange }) {
                   ? sortedTags(unique([...selectedTags, tag]))
                   : selectedTags.filter((item) => item !== tag))}
               />
-              <span>{tag}</span>
+              <span className="tag-filter-dot" style={{ backgroundColor: tagDefinitionForName(definitions, tag).color }} aria-hidden="true" />
+              <span>{tagDisplayName(tag)}</span>
             </label>
           )) : <span className="tag-filter-empty">No tags yet</span>}
         </div>
@@ -1932,17 +2714,22 @@ function SearchSection({ title, results, onSelect }) {
   );
 }
 
-function EventStats({ stats, activeFilter, onFilter }) {
+function EventStats({ stats, upcoming = false, loading = false, activeFilter, onFilter }) {
   const items = [
-    { value: "checked_in", label: "Check-ins", count: stats.checkedIn },
+    ...(upcoming
+      ? [{ value: "to_decide", label: "To Decide", count: stats.toDecide ?? 0 }]
+      : [
+          { value: "new_faces", label: "New Faces", count: stats.newFaces ?? 0 },
+          { value: "checked_in", label: "Check-ins", count: stats.checkedIn },
+        ]),
+    { value: "first_registers", label: "First Registers", count: stats.firstRegisters ?? 0 },
     { value: "accepted", label: "Accepted", count: stats.accepted ?? stats.confirmed ?? 0 },
     { value: "registered", label: "Registered", count: stats.registered },
     { value: "invited", label: "Invited", count: stats.invited },
     { value: "waitlisted", label: "Waitlist", count: stats.waitlisted },
-    { value: "new_faces", label: "New faces", count: stats.newFaces ?? 0 },
   ];
   return (
-    <div className="summary-stats" aria-label="Guest status filters">
+    <div className="summary-stats" aria-label="Guest status filters" aria-busy={loading}>
       {items.map((item) => (
         <button
           className={`summary-stat ${activeFilter === item.value ? "active" : ""}`}
@@ -1951,7 +2738,7 @@ function EventStats({ stats, activeFilter, onFilter }) {
           key={item.value}
           onClick={() => onFilter(item.value)}
         >
-          <strong>{item.count || 0}</strong>
+          <strong>{loading ? "..." : item.count || 0}</strong>
           <span>{item.label}</span>
         </button>
       ))}
@@ -1974,6 +2761,7 @@ function InviteTab({
   onAudienceNameChange,
   onSaveAudience,
   onOpenPerson,
+  onAvatarClick,
   onSend,
   newGroup,
   onNewGroupChange,
@@ -2133,7 +2921,7 @@ function InviteTab({
           <tbody>
             {audience.length ? audience.map(({ person, reasons, history }) => (
               <tr key={person.id}>
-                <td><PersonButton person={person} onClick={() => onOpenPerson(person.id)} /></td>
+                <td><PersonButton person={person} onAvatarClick={onAvatarClick} onClick={() => onOpenPerson(person.id)} /></td>
                 <td className="text-xs text-muted">{reasons.join(", ")}</td>
                 <td className="whitespace-nowrap text-xs">{history.lastAttended ? formatDate(history.lastAttended.date) : "Never"}</td>
                 <td className="text-center font-semibold tabular-nums">{history.attendedCount}</td>
@@ -2169,7 +2957,7 @@ function InviteTab({
               const isMember = person.groups.includes(selectedGroupId);
               return (
                 <div className="member-row" key={person.id}>
-                  <PersonButton person={person} onClick={() => onOpenPerson(person.id)} />
+                  <PersonButton person={person} onAvatarClick={onAvatarClick} onClick={() => onOpenPerson(person.id)} />
                   <button className="button small" type="button" onClick={() => onToggleMember(person.id, selectedGroupId)}>{isMember ? "Remove" : "Add"}</button>
                 </div>
               );
@@ -2239,9 +3027,20 @@ function RulePicker({ label, options, selected, onAdd, onChange }) {
   );
 }
 
-function AnalyticsTab({ event, analytics }) {
+function AnalyticsTab({ event, analytics, loading = false }) {
   if (!event) return <section className="analytics-tab panel"><div className="empty-state">Select an event to view analytics.</div></section>;
-  const totalPeople = analytics.returning + analytics.newPeople;
+  if (loading) {
+    return (
+      <section className="analytics-tab panel" role="tabpanel" aria-label="Analytics" aria-busy="true">
+        <div className="guest-loading-state" role="status">
+          <span className="loading-spinner" aria-hidden="true" />
+          <span>Loading analytics</span>
+        </div>
+      </section>
+    );
+  }
+  const totalAccepted = analytics.returningAccepted + analytics.firstRegisters;
+  const hasReferrals = analytics.referredRegistrations > 0;
   return (
     <section className="analytics-tab panel" role="tabpanel" aria-label="Analytics">
       <header className="event-tab-heading">
@@ -2251,38 +3050,72 @@ function AnalyticsTab({ event, analytics }) {
 
       <div className="analytics-overview-grid">
         <article className="analytics-card returner-card">
-          <div className="chart-heading"><div><p className="eyebrow">Audience mix</p><h3>New and returning</h3></div><Users size={19} aria-hidden="true" /></div>
-          <div className="stacked-chart" aria-label={`${analytics.returning} returning and ${analytics.newPeople} new event goers`}>
-            {totalPeople ? (
+          <div className="chart-heading"><div><p className="eyebrow">Accepted mix</p><h3>First registers and returning</h3></div><Users size={19} aria-hidden="true" /></div>
+          <div className="stacked-chart" aria-label={`${analytics.returningAccepted} returning, including ${analytics.referredReturning} referred; ${analytics.firstRegisters} first registers, including ${analytics.referredFirstRegisters} referred`}>
+            {totalAccepted ? (
               <>
-                <span className="stacked-returning" style={{ width: `${(analytics.returning / totalPeople) * 100}%` }} />
-                <span className="stacked-new" style={{ width: `${(analytics.newPeople / totalPeople) * 100}%` }} />
+                <span className="stacked-returning" style={{ width: `${(analytics.returningAccepted / totalAccepted) * 100}%` }}>
+                  {analytics.referredReturning ? <i className="stacked-referral" style={{ width: `${(analytics.referredReturning / analytics.returningAccepted) * 100}%` }} /> : null}
+                </span>
+                <span className="stacked-new" style={{ width: `${(analytics.firstRegisters / totalAccepted) * 100}%` }}>
+                  {analytics.referredFirstRegisters ? <i className="stacked-referral" style={{ width: `${(analytics.referredFirstRegisters / analytics.firstRegisters) * 100}%` }} /> : null}
+                </span>
               </>
             ) : null}
           </div>
           <div className="chart-legend">
-            <span><i className="legend-returning" /><strong>{analytics.returning}</strong> Returning</span>
-            <span><i className="legend-new" /><strong>{analytics.newPeople}</strong> New</span>
+            <span><i className="legend-returning" /><strong>{analytics.returningAccepted}</strong> Returning</span>
+            <span><i className="legend-new" /><strong>{analytics.firstRegisters}</strong> First registers</span>
           </div>
+          {hasReferrals ? (
+            <div className="referral-mix" aria-label={`${analytics.referredAccepted} referred accepted guests: ${analytics.referredReturning} returning and ${analytics.referredFirstRegisters} first registers`}>
+              <Gem size={15} aria-hidden="true" />
+              <strong>{analytics.referredAccepted}</strong>
+              <span>Referred accepted</span>
+              <small>{analytics.referredReturning} returning</small>
+              <small>{analytics.referredFirstRegisters} first registers</small>
+            </div>
+          ) : null}
         </article>
 
         <article className="analytics-card funnel-card">
           <div className="chart-heading"><div><p className="eyebrow">Conversion</p><h3>Registration funnel</h3></div><BarChart3 size={19} aria-hidden="true" /></div>
           <ol className="funnel-chart">
             {analytics.funnel.map((stage) => (
-              <li key={stage.id}>
-                <span style={{ width: `${stage.width}%` }}><strong>{stage.value}</strong><small>{stage.label}</small></span>
+              <li key={stage.id} aria-label={`${stage.label}: ${stage.value}${stage.overlay ? `; ${stage.overlay.label}: ${stage.overlay.value}` : ""}`}>
+                <span className="funnel-bar" style={{ width: `${stage.width}%` }}>
+                  <span className="funnel-stage-main"><strong>{stage.value}</strong><small>{stage.label}</small></span>
+                  {stage.overlay && stage.value > 0 ? (
+                    <span
+                      className={`funnel-overlay ${stage.overlay.value ? "" : "zero"}`}
+                      style={{ width: stage.overlay.value ? `${stage.overlay.width}%` : "auto" }}
+                    >
+                      <strong>{stage.overlay.value}</strong>
+                      <small>{stage.overlay.label}</small>
+                    </span>
+                  ) : null}
+                </span>
                 <em>{stage.rate}%</em>
               </li>
             ))}
           </ol>
+          {hasReferrals ? (
+            <div className="referral-funnel" aria-label={`${analytics.referredRegistrations} referred registrations, ${analytics.referredAccepted} accepted, ${analytics.referredCheckedIn} checked in`}>
+              <span className="referral-funnel-label"><Gem size={15} aria-hidden="true" /> Referred</span>
+              <span><strong>{analytics.referredRegistrations}</strong><small>Registered</small></span>
+              <ArrowRight size={14} aria-hidden="true" />
+              <span><strong>{analytics.referredAccepted}</strong><small>Accepted</small></span>
+              <ArrowRight size={14} aria-hidden="true" />
+              <span><strong>{analytics.referredCheckedIn}</strong><small>Checked in</small></span>
+            </div>
+          ) : null}
         </article>
       </div>
 
       <section className="answer-analytics">
         <div className="event-tab-heading compact">
-          <div><p className="eyebrow">First-time registrants</p><h2>Registration answers</h2></div>
-          <span className="analytics-sample">{analytics.newPeople} new people</span>
+          <div><p className="eyebrow">First Registers</p><h2>Registration answers</h2></div>
+          <span className="analytics-sample">{analytics.firstRegisters} first registers</span>
         </div>
         {analytics.questions.length ? (
           <div className="question-grid">
@@ -2307,7 +3140,7 @@ function AnalyticsTab({ event, analytics }) {
               </article>
             ))}
           </div>
-        ) : <div className="empty-state">No registration answers from first-time registrants are available for this event.</div>}
+        ) : <div className="empty-state">No registration answers from first registers are available for this event.</div>}
       </section>
     </section>
   );
@@ -2333,21 +3166,39 @@ function GroupChecklist({ title, groups, selected, onChange }) {
   );
 }
 
-function ProfilePanel({ state, person, trace, onTraceActivity, onSelectEvent, onClose }) {
+function ProfilePanel({ state, person, trace, onTraceActivity, onSelectEvent, onAvatarClick, onClose }) {
   const [activityFilters, setActivityFilters] = useState(() => activityFilterOptions.map((option) => option.status));
+  const activityMenuRef = useRef<HTMLDetailsElement>(null);
+
+  useEffect(() => {
+    const closeActivityMenu = (event: PointerEvent) => {
+      if (!activityMenuRef.current?.contains(event.target as Node)) {
+        activityMenuRef.current?.removeAttribute("open");
+      }
+    };
+
+    document.addEventListener("pointerdown", closeActivityMenu, true);
+    return () => document.removeEventListener("pointerdown", closeActivityMenu, true);
+  }, []);
 
   if (!person || !hasProfileContent(state, person)) return null;
 
   const history = getPersonHistory(state, person.id);
   const bio = profileBio(person, state);
   const socialLinks = profileSocialLinks(person, state);
-  const answerGroups = registrationAnswerGroups(person, state);
   const currentRecord = currentProfileRecord(state, person);
   const currentStatus = currentRecord?.guest.status;
   const loadedActivityRecords = activityRecordsFromHistory(history.records);
   const traceRan = ["loading", "ready", "error"].includes(trace?.status);
   const traceRecords = traceRan ? trace?.records || [] : loadedActivityRecords;
+  const answerGroups = registrationAnswerGroups(person, state, trace?.records || []);
+  const answerGroupsLoading = person.source === "luma" && ["idle", "loading"].includes(trace?.status);
   const filteredTraceRecords = traceRecords.filter((record) => activityFilters.includes(activityRecordStatus(record)));
+  const activityFilterLabel = activityFilters.length === activityFilterOptions.length
+    ? "All activity"
+    : activityFilters.length === 1
+      ? activityFilterOptions.find((option) => option.status === activityFilters[0])?.label || "Activity"
+      : `${activityFilters.length} activity types`;
 
   const toggleActivityFilter = (status) => {
     setActivityFilters((current) => {
@@ -2360,7 +3211,7 @@ function ProfilePanel({ state, person, trace, onTraceActivity, onSelectEvent, on
     <aside className="profile-panel panel">
       <div className="profile-panel-motion" key={person.id}>
         <div className="profile-head">
-          <Avatar person={person} large />
+          <Avatar person={person} large onPreview={onAvatarClick} />
           <div className="profile-identity">
             <h2>{person.name}</h2>
             <p className="person-email">{person.email}</p>
@@ -2373,30 +3224,35 @@ function ProfilePanel({ state, person, trace, onTraceActivity, onSelectEvent, on
           </div>
         </div>
 
+        <ProfileTags person={person} definitions={state.tagDefinitions} />
         {bio ? <p className="profile-bio">{bio}</p> : null}
         <SocialIconLinks links={socialLinks} />
         {currentRecord ? <ProfileContext record={currentRecord} /> : null}
 
-        {answerGroups.length ? (
+        {answerGroups.length || answerGroupsLoading ? (
           <details className="profile-disclosure" open>
             <summary>Registration answers</summary>
             <section className="profile-section">
-              {answerGroups.map((group) => (
-                <article className="answer-card" key={group.event.id}>
-                  <div className="answer-card-head">
-                    <strong>{group.event.title}</strong>
-                    <span>{formatDate(group.event.date)}</span>
+              {answerGroups.length ? answerGroups.map((group) => (
+                  <article className="answer-card" key={group.event.id}>
+                    <div className="answer-card-head">
+                      <strong>{group.event.title}</strong>
+                      <span>{formatDate(group.event.date)}</span>
+                    </div>
+                    <dl className="answer-list">
+                      {group.answers.map((answer) => (
+                        <div className="answer-row" key={answer.id + answer.label}>
+                          <dt>{answer.label}</dt>
+                          <dd>{answer.value}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                  </article>
+                )) : (
+                  <div className="guest-loading-state compact" role="status" aria-label="Loading registration answers">
+                    <span className="loading-spinner" aria-hidden="true" />
                   </div>
-                  <dl className="answer-list">
-                    {group.answers.map((answer) => (
-                      <div className="answer-row" key={answer.id + answer.label}>
-                        <dt>{answer.label}</dt>
-                        <dd>{answer.value}</dd>
-                      </div>
-                    ))}
-                  </dl>
-                </article>
-              ))}
+                )}
             </section>
           </details>
         ) : null}
@@ -2405,36 +3261,61 @@ function ProfilePanel({ state, person, trace, onTraceActivity, onSelectEvent, on
           <summary>Event activity</summary>
           <section className="profile-section">
             <div className="trace-toolbar">
-              <button className="button small" type="button" disabled={trace?.status === "loading"} onClick={onTraceActivity}>
-                {trace?.status === "loading" ? "Loading activity..." : trace?.status === "ready" ? "Refresh activity" : "Load activity"}
+              {traceRecords.length ? (
+                <details
+                  className="activity-filter-menu"
+                  ref={activityMenuRef}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Escape") return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    event.currentTarget.removeAttribute("open");
+                    event.currentTarget.querySelector("summary")?.focus();
+                  }}
+                >
+                  <summary>
+                    <ListFilter size={15} aria-hidden="true" />
+                    <span>{activityFilterLabel}</span>
+                    <span className="activity-filter-count">
+                      {filteredTraceRecords.length}/{traceRecords.length}
+                    </span>
+                    <ChevronDown className="activity-filter-chevron" size={15} aria-hidden="true" />
+                  </summary>
+                  <div className="activity-filter-popover">
+                    <div className="activity-filter-head">
+                      <strong>Activity types</strong>
+                      <span>{activityFilters.length} selected</span>
+                    </div>
+                    {activityFilterOptions.map((option) => {
+                      const checked = activityFilters.includes(option.status);
+                      return (
+                        <label className="activity-filter-option" key={option.status}>
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            disabled={checked && activityFilters.length === 1}
+                            onChange={() => toggleActivityFilter(option.status)}
+                          />
+                          <span>{option.label}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </details>
+              ) : <span className="activity-filter-placeholder">Activity</span>}
+              <button
+                className="icon-button activity-refresh"
+                type="button"
+                aria-label={trace?.status === "loading" ? "Loading activity" : trace?.status === "ready" ? "Refresh activity" : "Load activity"}
+                title={trace?.status === "loading" ? "Loading activity" : trace?.status === "ready" ? "Refresh activity" : "Load activity"}
+                disabled={trace?.status === "loading"}
+                onClick={onTraceActivity}
+              >
+                <RefreshCw className={trace?.status === "loading" ? "animate-spin" : ""} size={16} aria-hidden="true" />
               </button>
             </div>
             {traceRecords.length ? (
               <>
-                <fieldset className="trace-filters">
-                  <legend>Activity type</legend>
-                  <div className="trace-filter-row">
-                    <div className="status-options">
-                      {activityFilterOptions.map((option) => {
-                        const checked = activityFilters.includes(option.status);
-                        return (
-                          <label className="check-chip" key={option.status}>
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              disabled={checked && activityFilters.length === 1}
-                              onChange={() => toggleActivityFilter(option.status)}
-                            />
-                            <span>{option.label}</span>
-                          </label>
-                        );
-                      })}
-                    </div>
-                    <span className="trace-filter-count">
-                      {filteredTraceRecords.length} of {traceRecords.length}
-                    </span>
-                  </div>
-                </fieldset>
                 {filteredTraceRecords.length ? (
                   <TraceTimeline records={filteredTraceRecords} traced={traceRan && trace?.records?.length > 0} onSelectEvent={onSelectEvent} />
                 ) : (
@@ -2525,19 +3406,32 @@ function TraceTimeline({ records, traced, onSelectEvent }) {
   );
 }
 
-function PersonButton({ person, onClick }) {
+function PersonButton({ person, onClick, onAvatarClick }) {
   return (
-    <button className="plain person-cell" type="button" onClick={onClick}>
-      <Avatar person={person} />
-      <span>
+    <div className="person-cell">
+      <Avatar person={person} onPreview={onAvatarClick} />
+      <button className="plain person-details" type="button" onClick={onClick}>
         <span className="person-name">{person.name}</span>
         <span className="person-email">{person.email}</span>
-      </span>
-    </button>
+      </button>
+    </div>
   );
 }
 
-function Avatar({ person, large = false }) {
+function guestNoteSummary(notes) {
+  if (!notes?.trim()) return "Add note";
+  const firstLine = notes
+    .split("\n")
+    .map((line) => line.trim())
+    .find(Boolean)
+    ?.replace(/^#{1,6}\s+/, "")
+    .replace(/\[(.*?)\]\([^)]*\)/g, "$1")
+    .replace(/[*_~`>[\]]/g, "")
+    .trim() || "Open note";
+  return firstLine.length > 42 ? `${firstLine.slice(0, 41).trimEnd()}...` : firstLine;
+}
+
+function Avatar({ person, large = false, onPreview = null }) {
   const candidates = useMemo(
     () =>
       orderAvatarCandidates(
@@ -2552,8 +3446,9 @@ function Avatar({ person, large = false }) {
 
   useEffect(() => setCandidateIndex(0), [person?.id, candidates.join("|")]);
 
-  return (
-    <span className={`avatar ${avatarUrl ? "avatar-photo" : ""} ${large ? "avatar-large" : ""}`}>
+  const className = `avatar ${avatarUrl ? "avatar-photo" : ""} ${large ? "avatar-large" : ""} ${avatarUrl && onPreview ? "avatar-button" : ""}`;
+  const contents = (
+    <>
       <span>{initials(person?.name || "")}</span>
       {avatarUrl ? (
         <img
@@ -2563,8 +3458,28 @@ function Avatar({ person, large = false }) {
           onError={() => setCandidateIndex((current) => current + 1)}
         />
       ) : null}
-    </span>
+    </>
   );
+
+  if (avatarUrl && onPreview) {
+    return (
+      <button
+        className={className}
+        type="button"
+        aria-label={`View ${person?.name || "guest"}'s profile photo`}
+        aria-haspopup="dialog"
+        title="View profile photo"
+        onClick={(event) => {
+          event.stopPropagation();
+          onPreview({ person, url: avatarUrl });
+        }}
+      >
+        {contents}
+      </button>
+    );
+  }
+
+  return <span className={className}>{contents}</span>;
 }
 
 function EventArtwork({ event, large = false }) {
@@ -2600,20 +3515,210 @@ function PersonChips({ person, groups, emptyText = "" }) {
   );
 }
 
-function PersonTags({ person, onEdit }) {
+function ProfileTags({ person, definitions }) {
   const tags = Array.isArray(person.tags) ? person.tags : [];
-  const visibleTags = tags.slice(0, 2);
+  const automaticTags = new Set((Array.isArray(person.automaticTags) ? person.automaticTags : []).map((tag) => tag.toLocaleLowerCase()));
+  if (!tags.length) return null;
+
   return (
-    <div className="person-tags">
-      <div className="tag-chip-list">
-        {visibleTags.map((tag) => <span className="tag-chip" key={tag}>{tag}</span>)}
-        {tags.length > visibleTags.length ? <span className="tag-chip tag-chip-more">+{tags.length - visibleTags.length}</span> : null}
-        {!tags.length ? <span className="person-email">-</span> : null}
-      </div>
-      <button className="tag-edit-button" type="button" aria-label={`Edit tags for ${person.name}`} title="Edit tags" onClick={onEdit}>
-        <Tag size={14} aria-hidden="true" />
-      </button>
+    <div className="profile-tags" aria-label="Guest tags">
+      {tags.map((tag) => {
+        const definition = tagDefinitionForName(definitions, tag);
+        const automatic = automaticTags.has(tag.toLocaleLowerCase());
+        return (
+          <span className={`tag-chip ${automatic ? "tag-chip-automatic" : ""}`} style={tagChipStyle(definition.color)} title={automatic ? "Automatically assigned" : undefined} key={tag}>
+            {automatic ? <Lock size={9} aria-hidden="true" /> : null}
+            {tagDisplayName(tag)}
+          </span>
+        );
+      })}
     </div>
+  );
+}
+
+function PersonTags({ person, definitions, open, saving, onOpen, onClose, onChange, onCreate }) {
+  const tags = Array.isArray(person.tags) ? person.tags : [];
+  const automaticTags = new Set((Array.isArray(person.automaticTags) ? person.automaticTags : []).map((tag) => tag.toLocaleLowerCase()));
+  const visibleTags = tags.slice(0, 2);
+  const [query, setQuery] = useState("");
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [pickerPosition, setPickerPosition] = useState({ left: 0, top: 0 });
+  const triggerRef = useRef(null);
+  const pickerRef = useRef(null);
+  const inputRef = useRef(null);
+  const normalizedQuery = cleanTagName(query).toLocaleLowerCase();
+  const matchingDefinitions = definitions.filter((tag) => tag.name.toLocaleLowerCase().includes(normalizedQuery));
+  const exactMatch = definitions.some((tag) => tag.name.toLocaleLowerCase() === normalizedQuery);
+  const canCreate = Boolean(normalizedQuery) && !exactMatch;
+  const options = [
+    ...matchingDefinitions.map((tag) => ({ type: "tag", tag })),
+    ...(canCreate ? [{ type: "create", name: cleanTagName(query) }] : []),
+  ];
+
+  useEffect(() => {
+    if (!open) return;
+    setQuery("");
+    setActiveIndex(0);
+    requestAnimationFrame(() => inputRef.current?.focus());
+    const closeOnOutsideClick = (event) => {
+      if (!pickerRef.current?.contains(event.target) && !triggerRef.current?.contains(event.target)) onClose();
+    };
+    document.addEventListener("mousedown", closeOnOutsideClick);
+    return () => document.removeEventListener("mousedown", closeOnOutsideClick);
+  }, [open]);
+
+  useLayoutEffect(() => {
+    if (!open || !triggerRef.current) return;
+    const placePicker = () => {
+      const trigger = triggerRef.current.getBoundingClientRect();
+      const width = 288;
+      const height = pickerRef.current?.offsetHeight || 220;
+      const below = window.innerHeight - trigger.bottom;
+      setPickerPosition({
+        left: Math.max(8, Math.min(trigger.left, window.innerWidth - width - 8)),
+        top: below >= height + 14 ? trigger.bottom + 6 : Math.max(8, trigger.top - height - 6),
+      });
+    };
+    placePicker();
+    requestAnimationFrame(placePicker);
+    window.addEventListener("resize", placePicker);
+    return () => window.removeEventListener("resize", placePicker);
+  }, [open, options.length]);
+
+  useEffect(() => {
+    setActiveIndex((current) => Math.min(current, Math.max(0, options.length - 1)));
+  }, [query, options.length]);
+
+  const resetTagSearch = () => {
+    setQuery("");
+    window.requestAnimationFrame(() => inputRef.current?.focus());
+  };
+
+  const activateOption = async (option) => {
+    if (!option || saving) return;
+    if (option.type === "create") {
+      const saved = await onCreate(option.name, tags);
+      if (saved) resetTagSearch();
+      return;
+    }
+    if (automaticTags.has(option.tag.name.toLocaleLowerCase())) return;
+    const selected = tags.some((tag) => tag.toLocaleLowerCase() === option.tag.name.toLocaleLowerCase());
+    const nextTags = selected
+      ? tags.filter((tag) => tag.toLocaleLowerCase() !== option.tag.name.toLocaleLowerCase())
+      : sortedTags(unique([...tags, option.tag.name]));
+    const saved = await onChange(nextTags);
+    if (saved) resetTagSearch();
+  };
+
+  return (
+    <>
+      <button
+        className={`person-tags ${open ? "picker-open" : ""}`}
+        ref={triggerRef}
+        type="button"
+        aria-label={`${tags.length ? "Edit tags" : "Add tag"} for ${person.name}`}
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        title={tags.length ? "Edit tags" : "Add tag"}
+        onClick={onOpen}
+      >
+        <span className="tag-chip-list">
+          {visibleTags.map((tag) => {
+            const definition = tagDefinitionForName(definitions, tag);
+            const automatic = automaticTags.has(tag.toLocaleLowerCase());
+            return (
+              <span className={`tag-chip ${automatic ? "tag-chip-automatic" : ""}`} style={tagChipStyle(definition.color)} title={automatic ? "Automatically assigned" : undefined} key={tag}>
+                {automatic ? <Lock size={9} aria-hidden="true" /> : null}
+                {tagDisplayName(tag)}
+              </span>
+            );
+          })}
+          {tags.length > visibleTags.length ? <span className="tag-chip tag-chip-more">+{tags.length - visibleTags.length}</span> : null}
+          {!tags.length ? <span className="tag-cell-placeholder">+ Add Tag</span> : null}
+        </span>
+      </button>
+      {open ? createPortal(
+        <div className="tag-picker" ref={pickerRef} style={pickerPosition} onClick={(event) => event.stopPropagation()}>
+          <div className="tag-picker-search">
+            <Search size={15} aria-hidden="true" />
+            <input
+              ref={inputRef}
+              role="combobox"
+              aria-label={`Search tags for ${person.name}`}
+              aria-controls={`tag-options-${person.id}`}
+              aria-expanded="true"
+              aria-activedescendant={options[activeIndex] ? `tag-option-${person.id}-${activeIndex}` : undefined}
+              autoComplete="off"
+              type="search"
+              placeholder="Search tags…"
+              value={query}
+              disabled={saving}
+              onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "ArrowDown") {
+                  event.preventDefault();
+                  setActiveIndex((current) => options.length ? (current + 1) % options.length : 0);
+                } else if (event.key === "ArrowUp") {
+                  event.preventDefault();
+                  setActiveIndex((current) => options.length ? (current - 1 + options.length) % options.length : 0);
+                } else if (event.key === "Enter") {
+                  event.preventDefault();
+                  void activateOption(options[activeIndex]);
+                } else if (event.key === "Escape") {
+                  event.preventDefault();
+                  onClose();
+                }
+              }}
+            />
+            {saving ? <RefreshCw className="animate-spin" size={15} aria-label="Saving tags" /> : null}
+          </div>
+          <div className="tag-picker-options" id={`tag-options-${person.id}`} role="listbox" aria-multiselectable="true">
+            {options.map((option, index) => {
+              if (option.type === "tag") {
+                const automatic = automaticTags.has(option.tag.name.toLocaleLowerCase());
+                const selected = tags.some((tag) => tag.toLocaleLowerCase() === option.tag.name.toLocaleLowerCase());
+                return (
+                  <button
+                    className={`tag-picker-option ${automatic ? "automatic" : ""} ${index === activeIndex ? "active" : ""}`}
+                    id={`tag-option-${person.id}-${index}`}
+                    type="button"
+                    role="option"
+                    aria-selected={selected}
+                    key={option.tag.id}
+                    disabled={saving || automatic}
+                    onMouseEnter={() => setActiveIndex(index)}
+                    onClick={() => void activateOption(option)}
+                  >
+                    <span className="tag-option-color" style={{ backgroundColor: option.tag.color }} aria-hidden="true" />
+                    <span>{tagDisplayName(option.tag.name)}</span>
+                    {automatic ? <Lock size={14} aria-label="Automatically assigned" /> : selected ? <CircleCheck size={16} aria-hidden="true" /> : null}
+                  </button>
+                );
+              }
+              return (
+                <button
+                  className={`tag-picker-option tag-picker-create ${index === activeIndex ? "active" : ""}`}
+                  id={`tag-option-${person.id}-${index}`}
+                  type="button"
+                  role="option"
+                  aria-selected="false"
+                  key={`create-${option.name}`}
+                  disabled={saving}
+                  onMouseEnter={() => setActiveIndex(index)}
+                  onClick={() => void activateOption(option)}
+                >
+                  <Plus size={16} aria-hidden="true" />
+                  <span>Add “{option.name}”</span>
+                </button>
+              );
+            })}
+            {!options.length ? <div className="tag-picker-empty">Type to create a tag</div> : null}
+          </div>
+          <div className="tag-picker-hint"><span><kbd>↑</kbd><kbd>↓</kbd> navigate</span><span><kbd>↵</kbd> select</span></div>
+        </div>,
+        document.body,
+      ) : null}
+    </>
   );
 }
 
@@ -2697,14 +3802,19 @@ function mergeLumaGuests(current, lumaData, { append = false } = {}) {
     if (event.id !== lumaData.eventId) return event;
     const guestsByPersonId = new Map((append ? event.guests : []).map((guest) => [guest.personId, guest]));
     (lumaData.guests || []).forEach((guest) => guestsByPersonId.set(guest.personId, guest));
+    const guests = [...guestsByPersonId.values()];
     return {
           ...event,
           ...(lumaData.event || {}),
-          guests: [...guestsByPersonId.values()],
+          guests,
           guestsLoaded: true,
           guestLoadTruncated: lumaData.truncated,
           guestStats: lumaData.stats || event.guestStats,
           guestAnalyticsQuestions: lumaData.analyticsQuestions || event.guestAnalyticsQuestions || [],
+          guestSnapshotReady: lumaData.snapshotReady ?? event.guestSnapshotReady ?? false,
+          guestSnapshotWarming: false,
+          guestHistoryLoaded: guests.every((guest: any) => Boolean(guest.eventCounts)),
+          guestHistoryLoading: false,
           guestPageInfo: lumaData.pageInfo || null,
           guestQuery: lumaData.query || null,
           guestQueryLoading: false,
@@ -2761,6 +3871,10 @@ function mergePersonRecord(existing, incoming) {
     ...incoming,
     groups: existing?.groups || incoming.groups || [],
     tags: Array.isArray(incoming.tags) ? incoming.tags : existing?.tags || [],
+    manualTags: Array.isArray(incoming.manualTags) ? incoming.manualTags : existing?.manualTags || [],
+    automaticTags: Array.isArray(incoming.automaticTags) ? incoming.automaticTags : existing?.automaticTags || [],
+    crmNotes: incoming.crmNotes ?? existing?.crmNotes ?? "",
+    crmNotesUpdatedAt: incoming.crmNotesUpdatedAt ?? existing?.crmNotesUpdatedAt ?? null,
     notes: existingNote || incoming.notes,
     title: existing?.title && existing.title !== "Luma guest" ? existing.title : incoming.title,
     profileDescription: incoming.profileDescription || existing?.profileDescription || "",
@@ -2784,11 +3898,19 @@ function normalizeState(value) {
   next.people = next.people.map((person) => ({
     ...person,
     tags: Array.isArray(person.tags) ? person.tags : [],
+    manualTags: Array.isArray(person.manualTags) ? person.manualTags : [],
+    automaticTags: Array.isArray(person.automaticTags) ? person.automaticTags : [],
+    crmNotes: typeof person.crmNotes === "string" ? person.crmNotes : "",
+    crmNotesUpdatedAt: person.crmNotesUpdatedAt || null,
   }));
   next.tags = sortedTags(unique([
     ...(Array.isArray(next.tags) ? next.tags : []),
     ...next.people.flatMap((person) => person.tags),
   ]));
+  next.tagDefinitions = next.tags.map((name) => tagDefinitionForName(
+    Array.isArray(next.tagDefinitions) ? next.tagDefinitions : [],
+    name,
+  ));
   next.filters.guestTags = sortedTags(unique(Array.isArray(next.filters.guestTags) ? next.filters.guestTags : []));
   if (!next.events.some((event) => event.id === next.selectedEventId)) {
     next.selectedEventId = sortEvents(next.events)[0]?.id || "";
@@ -2823,7 +3945,12 @@ function visibleEvents(state) {
   return state.filters.event === "past" ? events.reverse() : events;
 }
 
-function initialEventWindow(events, filter) {
+function initialEventWindow(events, filter, selectedEventId = "") {
+  const selectedIndex = selectedEventId ? events.findIndex((event) => event.id === selectedEventId) : -1;
+  if (selectedIndex >= 0) {
+    const start = Math.max(0, Math.min(selectedIndex - 4, events.length - EVENT_PAGE_SIZE));
+    return { start, end: Math.min(events.length, start + EVENT_PAGE_SIZE) };
+  }
   if (filter !== "all") return { start: 0, end: Math.min(events.length, EVENT_PAGE_SIZE) };
   if (!events.length) return { start: 0, end: 0 };
 
@@ -2935,6 +4062,7 @@ function personSearchText(state, person) {
     person.profileDescription,
     person.bio,
     person.notes,
+    person.crmNotes,
     socialLinksText(person.socialLinks),
     referrerLabel(person.referrer),
     ...groups,
@@ -2985,8 +4113,11 @@ function eventGuests(state, event) {
       if (serverManaged) return true;
       const selectedStatus = state.filters.guestStatus;
       const matchesStatus = selectedStatus === "all"
-        || (selectedStatus === "accepted" && ["going", "checked_in", "no_show"].includes(guest.status))
-        || (selectedStatus === "new_faces" && guest.isNewFace === true)
+        || (selectedStatus === "to_decide" && (guest.status === "registered" || (guest.status === "waitlisted" && guest.operatorDecision !== "waitlisted")))
+        || (selectedStatus === "accepted" && acceptedStatuses.includes(guest.status))
+        || (selectedStatus === "registered" && registeredStatuses.includes(guest.status))
+        || (selectedStatus === "first_registers" && isFirstRegister(guest))
+        || (selectedStatus === "new_faces" && guest.status === "checked_in" && isFirstRegistration(guest))
         || guest.status === selectedStatus;
       const matchesSearch = !query || searchableGuestText(person, guest).includes(query);
       return matchesStatus && matchesSearch;
@@ -3001,9 +4132,15 @@ function eventGuests(state, event) {
 
 function personHistoryForGuest(state, guest) {
   const history = getPersonHistory(state, guest.personId);
-  if (!guest.eventCounts) return history;
+  if (!guest.eventCounts) {
+    return {
+      ...history,
+      countsLoaded: guest.source !== "luma" && guest.dataSource !== "luma-index",
+    };
+  }
   return {
     ...history,
+    countsLoaded: true,
     attendedCount: nonnegativeCount(guest.eventCounts.attended, history.attendedCount),
     registeredCount: nonnegativeCount(guest.eventCounts.registered, history.registeredCount),
   };
@@ -3066,14 +4203,28 @@ function normalizeProfileSocialLink(link) {
   return { ...link, url, display };
 }
 
-function registrationAnswerGroups(person, state) {
-  return personGuestRecords(state, person.id)
-    .map(({ event, guest }) => ({
-      event,
-      answers: (guest.registrationAnswers || []).filter((answer) => answer.value),
-    }))
-    .filter((group) => group.answers.length)
-    .sort((a, b) => new Date(b.event.date).getTime() - new Date(a.event.date).getTime());
+function registrationAnswerGroups(person, state, activityRecords = []) {
+  const groupsByEvent = new Map();
+  const addGroup = (event, answers) => {
+    const usableAnswers = (Array.isArray(answers) ? answers : []).filter((answer) => answer?.value !== undefined && answer?.value !== null && String(answer.value).trim());
+    if (!event?.id || !usableAnswers.length) return;
+    groupsByEvent.set(event.id, { event, answers: usableAnswers });
+  };
+
+  personGuestRecords(state, person.id).forEach(({ event, guest }) => {
+    addGroup(event, guest.registrationAnswers);
+  });
+  activityRecords.forEach((record) => {
+    addGroup({
+      id: record.eventId,
+      title: record.eventTitle || "Untitled event",
+      date: record.eventDate || record.eventStartsAt || record.sortAt,
+      startsAt: record.eventStartsAt || null,
+    }, record.registrationAnswers);
+  });
+
+  return [...groupsByEvent.values()]
+    .sort((a, b) => new Date(b.event.startsAt || b.event.date).getTime() - new Date(a.event.startsAt || a.event.date).getTime());
 }
 
 function currentProfileRecord(state, person) {
@@ -3152,62 +4303,101 @@ function hasProfileContent(state, person) {
 function buildEventAnalytics(state, event) {
   const empty = {
     registrations: 0,
-    returning: 0,
-    newPeople: 0,
+    returningAccepted: 0,
+    firstRegisters: 0,
+    newFaces: 0,
+    referredRegistrations: 0,
+    referredAccepted: 0,
+    referredCheckedIn: 0,
+    referredReturning: 0,
+    referredFirstRegisters: 0,
     funnel: [
       { id: "registered", label: "Total registrations", value: 0, rate: 0, width: 100 },
-      { id: "accepted", label: "Accepted", value: 0, rate: 0, width: 0 },
-      { id: "checked-in", label: "Checked in", value: 0, rate: 0, width: 0 },
+      { id: "accepted", label: "Accepted", value: 0, rate: 0, width: 0, overlay: { label: "First Registers", value: 0, width: 0 } },
+      { id: "checked-in", label: "Checked in", value: 0, rate: 0, width: 0, overlay: { label: "New Faces", value: 0, width: 0 } },
     ],
     questions: [],
   };
   if (!event) return empty;
 
-  const registrationStatuses = ["registered", "going", "waitlisted", "checked_in", "declined", "no_show"];
   const registrationRows = event.guests
-    .filter((guest) => guest.registeredAt || registrationStatuses.includes(guest.status))
+    .filter((guest) => registeredStatuses.includes(guest.status))
     .map((guest) => ({
       guest,
       person: getPerson(state, guest.personId),
       history: personHistoryForGuest(state, guest),
     }))
     .filter((row) => row.person);
-  const newRows = registrationRows.filter(({ history }) => history.registeredCount <= 1);
-  const returning = registrationRows.length - newRows.length;
-  const accepted = registrationRows.filter(({ guest }) =>
-    Boolean(guest.approvedAt || guest.checkedInAt || ["going", "checked_in", "no_show"].includes(guest.status)),
-  ).length;
-  const checkedIn = registrationRows.filter(({ guest }) => Boolean(guest.checkedInAt || guest.status === "checked_in")).length;
+  const acceptedRows = registrationRows.filter(({ guest }) => acceptedStatuses.includes(guest.status));
+  const firstRegisterRows = acceptedRows.filter(({ guest }) => isFirstRegistrationAtEvent(state, guest, event));
+  const referredRows = registrationRows.filter(({ person }) => personHasExactTag(person, REFERRED_PERSON_TAG));
+  const referredAcceptedRows = referredRows.filter(({ guest }) => acceptedStatuses.includes(guest.status));
+  const referredFirstRegisterRows = referredAcceptedRows.filter(({ guest }) => isFirstRegistrationAtEvent(state, guest, event));
+  const returningAccepted = acceptedRows.length - firstRegisterRows.length;
+  const accepted = acceptedRows.length;
+  const checkedIn = registrationRows.filter(({ guest }) => guest.status === "checked_in").length;
+  const newFaces = registrationRows.filter(({ guest }) => guest.status === "checked_in" && isFirstRegistrationAtEvent(state, guest, event)).length;
   const loadedCounts = {
     registrations: registrationRows.length,
-    returning,
-    newPeople: newRows.length,
+    returningAccepted,
+    firstRegisters: firstRegisterRows.length,
     accepted,
     checkedIn,
+    newFaces,
+    referredRegistrations: referredRows.length,
+    referredAccepted: referredAcceptedRows.length,
+    referredCheckedIn: referredRows.filter(({ guest }) => guest.status === "checked_in").length,
+    referredReturning: referredAcceptedRows.length - referredFirstRegisterRows.length,
+    referredFirstRegisters: referredFirstRegisterRows.length,
   };
   const counts = eventWideAnalyticsCounts(event.guestStats, loadedCounts);
   const registrations = counts.registrations;
   const rate = (value) => registrations ? Math.round((value / registrations) * 100) : 0;
   const width = (value) => registrations ? Math.max(value ? 18 : 0, Math.round((value / registrations) * 100)) : 0;
+  const subsetWidth = (value, parent) => parent ? Math.min(100, Math.max(value ? 24 : 0, Math.round((value / parent) * 100))) : 0;
 
   const questions = Array.isArray(event.guestAnalyticsQuestions)
     ? event.guestAnalyticsQuestions
-    : buildRegistrationQuestionAnalytics(newRows.map(({ guest, person }) => ({
+    : buildRegistrationQuestionAnalytics(firstRegisterRows.map(({ guest, person }) => ({
         personId: person.id,
         registrationAnswers: guest.registrationAnswers,
       })));
 
   return {
     registrations,
-    returning: counts.returning,
-    newPeople: counts.newPeople,
+    returningAccepted: counts.returningAccepted,
+    firstRegisters: counts.firstRegisters,
+    newFaces: counts.newFaces,
+    referredRegistrations: counts.referredRegistrations,
+    referredAccepted: counts.referredAccepted,
+    referredCheckedIn: counts.referredCheckedIn,
+    referredReturning: counts.referredReturning,
+    referredFirstRegisters: counts.referredFirstRegisters,
     funnel: [
       { id: "registered", label: "Total registrations", value: registrations, rate: registrations ? 100 : 0, width: registrations ? 100 : 0 },
-      { id: "accepted", label: "Accepted", value: counts.accepted, rate: rate(counts.accepted), width: width(counts.accepted) },
-      { id: "checked-in", label: "Checked in", value: counts.checkedIn, rate: rate(counts.checkedIn), width: width(counts.checkedIn) },
+      {
+        id: "accepted",
+        label: "Accepted",
+        value: counts.accepted,
+        rate: rate(counts.accepted),
+        width: width(counts.accepted),
+        overlay: { label: "First Registers", value: counts.firstRegisters, width: subsetWidth(counts.firstRegisters, counts.accepted) },
+      },
+      {
+        id: "checked-in",
+        label: "Checked in",
+        value: counts.checkedIn,
+        rate: rate(counts.checkedIn),
+        width: width(counts.checkedIn),
+        overlay: { label: "New Faces", value: counts.newFaces, width: subsetWidth(counts.newFaces, counts.checkedIn) },
+      },
     ],
     questions,
   };
+}
+
+function personHasExactTag(person, tagName) {
+  return Array.isArray(person?.tags) && person.tags.some((tag) => tag === tagName);
 }
 
 function computeInviteAudience(state) {
@@ -3282,7 +4472,7 @@ function getPersonHistory(state, personId) {
     .sort((a, b) => new Date(b.event.date).getTime() - new Date(a.event.date).getTime());
 
   const attendedRecords = records.filter(({ guest }) => guest.status === "checked_in" || Boolean(guest.checkedInAt));
-  const registeredRecords = records.filter(({ guest }) => ["registered", "going", "waitlisted", "checked_in", "declined", "no_show"].includes(guest.status));
+  const registeredRecords = records.filter(({ guest }) => registeredStatuses.includes(guest.status));
   const noShowRecords = records.filter(({ guest }) => guest.status === "no_show");
   const categories = {};
   attendedRecords.forEach(({ event }) => {
@@ -3311,18 +4501,54 @@ function eventStats(event) {
     waitlisted: 0,
     checkedIn: 0,
     invited: 0,
+    toDecide: 0,
+    firstRegisters: 0,
     newFaces: 0,
   };
   event.guests.forEach((guest) => {
     if (["going", "checked_in"].includes(guest.status)) stats.confirmed += 1;
-    if (["going", "checked_in", "no_show"].includes(guest.status)) stats.accepted += 1;
-    if (guest.status === "registered") stats.registered += 1;
+    if (acceptedStatuses.includes(guest.status)) stats.accepted += 1;
+    if (registeredStatuses.includes(guest.status)) stats.registered += 1;
     if (guest.status === "waitlisted") stats.waitlisted += 1;
     if (guest.status === "checked_in") stats.checkedIn += 1;
     if (guest.status === "invited") stats.invited += 1;
-    if (guest.isNewFace === true) stats.newFaces += 1;
+    if (guest.status === "registered" || (guest.status === "waitlisted" && guest.operatorDecision !== "waitlisted")) stats.toDecide += 1;
+    if (isFirstRegister(guest)) stats.firstRegisters += 1;
+    if (guest.status === "checked_in" && isFirstRegistration(guest)) stats.newFaces += 1;
   });
   return stats;
+}
+
+function isFirstRegister(guest) {
+  return acceptedStatuses.includes(guest.status) && isFirstRegistration(guest);
+}
+
+function isFirstRegistration(guest) {
+  return registrationStatuses.includes(guest.status)
+    && (guest.isFirstRegistration === true || guest.isNewFace === true);
+}
+
+function isFirstRegistrationAtEvent(state, guest, event) {
+  if (typeof guest.isFirstRegistration === "boolean" || typeof guest.isNewFace === "boolean") {
+    return isFirstRegistration(guest);
+  }
+  if (!registrationStatuses.includes(guest.status)) return false;
+  return !state.events.some((candidate) =>
+    candidate.id !== event.id
+    && eventOccursBefore(candidate, event)
+    && candidate.guests.some((candidateGuest) => candidateGuest.personId === guest.personId),
+  );
+}
+
+function eventOccursBefore(candidate, event) {
+  if (candidate.startsAt && event.startsAt) {
+    const candidateStart = new Date(candidate.startsAt).getTime();
+    const eventStart = new Date(event.startsAt).getTime();
+    if (Number.isFinite(candidateStart) && Number.isFinite(eventStart)) return candidateStart < eventStart;
+  }
+  const candidateDate = String(candidate.date || "").slice(0, 10);
+  const eventDate = String(event.date || "").slice(0, 10);
+  return Boolean(candidateDate && eventDate && candidateDate < eventDate);
 }
 
 function actionsForStatus(status) {
@@ -3445,6 +4671,48 @@ function cleanTagName(value) {
 
 function sortedTags(tags) {
   return [...tags].sort((left, right) => left.localeCompare(right));
+}
+
+function tagDefinitionForName(definitions, name) {
+  return definitions.find((tag) => tag.name.toLocaleLowerCase() === String(name).toLocaleLowerCase()) || {
+    id: `legacy-${String(name).toLocaleLowerCase()}`,
+    name,
+    color: "#0f766e",
+  };
+}
+
+function tagDisplayName(name) {
+  const value = String(name);
+  const bareName = value.replace(/^(?:🚀|⚡|🎪|👻|💀)\s+/u, "");
+  const emoji = AUTOMATIC_TAG_EMOJIS[bareName.toLocaleLowerCase()];
+  return emoji ? `${emoji} ${bareName}` : value;
+}
+
+function mergeTagDefinition(definitions, definition) {
+  const filtered = definitions.filter((tag) => tag.id !== definition.id && tag.name.toLocaleLowerCase() !== definition.name.toLocaleLowerCase());
+  return [...filtered, definition].sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function tagChipStyle(color) {
+  return { "--tag-color": color } as CSSProperties;
+}
+
+function tagColorForName(name) {
+  const hash = [...String(name)].reduce((total, character) => total + character.charCodeAt(0), 0);
+  return TAG_COLOR_PALETTE[hash % TAG_COLOR_PALETTE.length];
+}
+
+function applyTagDefinitionUpdates(state, updates) {
+  const next = { ...state, people: state.people.map((person) => ({ ...person, tags: [...person.tags] })) };
+  updates.forEach((update) => {
+    next.tagDefinitions = mergeTagDefinition(next.tagDefinitions, update);
+    const previousName = update.previousName || update.name;
+    const rename = (tags) => sortedTags(unique(tags.map((tag) => tag.toLocaleLowerCase() === previousName.toLocaleLowerCase() ? update.name : tag)));
+    next.people = next.people.map((person) => ({ ...person, tags: rename(person.tags || []) }));
+    next.filters = { ...next.filters, guestTags: rename(next.filters.guestTags || []) };
+    next.tags = rename(next.tags || []);
+  });
+  return next;
 }
 
 function firstPresent(...values) {

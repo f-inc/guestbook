@@ -1,16 +1,29 @@
 type AnalyticsCounts = {
   accepted: number;
   checkedIn: number;
-  newPeople: number;
+  firstRegisters: number;
+  newFaces: number;
+  referredAccepted: number;
+  referredCheckedIn: number;
+  referredFirstRegisters: number;
+  referredRegistrations: number;
+  referredReturning: number;
   registrations: number;
-  returning: number;
+  returningAccepted: number;
 };
 
 type GuestStats = {
   accepted?: unknown;
   checkedIn?: unknown;
-  invited?: unknown;
+  firstRegisters?: unknown;
   newFaces?: unknown;
+  invited?: unknown;
+  referredAccepted?: unknown;
+  referredCheckedIn?: unknown;
+  referredFirstRegisters?: unknown;
+  referredRegistrations?: unknown;
+  referredReturning?: unknown;
+  registered?: unknown;
   total?: unknown;
 };
 
@@ -19,22 +32,61 @@ type RegistrationAnswerRow = {
   registrationAnswers?: unknown;
 };
 
+export const REFERRED_PERSON_TAG = "\u{1f48e} Referred";
+
 export function eventWideAnalyticsCounts(stats: GuestStats | null | undefined, fallback: AnalyticsCounts): AnalyticsCounts {
   const total = nonnegativeCount(stats?.total);
   if (total === null) return fallback;
 
-  const invited = nonnegativeCount(stats?.invited) ?? 0;
-  const registrations = Math.max(0, total - invited);
+  const registrations = Math.min(total, nonnegativeCount(stats?.registered) ?? fallback.registrations);
   const accepted = Math.min(registrations, nonnegativeCount(stats?.accepted) ?? fallback.accepted);
   const checkedIn = Math.min(accepted, nonnegativeCount(stats?.checkedIn) ?? fallback.checkedIn);
-  const newPeople = Math.min(registrations, nonnegativeCount(stats?.newFaces) ?? fallback.newPeople);
+  const firstRegisters = Math.min(
+    accepted,
+    nonnegativeCount(stats?.firstRegisters) ?? fallback.firstRegisters,
+  );
+  const newFaces = Math.min(
+    checkedIn,
+    nonnegativeCount(stats?.newFaces) ?? fallback.newFaces,
+  );
+  const referredRegistrations = Math.min(
+    registrations,
+    nonnegativeCount(stats?.referredRegistrations) ?? fallback.referredRegistrations,
+  );
+  const referredAccepted = Math.min(
+    accepted,
+    referredRegistrations,
+    nonnegativeCount(stats?.referredAccepted) ?? fallback.referredAccepted,
+  );
+  const referredCheckedIn = Math.min(
+    checkedIn,
+    referredAccepted,
+    nonnegativeCount(stats?.referredCheckedIn) ?? fallback.referredCheckedIn,
+  );
+  const referredFirstRegisters = Math.min(
+    firstRegisters,
+    referredAccepted,
+    nonnegativeCount(stats?.referredFirstRegisters) ?? fallback.referredFirstRegisters,
+  );
+  const returningAccepted = Math.max(0, accepted - firstRegisters);
+  const referredReturning = Math.min(
+    returningAccepted,
+    Math.max(0, referredAccepted - referredFirstRegisters),
+    nonnegativeCount(stats?.referredReturning) ?? fallback.referredReturning,
+  );
 
   return {
     registrations,
     accepted,
     checkedIn,
-    newPeople,
-    returning: Math.max(0, registrations - newPeople),
+    firstRegisters,
+    newFaces,
+    referredRegistrations,
+    referredAccepted,
+    referredCheckedIn,
+    referredFirstRegisters,
+    referredReturning,
+    returningAccepted,
   };
 }
 

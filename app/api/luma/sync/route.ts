@@ -3,7 +3,7 @@ import { appendFile, mkdir } from "node:fs/promises";
 type AnyRecord = Record<string, any>;
 type HttpError = Error & { status?: number };
 import nodePath from "node:path";
-import { createSyncRun, finishSyncRun, getEventSyncStates, getIndexStats, hasLumaDb, recordEventSyncState, upsertNormalizedLumaSnapshot } from "../db";
+import { createSyncRun, finishSyncRun, getEventSyncStates, getIndexStats, hasLumaDb, recordEventSyncState, removeIndexedEventGuestsMissingFromSnapshot, runAutomaticTagClassifier, upsertNormalizedLumaSnapshot } from "../db";
 import { lumaEventDate } from "../event-date";
 import { requestedEventIds, shouldRefreshEventGuests } from "../sync-policy";
 import { orderAvatarCandidates } from "../../../avatar-order";
@@ -57,6 +57,7 @@ async function runSync(request: Request) {
   const people = new Set();
   let failedEventCount = 0;
   let truncatedGuestEventCount = 0;
+  let automaticTags = null;
   let syncLockAcquired = false;
 
   try {
@@ -99,6 +100,7 @@ async function runSync(request: Request) {
         skippedFreshEventCount,
       });
       if (!staleEventIds.length) {
+        automaticTags = await classifyAfterSync({ requestId, forceFull: false, personIds: [] });
         return Response.json({
           ok: true,
           status: "fresh",
@@ -111,6 +113,7 @@ async function runSync(request: Request) {
           failedEventCount: 0,
           truncated: false,
           limits,
+          automaticTags,
         });
       }
     }
@@ -181,6 +184,13 @@ async function runSync(request: Request) {
           guests,
           rawGuests: rawGuests.entries,
         });
+        if (!rawGuests.truncated) {
+          const reconciliation = await removeIndexedEventGuestsMissingFromSnapshot({
+            eventId: event.id,
+            personIds: guests.map((guest) => guest.personId),
+          });
+          reconciliation.personIds.forEach((personId) => people.add(personId));
+        }
         await recordEventSyncState({
           eventId: event.id,
           guestCount: guests.length,
@@ -204,6 +214,11 @@ async function runSync(request: Request) {
       }
     }
 
+    automaticTags = await classifyAfterSync({
+      requestId,
+      forceFull: !upcomingScope,
+      personIds: [...people],
+    });
     const status = failedEventCount ? "partial_error" : "success";
     if (syncRun) {
       await finishSyncRun(syncRun.id, {
@@ -244,6 +259,7 @@ async function runSync(request: Request) {
       eventListTruncated: rawEvents.truncated,
       guestListsTruncated: truncatedGuestEventCount > 0,
       truncatedGuestEventCount,
+      automaticTags,
       limits,
       stats,
     });
@@ -261,6 +277,38 @@ async function runSync(request: Request) {
     return jsonError(error, requestId);
   } finally {
     if (syncLockAcquired && globalThis[SYNC_IN_FLIGHT_KEY] === requestId) delete globalThis[SYNC_IN_FLIGHT_KEY];
+  }
+}
+
+async function classifyAfterSync({ requestId, forceFull, personIds }: AnyRecord) {
+  const startedAt = Date.now();
+  try {
+    const result = await runAutomaticTagClassifier({ forceFull, personIds });
+    if (result.changedCount) clearAutomaticTagGuestCaches();
+    await debugLog(requestId, "auto-tags sync classification success", {
+      mode: result.mode,
+      evaluatedCount: result.evaluatedCount,
+      matchedCount: result.matchedCount,
+      addedCount: result.addedCount,
+      removedCount: result.removedCount,
+      durationMs: Date.now() - startedAt,
+    });
+    return result;
+  } catch (error) {
+    await debugLog(requestId, "auto-tags sync classification error", {
+      status: error.status || 500,
+      message: error.message,
+      durationMs: Date.now() - startedAt,
+    }, "error");
+    return { ok: false, status: "error", error: error.message };
+  }
+}
+
+function clearAutomaticTagGuestCaches() {
+  const cache = (globalThis as typeof globalThis & { __guestbookLumaCache?: Map<string, unknown> }).__guestbookLumaCache;
+  if (!cache) return;
+  for (const key of cache.keys()) {
+    if (key.startsWith("event-guests:") || key.startsWith("trace-person:")) cache.delete(key);
   }
 }
 
@@ -417,6 +465,8 @@ function normalizeEvent(event) {
     title: event.name || "Untitled event",
     date: lumaEventDate(event),
     startsAt: event.start_at || null,
+    endsAt: event.end_at || null,
+    visibility: event.visibility || null,
     location: formatLocation(event),
     category: firstTag(event) || event.calendar?.name || "Luma",
     capacity: event.max_capacity || event.guest_capacity || event.guest_count || 1,

@@ -1,4 +1,4 @@
-import { hasLumaDb, listIndexedPersonTags, setIndexedPersonTags } from "../luma/db";
+import { createIndexedTagDefinition, hasLumaDb, listIndexedTagDefinitions, setIndexedPersonTags, updateIndexedTagDefinition } from "../luma/db";
 import { requireSessionKey } from "../session-auth";
 
 type HttpError = Error & { code?: string; status?: number };
@@ -9,7 +9,33 @@ export async function GET(request: Request) {
   try {
     requireSessionKey(request);
     requireDatabase();
-    return Response.json({ tags: await listIndexedPersonTags() });
+    return Response.json({ tags: await listIndexedTagDefinitions() });
+  } catch (error) {
+    return errorResponse(error as HttpError);
+  }
+}
+
+export async function POST(request: Request) {
+  try {
+    requireSessionKey(request);
+    requireDatabase();
+    const body = await request.json() as { name?: unknown; color?: unknown };
+    const tag = await createIndexedTagDefinition(body);
+    clearEventGuestCaches();
+    return Response.json({ tag }, { status: 201 });
+  } catch (error) {
+    return errorResponse(error as HttpError);
+  }
+}
+
+export async function PUT(request: Request) {
+  try {
+    requireSessionKey(request);
+    requireDatabase();
+    const body = await request.json() as { id?: unknown; name?: unknown; color?: unknown };
+    const tag = await updateIndexedTagDefinition(body.id, body);
+    clearEventGuestCaches();
+    return Response.json({ tag });
   } catch (error) {
     return errorResponse(error as HttpError);
   }
@@ -25,7 +51,13 @@ export async function PATCH(request: Request) {
     if (!personId) return Response.json({ error: "A person id is required." }, { status: 400 });
 
     const person = await setIndexedPersonTags(personId, body.tags);
-    return Response.json({ personId: person.personId, tags: person.tags });
+    clearEventGuestCaches();
+    return Response.json({
+      personId: person.personId,
+      tags: person.tags,
+      manualTags: person.manualTags,
+      automaticTags: person.automaticTags,
+    });
   } catch (error) {
     return errorResponse(error as HttpError);
   }
@@ -36,6 +68,14 @@ function requireDatabase() {
     const error = new Error("Guest tags require DB_URL to be configured.") as HttpError;
     error.status = 503;
     throw error;
+  }
+}
+
+function clearEventGuestCaches() {
+  const cache = (globalThis as typeof globalThis & { __guestbookLumaCache?: Map<string, unknown> }).__guestbookLumaCache;
+  if (!cache) return;
+  for (const key of cache.keys()) {
+    if (key.startsWith("event-guests:")) cache.delete(key);
   }
 }
 

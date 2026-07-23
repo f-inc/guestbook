@@ -2,11 +2,11 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { after } from "next/server";
 
 type AnyRecord = Record<string, any>;
-type HttpError = Error & { status?: number };
+type HttpError = Error & { status?: number; code?: string };
 import nodePath from "node:path";
-import { getIndexedEventAnalytics, getIndexedLifetimeEventCounts, getIndexedTrace, hasLumaDb, listIndexedEventGuests, listIndexedEvents, recordEventSyncState, removeIndexedEventGuestsMissingFromSnapshot, removeIndexedTraceRecordsMissingFromEvents, runAutomaticTagClassifier, updateIndexedGuestStatus, upsertNormalizedLumaEvents, upsertNormalizedLumaGuestActivity, upsertNormalizedLumaSnapshot } from "./db";
+import { archiveIndexedEventsMissingFromCatalog, getIndexedEventAnalytics, getIndexedLifetimeEventCounts, getIndexedMultiEventStats, getIndexedTrace, hasLumaDb, listIndexedAnalyticsRespondents, listIndexedAudienceInviteRecipients, listIndexedEventGuestMutationTargets, listIndexedEventGuests, listIndexedEvents, listIndexedGuestReferrerTargets, listIndexedMultiEventGuests, normalizeIndexedAudienceCriteria, recordEventSyncState, removeIndexedEventGuestsMissingFromSnapshot, removeIndexedTraceRecordsMissingFromEvents, runAutomaticTagClassifier, updateIndexedGuestCheckIn, updateIndexedGuestReferrers, updateIndexedGuestStatus, upsertNormalizedLumaEvents, upsertNormalizedLumaGuestActivity, upsertNormalizedLumaSnapshot } from "./db";
 import { lumaEventDate } from "./event-date";
-import { filterGuestPayload, parseGuestListQuery } from "./guest-query";
+import { filterGuestPayload, guestQueryRequiresIndex, parseGuestListQuery } from "./guest-query";
 import { orderAvatarCandidates } from "../../avatar-order";
 import { normalizeGuestStatusNotification } from "../../guest-status-notification";
 import { normalizeInviteMessage } from "../../invite-message";
@@ -19,10 +19,17 @@ import {
   type EventSwitchDiagnosticReporter,
 } from "../../event-switch-diagnostics";
 import { requireSessionKey } from "../session-auth";
+import { normalizeMultiEventIds } from "./multi-event-stats";
+import { extractLumaReferrer } from "./referrer";
+import { parseAnalyticsRespondentQuery } from "./analytics-respondents";
+import { parseAllMatchingGuestQuery } from "./all-matching-guest-selection";
+import { liveEventCountsFromLumaEvent } from "../../event-count-reconciliation";
+import { rateLimitBackoffMs } from "./rate-limit-retry";
 
 export const runtime = "nodejs";
 
 const LUMA_BASE_URL = "https://public-api.luma.com";
+const LUMA_PRIVATE_BASE_URL = "https://api.luma.com";
 
 const approvalToStatus = {
   approved: "going",
@@ -43,6 +50,7 @@ const statusToApproval = {
 const LIVE_WRITE_CONFIRMATION = "CONFIRM_LUMA_WRITE";
 const CACHE_KEY = "__guestbookLumaCache";
 const IN_FLIGHT_KEY = "__guestbookLumaInFlight";
+const EVENT_GUEST_SCAN_IN_FLIGHT_KEY = "__guestbookLumaEventGuestScanInFlight";
 const DEFAULT_DEBUG_LOG_PATH = nodePath.join(process.cwd(), ".debug", "luma-api.log");
 
 export async function GET(request: Request) {
@@ -58,8 +66,13 @@ export async function GET(request: Request) {
     const traceEmail = url.searchParams.get("trace_email") || url.searchParams.get("email");
     const forceRefresh = url.searchParams.get("refresh") === "1";
     const refreshAll = url.searchParams.get("refresh_all") === "1";
+    const refreshEventsOnly = url.searchParams.get("refresh_events") === "1";
     const analyticsOnly = url.searchParams.get("event_analytics") === "1";
+    const analyticsRespondentsOnly = url.searchParams.get("analytics_respondents") === "1";
     const guestHistoryOnly = url.searchParams.get("guest_history") === "1";
+    const multiEventStatsOnly = url.searchParams.get("multi_event_stats") === "1";
+    const multiEventGuestsOnly = url.searchParams.get("multi_event_guests") === "1";
+    const liveEventCountsOnly = url.searchParams.get("live_event_counts") === "1";
     const traceScope = url.searchParams.get("trace_scope") === "all" ? "all" : "known";
     // EVENT_SWITCH_DIAGNOSTICS: this ID correlates the browser lifecycle with server and DB phases.
     const eventSwitchDiagnosticId = normalizeEventSwitchDiagnosticId(url.searchParams.get(EVENT_SWITCH_DIAGNOSTICS_PARAM));
@@ -69,9 +82,85 @@ export async function GET(request: Request) {
       tracePerson: Boolean(tracePersonId || traceEmail),
       forceRefresh,
       refreshAll,
+      refreshEventsOnly,
       traceScope,
       ...(eventSwitchDiagnosticId ? { eventSwitchDiagnosticId } : {}),
     });
+
+    if (liveEventCountsOnly) {
+      const eventIds = [...new Set(url.searchParams.getAll("event_id")
+        .map((value) => value.trim())
+        .filter((value) => /^[a-z0-9_-]{1,160}$/i.test(value)))]
+        .slice(0, 50);
+      if (!eventIds.length) {
+        return Response.json({ error: "At least one event_id is required.", requestId }, { status: 400 });
+      }
+      const counts = await Promise.all(eventIds.map(async (requestedEventId) => {
+        const event = await lumaFetch("/v1/events/get", {
+          requestId,
+          params: { event_id: requestedEventId },
+        });
+        return liveEventCountsFromLumaEvent(event);
+      }));
+      await debugLog(requestId, "live event counts success", {
+        eventCount: counts.length,
+        durationMs: Date.now() - startedAt,
+      });
+      return Response.json({ counts, requestId });
+    }
+
+    if (analyticsRespondentsOnly) {
+      if (!hasLumaDb()) return Response.json({ error: "Analytics respondents require DB_URL.", requestId }, { status: 503 });
+      const respondentQuery = parseAnalyticsRespondentQuery(url.searchParams);
+      if (!respondentQuery.eventIds.length) {
+        return Response.json({ error: "At least one event_id is required.", requestId }, { status: 400 });
+      }
+      if (!respondentQuery.question) {
+        return Response.json({ error: "A question is required.", requestId }, { status: 400 });
+      }
+      const result = await listIndexedAnalyticsRespondents(respondentQuery);
+      await debugLog(requestId, "analytics respondents index hit", {
+        eventCount: respondentQuery.eventIds.length,
+        answerFiltered: Boolean(respondentQuery.answer),
+        respondentCount: result.respondents.length,
+        total: result.pageInfo.total,
+        cursor: respondentQuery.cursor,
+        durationMs: Date.now() - startedAt,
+      });
+      return Response.json({ ...result, requestId });
+    }
+
+    if (multiEventStatsOnly) {
+      if (!hasLumaDb()) return Response.json({ error: "Multi-event statistics require DB_URL.", requestId }, { status: 503 });
+      const eventIds = normalizeMultiEventIds(url.searchParams.getAll("event_id"));
+      if (eventIds.length < 2) return Response.json({ error: "At least two event_id values are required.", requestId }, { status: 400 });
+      const aggregate = await getIndexedMultiEventStats(eventIds);
+      await debugLog(requestId, "multi-event unique stats index hit", {
+        eventCount: aggregate?.stats.eventCount || 0,
+        uniqueRegistered: aggregate?.stats.registered || 0,
+        uniqueCheckedIn: aggregate?.stats.checkedIn || 0,
+        durationMs: Date.now() - startedAt,
+      });
+      return Response.json({ ...aggregate, requestId });
+    }
+
+    if (multiEventGuestsOnly) {
+      if (!hasLumaDb()) return Response.json({ error: "Multi-event guest search requires DB_URL.", requestId }, { status: 503 });
+      const eventIds = normalizeMultiEventIds(url.searchParams.getAll("event_id"));
+      if (eventIds.length < 2) return Response.json({ error: "At least two event_id values are required.", requestId }, { status: 400 });
+      const guestQuery = parseGuestListQuery(url.searchParams);
+      const result = await listIndexedMultiEventGuests(eventIds, guestQuery);
+      await debugLog(requestId, "multi-event guest index hit", {
+        eventCount: eventIds.length,
+        uniqueGuestCount: result?.people.length || 0,
+        matchingRegistrations: result?.pageInfo.matchingRegistrations || 0,
+        filter: guestQuery.filter,
+        searchLength: guestQuery.search.length,
+        cursor: guestQuery.cursor,
+        durationMs: Date.now() - startedAt,
+      });
+      return Response.json({ ...result, requestId });
+    }
 
     if (tracePersonId || traceEmail) {
       if (!forceRefresh && hasLumaDb()) {
@@ -155,6 +244,7 @@ export async function GET(request: Request) {
       const cacheKey = eventGuestCacheKey(eventId);
       const guestQuery = parseGuestListQuery(url.searchParams);
       const prioritizePage = url.searchParams.get("guest_mode") === "page";
+      const requiresIndexedPage = guestQueryRequiresIndex(guestQuery);
 
       const pageSize = forceRefresh
         ? safeInt("LUMA_EVENT_SYNC_GUESTS_PAGE_SIZE", 100, 1, 100)
@@ -168,7 +258,7 @@ export async function GET(request: Request) {
 
       // The To Decide view depends on the local operator-decision marker, which
       // is intentionally not present in Luma's remote guest payload cache.
-      const cached = forceRefresh || guestQuery.filter === "to_decide" ? null : readCache(cacheKey);
+      const cached = forceRefresh || guestQuery.filter === "to_decide" || requiresIndexedPage ? null : readCache(cacheKey);
       if (cached) {
         const filteredPayload = filterGuestPayload(cached, guestQuery);
         if (eventSwitchDiagnosticId) {
@@ -193,8 +283,8 @@ export async function GET(request: Request) {
       if (!forceRefresh && hasLumaDb()) {
         try {
           const indexStartedAt = Date.now();
-          const diagnostic = createEventSwitchDiagnosticCollector(eventSwitchDiagnosticId, prioritizePage ? "overview.db" : "snapshot.db");
-          const indexedResult = prioritizePage
+          const diagnostic = createEventSwitchDiagnosticCollector(eventSwitchDiagnosticId, prioritizePage || requiresIndexedPage ? "overview.db" : "snapshot.db");
+          const indexedResult = prioritizePage || requiresIndexedPage
             ? await loadIndexedGuestPage(eventId, guestQuery, diagnostic.report, knownEventBoundary)
             : await loadIndexedGuestPayload(eventId, guestQuery, cacheKey, diagnostic.report, knownEventBoundary);
           if (indexedResult) {
@@ -234,18 +324,21 @@ export async function GET(request: Request) {
         requestId,
         params: { event_id: eventId },
       });
-      const rawGuests = await fetchBounded("/v1/events/guests/list", {
-        requestId,
-        params: {
-          event_id: eventId,
-          pagination_limit: String(pageSize),
-          sort_column: "registered_at",
-          sort_direction: "desc nulls last",
-        },
-        maxEntries,
-        maxPages,
-        requestDelayMs: forceRefresh ? safeInt("LUMA_EVENT_SYNC_REQUEST_DELAY_MS", 200, 0, 5000) : 0,
-      });
+      const scan = () => fetchBounded("/v1/events/guests/list", {
+          requestId,
+          params: {
+            event_id: eventId,
+            pagination_limit: String(pageSize),
+            sort_column: "registered_at",
+            sort_direction: "desc nulls last",
+          },
+          maxEntries,
+          maxPages,
+          requestDelayMs: forceRefresh ? safeInt("LUMA_EVENT_SYNC_REQUEST_DELAY_MS", 200, 0, 5000) : 0,
+        });
+      const rawGuests = forceRefresh
+        ? await coalesceEventGuestScan(eventId, requestId, scan)
+        : await scan();
       const normalizedEvent = normalizeEvent(event);
       const eventGuests = rawGuests.entries.map((guest) => normalizeGuest(event, guest));
       const peopleById = new Map();
@@ -326,12 +419,21 @@ export async function GET(request: Request) {
       return Response.json({ ...filteredPayload, cached: false, automaticTags, requestId });
     }
 
-    const pageSize = refreshAll ? safeInt("LUMA_REFRESH_EVENTS_PAGE_SIZE", 50, 1, 50) : safeInt("LUMA_EVENTS_PAGE_SIZE", 25, 1, 50);
-    const maxEntries = refreshAll ? safeInt("LUMA_REFRESH_MAX_EVENTS", 250, 1, 500) : safeInt("LUMA_MAX_EVENTS", 25, 1, 100);
-    const maxPages = refreshAll ? safeInt("LUMA_REFRESH_MAX_EVENT_PAGES", 5, 1, 10) : safeInt("LUMA_MAX_EVENT_PAGES", 1, 1, 5);
+    const broadEventRefresh = refreshAll || refreshEventsOnly;
+    const pageSize = broadEventRefresh ? safeInt("LUMA_REFRESH_EVENTS_PAGE_SIZE", 50, 1, 50) : safeInt("LUMA_EVENTS_PAGE_SIZE", 25, 1, 50);
+    const maxEntries = refreshEventsOnly
+      ? safeInt("LUMA_EVENT_CATALOG_MAX_EVENTS", 500, 1, 5000)
+      : refreshAll
+        ? safeInt("LUMA_REFRESH_MAX_EVENTS", 250, 1, 500)
+        : safeInt("LUMA_MAX_EVENTS", 25, 1, 100);
+    const maxPages = refreshEventsOnly
+      ? safeInt("LUMA_EVENT_CATALOG_MAX_PAGES", 100, 1, 200)
+      : refreshAll
+        ? safeInt("LUMA_REFRESH_MAX_EVENT_PAGES", 5, 1, 10)
+        : safeInt("LUMA_MAX_EVENT_PAGES", 1, 1, 5);
     const indexedEventLimit = safeInt("LUMA_INDEX_MAX_EVENTS", 5000, 1, 50000);
 
-    if (!forceRefresh && hasLumaDb() && url.searchParams.get("source") !== "live") {
+    if (!forceRefresh && !refreshEventsOnly && hasLumaDb() && url.searchParams.get("source") !== "live") {
       try {
         const indexedEvents = await listIndexedEvents({ limit: indexedEventLimit });
         if (indexedEvents.events.length) {
@@ -344,7 +446,7 @@ export async function GET(request: Request) {
       }
     }
 
-    const cachedEvents = forceRefresh ? null : readCache("events");
+    const cachedEvents = forceRefresh || refreshEventsOnly ? null : readCache("events");
     if (cachedEvents) {
       await debugLog(requestId, "events cache hit", { eventCount: cachedEvents.events?.length || 0, cacheExpiresAt: cachedEvents.cacheExpiresAt });
       return Response.json({ ...cachedEvents, requestId });
@@ -367,6 +469,19 @@ export async function GET(request: Request) {
     const managedRawEvents = rawEvents.entries.filter((event) => event.platform !== "external");
     const events = managedRawEvents.map((event) => normalizeEvent(event));
     const refreshSummary = refreshAll ? await refreshManagedData({ requestId, rawEvents: managedRawEvents }) : null;
+    let catalogSummary = null;
+    if (refreshEventsOnly && hasLumaDb()) {
+      const snapshots = managedRawEvents.map((rawEvent, index) => ({ rawEvent, event: events[index] }));
+      const indexed = await upsertNormalizedLumaEvents(snapshots);
+      const archived = rawEvents.truncated
+        ? { skipped: true, archivedEventCount: 0 }
+        : await archiveIndexedEventsMissingFromCatalog(events.map((event) => event.id));
+      catalogSummary = {
+        indexedEventCount: indexed.eventCount,
+        archivedEventCount: archived.archivedEventCount,
+        deletionReconciliationSkipped: rawEvents.truncated,
+      };
+    }
 
     const payload = {
       source: "luma",
@@ -379,9 +494,10 @@ export async function GET(request: Request) {
         maxGuestsPerEvent: refreshAll ? safeInt("LUMA_REFRESH_MAX_GUESTS_PER_EVENT", 50000, 1, 50000) : safeInt("LUMA_MAX_GUESTS_PER_EVENT", 250, 1, 1000),
       },
       ...(refreshSummary ? { refreshSummary } : {}),
+      ...(catalogSummary ? { catalogSummary } : {}),
     };
     writeCache("events", payload, cacheTtlMs("LUMA_EVENTS_CACHE_SECONDS", 300));
-    if (!refreshAll && hasLumaDb() && managedRawEvents.length) {
+    if (!refreshAll && !refreshEventsOnly && hasLumaDb() && managedRawEvents.length) {
       const snapshots = managedRawEvents.map((rawEvent, index) => ({ rawEvent, event: events[index] }));
       after(async () => {
         try {
@@ -397,10 +513,11 @@ export async function GET(request: Request) {
         }
       });
     }
-    await debugLog(requestId, refreshAll ? "foreground refresh success" : "events success", {
+    await debugLog(requestId, refreshAll ? "foreground refresh success" : refreshEventsOnly ? "event catalog refresh success" : "events success", {
       eventCount: events.length,
       guestCount: refreshSummary?.guestCount || 0,
       failedEventCount: refreshSummary?.failedEventCount || 0,
+      archivedEventCount: catalogSummary?.archivedEventCount || 0,
       truncated: payload.truncated,
       durationMs: Date.now() - startedAt,
     });
@@ -427,9 +544,162 @@ export async function POST(request: Request) {
       return Response.json({ ok: true, requestId });
     }
 
-    assertApiKey();
+    if (body.action === "getGuestReferrer") {
+      assertString(body.eventId, "eventId");
+      assertString(body.personId, "personId");
+      assertString(body.lumaUserId, "lumaUserId");
+      const lumaSessionToken = normalizeLumaSessionToken(body.lumaSessionToken);
+      await debugLog(requestId, "private guest referrer start", { eventId: body.eventId });
+      const guestInfo = await lumaPrivateGet({
+        requestId,
+        lumaSessionToken,
+        path: "/event/admin/get-guest-info",
+        params: { event_api_id: body.eventId, user_api_id: body.lumaUserId },
+        operation: "guest info",
+      });
+      const referrer = privateLumaReferrer(guestInfo);
+      if (referrer && hasLumaDb()) {
+        await updateIndexedGuestReferrers(body.eventId, [{ personId: body.personId, referrer }]);
+        clearEventGuestCache(body.eventId);
+      }
+      await debugLog(requestId, "private guest referrer success", {
+        eventId: body.eventId,
+        found: Boolean(referrer),
+        durationMs: Date.now() - startedAt,
+      });
+      return Response.json({ ok: true, eventId: body.eventId, personId: body.personId, referrer, requestId });
+    }
+
+    if (body.action === "syncGuestReferrers") {
+      assertString(body.eventId, "eventId");
+      if (!hasLumaDb()) {
+        const error = new Error("Referrer sync requires DB_URL.") as HttpError;
+        error.status = 503;
+        throw error;
+      }
+      const lumaSessionToken = normalizeLumaSessionToken(body.lumaSessionToken);
+      const maxGuests = safeInt("LUMA_REFERRER_SYNC_MAX_GUESTS", 250, 1, 500);
+      const concurrency = safeInt("LUMA_REFERRER_SYNC_CONCURRENCY", 4, 1, 10);
+      const requestDelayMs = safeInt("LUMA_REFERRER_SYNC_REQUEST_DELAY_MS", 100, 0, 5000);
+      const targets = await listIndexedGuestReferrerTargets(body.eventId, maxGuests);
+      const updates = [];
+      let failedCount = 0;
+      await debugLog(requestId, "private guest referrer sync start", {
+        eventId: body.eventId,
+        targetCount: targets.length,
+        maxGuests,
+        concurrency,
+      });
+
+      for (let index = 0; index < targets.length; index += concurrency) {
+        if (index > 0 && requestDelayMs) await wait(requestDelayMs);
+        const batch = targets.slice(index, index + concurrency);
+        const results = await Promise.all(batch.map(async (target) => {
+          try {
+            const guestInfo = await lumaPrivateGet({
+              requestId,
+              lumaSessionToken,
+              path: "/event/admin/get-guest-info",
+              params: { event_api_id: body.eventId, user_api_id: target.lumaUserId },
+              operation: "guest info",
+            });
+            return { target, referrer: privateLumaReferrer(guestInfo), error: null };
+          } catch (error) {
+            if (error.code === "LUMA_SESSION_INVALID") throw error;
+            return { target, referrer: null, error };
+          }
+        }));
+        results.forEach((result) => {
+          if (result.error) failedCount += 1;
+          else if (result.referrer) updates.push({ personId: result.target.personId, referrer: result.referrer });
+        });
+      }
+
+      const indexed = await updateIndexedGuestReferrers(body.eventId, updates);
+      if (indexed.updatedCount) {
+        clearEventGuestCache(body.eventId);
+        clearCachePrefix("trace-person:");
+      }
+      await debugLog(requestId, "private guest referrer sync success", {
+        eventId: body.eventId,
+        targetCount: targets.length,
+        foundCount: updates.length,
+        updatedCount: indexed.updatedCount,
+        failedCount,
+        truncated: targets.length >= maxGuests,
+        durationMs: Date.now() - startedAt,
+      });
+      return Response.json({
+        ok: true,
+        eventId: body.eventId,
+        scanned: targets.length,
+        found: updates.length,
+        updated: indexed.updatedCount,
+        failed: failedCount,
+        truncated: targets.length >= maxGuests,
+        requestId,
+      });
+    }
+
+    if (body.action !== "updateGuestCheckIn") assertApiKey();
     await debugLog(requestId, "POST /api/luma start", { action: body.action, eventId: body.eventId });
     requireLiveWriteConfirmation(body);
+
+    if (body.action === "updateGuestCheckIn") {
+      assertString(body.eventId, "eventId");
+      assertString(body.guestId, "guestId");
+      if (typeof body.checkedIn !== "boolean") {
+        const error = new Error("Missing required checkedIn state.") as HttpError;
+        error.status = 400;
+        throw error;
+      }
+      const lumaSessionToken = normalizeLumaSessionToken(body.lumaSessionToken);
+      await debugLog(requestId, "private guest check-in start", {
+        eventId: body.eventId,
+        guestId: body.guestId,
+        checkedIn: body.checkedIn,
+      });
+      await lumaPrivateCheckInFetch({
+        requestId,
+        lumaSessionToken,
+        body: {
+          event_api_id: body.eventId,
+          rsvp_api_id: body.guestId,
+          type: "guest",
+          check_in_method: "guest-list",
+          check_in_status: body.checkedIn ? "checked-in" : "not-checked-in",
+        },
+      });
+      if (hasLumaDb()) {
+        try {
+          const indexedUpdate = await updateIndexedGuestCheckIn({
+            eventId: body.eventId,
+            lumaGuestId: body.guestId,
+            checkedIn: body.checkedIn,
+          });
+          await debugLog(requestId, "private guest check-in index updated", {
+            eventId: body.eventId,
+            checkedIn: body.checkedIn,
+            updatedCount: indexedUpdate.updatedCount,
+          });
+        } catch (error) {
+          await debugLog(requestId, "private guest check-in index update skipped", {
+            eventId: body.eventId,
+            status: error.status || 500,
+            message: error.message,
+          }, "error");
+        }
+      }
+      clearEventGuestCache(body.eventId);
+      clearCachePrefix("trace-person:");
+      await debugLog(requestId, "private guest check-in success", {
+        eventId: body.eventId,
+        guestId: body.guestId,
+        checkedIn: body.checkedIn,
+        durationMs: Date.now() - startedAt,
+      });
+      return Response.json({ ok: true, checkedIn: body.checkedIn, requestId });
+    }
 
     if (body.action === "updateGuestStatus") {
       assertString(body.eventId, "eventId");
@@ -482,12 +752,29 @@ export async function POST(request: Request) {
         return Response.json({ ok: false, error: "Bulk status must be going, waitlisted, or declined.", requestId }, { status: 400 });
       }
 
-      const updateLimit = safeInt("LUMA_MAX_BULK_STATUS_UPDATES", 50, 1, 200);
-      const guestIds = [...new Set(
-        (Array.isArray(body.guests) ? body.guests : [])
-          .map((guest) => firstString(guest?.lumaGuestId, guest?.guestId))
-          .filter(Boolean),
-      )];
+      const allMatching = body.allMatching === true;
+      const updateLimit = allMatching
+        ? safeInt("LUMA_MAX_ALL_MATCHING_STATUS_UPDATES", 1000, 1, 5000)
+        : safeInt("LUMA_MAX_BULK_STATUS_UPDATES", 50, 1, 200);
+      let guestIds: string[];
+      if (allMatching) {
+        if (!hasLumaDb()) {
+          return Response.json({ ok: false, error: "All-matching status updates require DB_URL.", requestId }, { status: 503 });
+        }
+        const query = parseAllMatchingGuestQuery(body);
+        const targets = await listIndexedEventGuestMutationTargets(body.eventId, query, { limit: updateLimit + 1 });
+        if (targets.length > updateLimit) {
+          return Response.json({ ok: false, error: `Refusing to update more than ${updateLimit} matching guests at once.`, requestId }, { status: 400 });
+        }
+        const matchingGuestIds: string[] = targets.flatMap((target) => target.lumaGuestId ? [target.lumaGuestId] : []);
+        guestIds = [...new Set<string>(matchingGuestIds)];
+      } else {
+        guestIds = [...new Set<string>(
+          (Array.isArray(body.guests) ? body.guests : [])
+            .map((guest): string => firstString(guest?.lumaGuestId, guest?.guestId))
+            .filter(Boolean),
+        )];
+      }
       if (!guestIds.length) {
         return Response.json({ ok: false, error: "Select at least one Luma guest.", requestId }, { status: 400 });
       }
@@ -503,6 +790,7 @@ export async function POST(request: Request) {
         eventId: body.eventId,
         requestedStatus: body.status,
         guestCount: guestIds.length,
+        allMatching,
         sendEmail: notification.sendEmail,
         hasMessage: Boolean(notification.message),
       });
@@ -556,6 +844,184 @@ export async function POST(request: Request) {
         },
         { status: failures.length ? 207 : 200 },
       );
+    }
+
+    if (body.action === "reinviteGuest") {
+      assertString(body.eventId, "eventId");
+      assertString(body.guestId, "guestId");
+      assertString(body.lumaUserId, "lumaUserId");
+      assertString(body.email, "email");
+      const lumaSessionToken = normalizeLumaSessionToken(body.lumaSessionToken);
+      const message = normalizeInviteMessage(body.message);
+      await debugLog(requestId, "reinvite guest start", {
+        eventId: body.eventId,
+        guestId: body.guestId,
+        hasMessage: Boolean(message),
+      });
+
+      const emailIssue = await lumaPrivateGet({
+        requestId,
+        lumaSessionToken,
+        path: "/email/has-issue",
+        params: { email: body.email },
+        operation: "email issue check",
+      });
+      if (emailIssue === true || emailIssue?.has_issue === true || emailIssue?.bounced_at || emailIssue?.marked_as_spam_at) {
+        const error = new Error("Luma has this email marked inactive, bounced, or reported as spam.") as HttpError;
+        error.status = 409;
+        error.code = "LUMA_EMAIL_INACTIVE";
+        throw error;
+      }
+
+      const timelineBefore = await lumaPrivateGet({
+        requestId,
+        lumaSessionToken,
+        path: "/event/admin/get-guest-timeline",
+        params: { event_api_id: body.eventId, user_api_id: body.lumaUserId },
+        operation: "guest timeline",
+      });
+      const previousTimelineIds = new Set(lumaTimelineEntries(timelineBefore).map(lumaTimelineEntryId));
+
+      const inviteTask = await lumaPrivatePost({
+        requestId,
+        lumaSessionToken,
+        path: "/event/admin/invite/send",
+        body: {
+          event_api_id: body.eventId,
+          message,
+          people: [{ type: "email", email: body.email, name: body.name || undefined }],
+        },
+        operation: "send guest invite",
+      });
+      await waitForLumaTask({ requestId, lumaSessionToken, taskId: inviteTask?.task_id });
+
+      let emailEntry = null;
+      let remoteGuest = null;
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        if (attempt > 0) await wait(750);
+        if (!emailEntry) {
+          const timelineAfter = await lumaPrivateGet({
+            requestId,
+            lumaSessionToken,
+            path: "/event/admin/get-guest-timeline",
+            params: { event_api_id: body.eventId, user_api_id: body.lumaUserId },
+            operation: "guest timeline",
+          });
+          emailEntry = lumaTimelineEntries(timelineAfter).find((entry) =>
+            entry?.type === "email-sent" && !previousTimelineIds.has(lumaTimelineEntryId(entry)),
+          ) || null;
+        }
+        remoteGuest = await lumaFetch("/v1/events/guests/get", {
+          requestId,
+          params: { event_id: body.eventId, id: body.guestId },
+          logParams: { event_id: body.eventId, id: "[redacted-guest]" },
+          allowNotFound: true,
+        });
+        if (emailEntry && remoteGuest?.approval_status === "invited") break;
+      }
+
+      if (!emailEntry) {
+        const error = new Error("Luma accepted the request but did not record a sent email. The guest was left unchanged.") as HttpError;
+        error.status = 502;
+        error.code = "LUMA_INVITE_EMAIL_UNCONFIRMED";
+        throw error;
+      }
+      if (remoteGuest?.approval_status !== "invited") {
+        const error = new Error("Luma sent the email but did not change this guest to Invited. Guestbook left the status unchanged.") as HttpError;
+        error.status = 502;
+        error.code = "LUMA_INVITE_STATUS_UNCONFIRMED";
+        throw error;
+      }
+
+      const email = emailEntry.email || {};
+      const emailStatus = firstString(email.status);
+      if (email.bounced_at || email.marked_as_spam_at || ["bounced", "marked-spam"].includes(emailStatus)) {
+        const error = new Error(email.bounced_at || emailStatus === "bounced"
+          ? "Luma recorded the reinvite email as bounced."
+          : "Luma recorded the reinvite email as spam.") as HttpError;
+        error.status = 502;
+        error.code = "LUMA_INVITE_EMAIL_FAILED";
+        throw error;
+      }
+
+      const emailSentAt = firstString(email.sent_at, email.delivered_at, emailEntry.timestamp) || new Date().toISOString();
+      if (hasLumaDb()) {
+        try {
+          await updateIndexedGuestStatus({
+            eventId: body.eventId,
+            lumaGuestId: body.guestId,
+            status: "invited",
+            lumaApprovalStatus: "invited",
+          });
+        } catch (error) {
+          await debugLog(requestId, "reinvite guest index update skipped", {
+            eventId: body.eventId,
+            status: error.status || 500,
+            message: error.message,
+          }, "error");
+        }
+      }
+      clearEventGuestCache(body.eventId);
+      clearCachePrefix("trace-person:");
+      await debugLog(requestId, "reinvite email confirmed", {
+        eventId: body.eventId,
+        guestId: body.guestId,
+        emailStatus: emailStatus || "sent",
+        durationMs: Date.now() - startedAt,
+      });
+      return Response.json({
+        ok: true,
+        emailConfirmed: true,
+        emailStatus: emailStatus || "sent",
+        emailSentAt,
+        requestId,
+      });
+    }
+
+    if (body.action === "sendAudienceInvites") {
+      if (!hasLumaDb()) {
+        return Response.json({ ok: false, error: "Audience invitations require DB_URL.", requestId }, { status: 503 });
+      }
+      const eventIds = [...new Set((Array.isArray(body.eventIds) ? body.eventIds : [])
+        .map((eventId) => String(eventId || "").trim())
+        .filter(Boolean))].slice(0, 100);
+      if (!eventIds.length) {
+        return Response.json({ ok: false, error: "At least one event is required.", requestId }, { status: 400 });
+      }
+      const message = normalizeInviteMessage(body.message);
+      const criteria = normalizeIndexedAudienceCriteria({
+        ...(body.criteria || {}),
+        excludeExistingEventIds: eventIds,
+      });
+      const recipients = await listIndexedAudienceInviteRecipients(criteria);
+      if (!recipients.length) {
+        return Response.json({ ok: false, error: "The selected audience has no emailable recipients.", requestId }, { status: 400 });
+      }
+      const inviteLimit = safeInt("LUMA_MAX_INVITES_PER_REQUEST", 50, 1, 200);
+      await debugLog(requestId, "send audience invites prepared", {
+        eventCount: eventIds.length,
+        recipientCount: recipients.length,
+        inviteLimit,
+        hasMessage: Boolean(message),
+      });
+      for (const eventId of eventIds) {
+        for (let index = 0; index < recipients.length; index += inviteLimit) {
+          const guests = recipients.slice(index, index + inviteLimit).map(({ email, name }) => ({ email, name: name || null }));
+          await lumaFetch("/v1/events/guests/send-invites", {
+            requestId,
+            method: "POST",
+            body: { event_id: eventId, guests, message },
+          });
+        }
+      }
+      const invited = recipients.length * eventIds.length;
+      await debugLog(requestId, "send audience invites success", {
+        eventCount: eventIds.length,
+        recipientCount: recipients.length,
+        invited,
+        durationMs: Date.now() - startedAt,
+      });
+      return Response.json({ ok: true, recipients: recipients.length, invited, requestId });
     }
 
     if (body.action === "sendInvites") {
@@ -642,6 +1108,160 @@ function assertString(value, name) {
   }
 }
 
+function normalizeLumaSessionToken(value) {
+  const token = typeof value === "string" ? value.trim() : "";
+  if (!token || token.length > 8192 || /[\r\n]/.test(token)) {
+    const error = new Error("The Luma session token is not valid.") as HttpError;
+    error.status = 403;
+    error.code = "LUMA_SESSION_INVALID";
+    throw error;
+  }
+  return token;
+}
+
+async function lumaPrivateCheckInFetch({ requestId, lumaSessionToken, body }) {
+  const startedAt = Date.now();
+  const response = await fetch(new URL("/event/admin/update-check-in", LUMA_PRIVATE_BASE_URL), {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-luma-auth-session": lumaSessionToken,
+      "x-luma-client-type": "luma-web",
+    },
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+
+  if (response.ok) {
+    await debugLog(requestId, "private Luma check-in fetch success", {
+      status: response.status,
+      durationMs: Date.now() - startedAt,
+    });
+    return response.status === 204 ? {} : response.json();
+  }
+
+  const upstreamMessage = await response.text();
+  const expired = response.status === 400 || response.status === 401 || response.status === 403;
+  await debugLog(requestId, "private Luma check-in fetch error", {
+    status: response.status,
+    expired,
+    durationMs: Date.now() - startedAt,
+  }, "error");
+  const error = new Error(expired
+    ? "Your Luma session token is missing or expired. Paste a fresh token to continue."
+    : `Luma check-in failed (${response.status})${upstreamMessage ? "." : ""}`) as HttpError;
+  error.status = expired ? 403 : 502;
+  error.code = expired ? "LUMA_SESSION_INVALID" : "LUMA_PRIVATE_API_ERROR";
+  throw error;
+}
+
+async function lumaPrivateGet({ requestId, lumaSessionToken, path, params, operation }): Promise<any> {
+  const startedAt = Date.now();
+  const url = new URL(path, LUMA_PRIVATE_BASE_URL);
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
+  });
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      "x-luma-auth-session": lumaSessionToken,
+      "x-luma-client-type": "luma-web",
+    },
+    cache: "no-store",
+  });
+  if (response.ok) {
+    await debugLog(requestId, `private Luma ${operation} success`, {
+      status: response.status,
+      durationMs: Date.now() - startedAt,
+    });
+    return response.status === 204 ? null : response.json();
+  }
+
+  const expired = response.status === 400 || response.status === 401 || response.status === 403;
+  await debugLog(requestId, `private Luma ${operation} error`, {
+    status: response.status,
+    expired,
+    durationMs: Date.now() - startedAt,
+  }, "error");
+  const error = new Error(expired
+    ? "Your Luma session token is missing or expired. Paste a fresh token to continue."
+    : `Luma ${operation} failed (${response.status}).`) as HttpError;
+  error.status = expired ? 403 : 502;
+  error.code = expired ? "LUMA_SESSION_INVALID" : "LUMA_PRIVATE_API_ERROR";
+  throw error;
+}
+
+async function lumaPrivatePost({ requestId, lumaSessionToken, path, body, operation }): Promise<any> {
+  const startedAt = Date.now();
+  const response = await fetch(new URL(path, LUMA_PRIVATE_BASE_URL), {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-luma-auth-session": lumaSessionToken,
+      "x-luma-client-type": "luma-web",
+    },
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+  if (response.ok) {
+    await debugLog(requestId, `private Luma ${operation} success`, {
+      status: response.status,
+      durationMs: Date.now() - startedAt,
+    });
+    return response.status === 204 ? null : response.json();
+  }
+
+  const expired = response.status === 401 || response.status === 403;
+  await debugLog(requestId, `private Luma ${operation} error`, {
+    status: response.status,
+    expired,
+    durationMs: Date.now() - startedAt,
+  }, "error");
+  const error = new Error(expired
+    ? "Your Luma session token is missing or expired. Paste a fresh token to continue."
+    : `Luma ${operation} failed (${response.status}).`) as HttpError;
+  error.status = expired ? 403 : 502;
+  error.code = expired ? "LUMA_SESSION_INVALID" : "LUMA_PRIVATE_API_ERROR";
+  throw error;
+}
+
+async function waitForLumaTask({ requestId, lumaSessionToken, taskId }) {
+  if (!taskId) return;
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    if (attempt > 0) await wait(500);
+    const task = await lumaPrivateGet({
+      requestId,
+      lumaSessionToken,
+      path: "/task/get-status",
+      params: { task_id: taskId },
+      operation: "email task status",
+    });
+    if (task?.status === "success") return;
+    if (task?.status === "failure") {
+      const error = new Error(firstString(task.error_message) || "Luma could not send the reinvite email.") as HttpError;
+      error.status = 502;
+      error.code = "LUMA_INVITE_EMAIL_FAILED";
+      throw error;
+    }
+  }
+  const error = new Error("Luma did not finish sending the reinvite email in time. The guest was left unchanged.") as HttpError;
+  error.status = 504;
+  error.code = "LUMA_INVITE_EMAIL_UNCONFIRMED";
+  throw error;
+}
+
+function lumaTimelineEntries(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.timeline)) return payload.timeline;
+  if (Array.isArray(payload?.entries)) return payload.entries;
+  return [];
+}
+
+function lumaTimelineEntryId(entry) {
+  return firstString(entry?.id, entry?.api_id, entry?.email?.api_id)
+    || [entry?.type, entry?.timestamp, entry?.email?.subject].filter(Boolean).join(":");
+}
+
 async function fetchBounded(path: string, { params = {}, maxEntries, maxPages, requestId, requestDelayMs = 0 }: AnyRecord) {
   const entries = [];
   let cursor = null;
@@ -689,31 +1309,56 @@ async function lumaFetch(path: string, { method = "GET", params = {}, body, requ
   }
 
   await debugLog(requestId, "luma fetch start", logDetails);
-  const request = fetch(url, {
-    method,
-    headers: {
-      "content-type": "application/json",
-      "x-luma-api-key": process.env.LUMA_API_KEY,
-    },
-    body: body ? JSON.stringify(body) : undefined,
-    cache: "no-store",
-  }).then(async (response) => {
-    if (allowNotFound && response.status === 404) {
-      await debugLog(requestId, "luma fetch not found", { ...logDetails, status: 404, durationMs: Date.now() - startedAt });
-      return null;
-    }
-    if (!response.ok) {
-      const text = await response.text();
-      await debugLog(requestId, "luma fetch error", { ...logDetails, status: response.status, response: text, durationMs: Date.now() - startedAt }, "error");
-      const error = new Error("Luma API " + response.status + ": " + (text || response.statusText)) as HttpError;
-      error.status = response.status;
-      throw error;
-    }
+  const request = (async () => {
+    const maxRateLimitRetries = safeInt("LUMA_RATE_LIMIT_MAX_RETRIES", 8, 0, 20);
+    const baseDelayMs = safeInt("LUMA_RATE_LIMIT_BASE_DELAY_MS", 1_000, 100, 30_000);
+    const maxDelayMs = safeInt("LUMA_RATE_LIMIT_MAX_DELAY_MS", 30_000, 1_000, 120_000);
+    for (let attempt = 0; ; attempt += 1) {
+      const response = await fetch(url, {
+        method,
+        headers: {
+          "content-type": "application/json",
+          "x-luma-api-key": process.env.LUMA_API_KEY,
+        },
+        body: body ? JSON.stringify(body) : undefined,
+        cache: "no-store",
+      });
+      if (allowNotFound && response.status === 404) {
+        await debugLog(requestId, "luma fetch not found", { ...logDetails, status: 404, durationMs: Date.now() - startedAt });
+        return null;
+      }
+      if (response.status === 429 && attempt < maxRateLimitRetries) {
+        const delayMs = rateLimitBackoffMs({
+          retryAfter: response.headers.get("retry-after"),
+          attempt,
+          baseMs: baseDelayMs,
+          maxMs: maxDelayMs,
+        });
+        await response.text();
+        await debugLog(requestId, "luma fetch rate limited; retrying", {
+          ...logDetails,
+          status: 429,
+          attempt: attempt + 1,
+          maxRateLimitRetries,
+          delayMs,
+          durationMs: Date.now() - startedAt,
+        });
+        await wait(delayMs);
+        continue;
+      }
+      if (!response.ok) {
+        const text = await response.text();
+        await debugLog(requestId, "luma fetch error", { ...logDetails, status: response.status, response: text, durationMs: Date.now() - startedAt }, "error");
+        const error = new Error("Luma API " + response.status + ": " + (text || response.statusText)) as HttpError;
+        error.status = response.status;
+        throw error;
+      }
 
-    await debugLog(requestId, "luma fetch success", { ...logDetails, status: response.status, durationMs: Date.now() - startedAt });
-    if (response.status === 204) return {};
-    return response.json();
-  });
+      await debugLog(requestId, "luma fetch success", { ...logDetails, status: response.status, durationMs: Date.now() - startedAt, rateLimitRetries: attempt });
+      if (response.status === 204) return {};
+      return response.json();
+    }
+  })();
 
   if (!requestKey) return request;
   inFlightStore().set(requestKey, request);
@@ -745,6 +1390,27 @@ function cacheStore() {
 function inFlightStore() {
   if (!globalThis[IN_FLIGHT_KEY]) globalThis[IN_FLIGHT_KEY] = new Map();
   return globalThis[IN_FLIGHT_KEY];
+}
+
+function eventGuestScanInFlightStore(): Map<string, Promise<any>> {
+  if (!globalThis[EVENT_GUEST_SCAN_IN_FLIGHT_KEY]) globalThis[EVENT_GUEST_SCAN_IN_FLIGHT_KEY] = new Map();
+  return globalThis[EVENT_GUEST_SCAN_IN_FLIGHT_KEY];
+}
+
+async function coalesceEventGuestScan(eventId: string, requestId: string, scan: () => Promise<any>) {
+  const store = eventGuestScanInFlightStore();
+  const pending = store.get(eventId);
+  if (pending) {
+    await debugLog(requestId, "event guest scan in-flight reuse", { eventId });
+    return pending;
+  }
+  const request = scan();
+  store.set(eventId, request);
+  try {
+    return await request;
+  } finally {
+    if (store.get(eventId) === request) store.delete(eventId);
+  }
 }
 
 function readCache(key) {
@@ -834,7 +1500,7 @@ async function loadIndexedGuestPage(
   const indexedResult = await listIndexedEventGuests(eventId, {
     ...guestQuery,
     includeSummary: false,
-    includeEventCounts: false,
+    includeEventCounts: guestQuery.filter === "new_referrals",
   }, diagnosticReporter, knownEventBoundary);
   const { indexHasGuests: _indexHasGuests, ...payload } = indexedResult;
   return { payload, snapshotCached: false };
@@ -1178,11 +1844,16 @@ function safeLogObject(value) {
 }
 
 function redactSecret(value) {
-  return value.replace(/(x-luma-api-key|api[_-]?key|authorization)([\s:=]+)([^\s,}]+)/gi, "$1$2[redacted]");
+  return value.replace(/(x-luma-api-key|x-luma-auth-session|api[_-]?key|authorization)([\s:=]+)([^\s,}]+)/gi, "$1$2[redacted]");
 }
 
 function truncateLogValue(value) {
   return value.length > 600 ? value.slice(0, 600) + "...[truncated]" : value;
+}
+
+function privateLumaReferrer(payload) {
+  const referrer = extractLumaReferrer(payload);
+  return referrer ? { ...referrer, detailsVersion: 1 } : null;
 }
 
 function normalizeGuest(event, guest) {
@@ -1427,14 +2098,7 @@ function lumaProfileUrl(lumaUserId) {
 }
 
 function extractReferrer(guest) {
-  const referrer = guest.referrer || guest.referred_by || guest.referrer_user || guest.invited_by || guest.invited_by_user || {};
-  const value = {
-    name: firstString(referrer.name, referrer.user_name, referrer.full_name, guest.referrer_name, guest.referred_by_name, guest.invited_by_name),
-    email: firstString(referrer.email, referrer.user_email, guest.referrer_email, guest.referred_by_email, guest.invited_by_email),
-    url: firstUrlLike(referrer.url, referrer.profile_url, guest.referrer_url, guest.referral_url),
-    source: firstString(guest.registration_source, guest.referral_source, guest.utm_source),
-  };
-  return Object.values(value).some(Boolean) ? value : null;
+  return extractLumaReferrer(guest);
 }
 
 function extractSocialLinks(guest) {
@@ -1613,6 +2277,7 @@ function jsonError(error: any, requestId: string) {
     {
       ok: false,
       error: error.message,
+      code: error.code,
       requestId,
     },
     { status: error.status || 500 },

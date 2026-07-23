@@ -44,14 +44,17 @@ npm run safe:install
 npm run db:generate
 npm run db:push
 npx prisma db execute --file prisma/manual-migrations/20260721_add_automatic_archetype_tags.sql --schema prisma/schema.prisma
+npx prisma db execute --file prisma/manual-migrations/20260723_add_event_catalog_state.sql --schema prisma/schema.prisma
 npm run dev
 ```
 
 Open `http://localhost:3000`.
 
-## Syncing
+## Data Refresh
 
-The `/api/luma/sync` endpoint ingests event and guest activity into the local database. Run it manually with:
+Guestbook refreshes the lightweight Luma event catalog on app load and when the browser tab becomes active. For the selected event, it compares Luma's approved, pending, waitlist, invited, declined, and checked-in counts with the local snapshot before fetching guests.
+
+The former hourly full-sync Worker is archived. The `/api/luma/sync` endpoint remains available as a deliberate recovery or backfill command:
 
 ```bash
 curl -X POST http://localhost:3000/api/luma/sync \
@@ -59,13 +62,11 @@ curl -X POST http://localhost:3000/api/luma/sync \
   -H "Authorization: Bearer $GUESTBOOK_SYNC_SECRET"
 ```
 
-The hourly Worker uses the same key for scheduled syncs and its status URL. Store `GUESTBOOK_KEY` and `GUESTBOOK_SYNC_SECRET` as Wrangler secrets before deploying it.
-
-The sync job is intentionally capped by defaults in `.env.local.example`. Raise those limits only when you explicitly want a larger backfill.
+The recovery job is intentionally capped by defaults in `.env.local.example`. Raise those limits only when you explicitly want a larger backfill.
 
 ### Automatic Tags
 
-Every completed `/api/luma/sync` run classifies people from the local PostgreSQL activity index. It does not make additional Luma requests. A full cron sync recomputes the complete index; `Sync event` reevaluates affected people and automatically falls back to a full run when the latest public-event window changes.
+Every completed `/api/luma/sync` recovery run classifies people from the local PostgreSQL activity index. It does not make additional Luma requests. `Sync event` reevaluates affected people and automatically falls back to a full run when the latest public-event window changes.
 
 The managed archetypes are `🚀 Superpower User`, `⚡ Power User`, `🎪 Festival Dweller`, `👻 Flaker`, and `💀 Superflaker`. `🎪 Festival Dweller` means the person's most recent known checked-in event has `festival` in its title; newer registrations and no-shows do not affect it. Automatic assignments are stored separately from manual tags and materialized into `luma_people.tags` for fast guest-table reads and filtering.
 

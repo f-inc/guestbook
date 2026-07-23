@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { filterGuestPayload, guestStatusWhere, parseGuestListQuery, priorEventWhere } from "./guest-query";
+import { filterGuestPayload, guestFilterRequiresIndex, guestQueryRequiresIndex, guestStatusWhere, parseGuestListQuery, priorEventWhere } from "./guest-query";
 
 test("parses bounded server-side guest query parameters", () => {
   const params = new URLSearchParams({
@@ -15,15 +15,62 @@ test("parses bounded server-side guest query parameters", () => {
     filter: "new_faces",
     search: "Ada",
     tags: ["Founder"],
+    sortDirection: "desc",
     cursor: 20,
     pageSize: 100,
     includeSummary: true,
   });
 });
 
+test("parses ascending guest date order through the indexed query", () => {
+  const query = parseGuestListQuery(new URLSearchParams({ guest_sort: "asc" }));
+  assert.equal(query.sortDirection, "asc");
+  assert.equal(guestQueryRequiresIndex(query), true);
+});
+
 test("allows guest pages to reuse an event summary already loaded by the client", () => {
   const params = new URLSearchParams({ guest_summary: "0" });
   assert.equal(parseGuestListQuery(params).includeSummary, false);
+});
+
+test("parses note and lifetime attendance filters through the indexed query", () => {
+  const query = parseGuestListQuery(new URLSearchParams({
+    guest_has_notes: "1",
+    guest_attended_gt: "3",
+  }));
+  assert.equal(query.hasNotes, true);
+  assert.equal(query.attendedGreaterThan, 3);
+  assert.equal(guestQueryRequiresIndex(query), true);
+});
+
+test("preserves a complete cached summary and omits it when the client already has it", () => {
+  const stats = {
+    registered: 88,
+    checkedIn: 33,
+    invitationTotal: 57,
+    invitedReferralTotal: 9,
+  };
+  const payload = {
+    people: [{ id: "person-1", name: "Ada" }],
+    guests: [{ personId: "person-1", status: "checked_in" }],
+    stats,
+    analyticsQuestions: [{ id: "question-1" }],
+  };
+  const query = {
+    filter: "all" as const,
+    search: "",
+    tags: [],
+    cursor: 0,
+    pageSize: 50,
+  };
+
+  const withSummary = filterGuestPayload(payload, query);
+  assert.deepEqual(withSummary.stats, stats);
+  assert.deepEqual(withSummary.analyticsQuestions, payload.analyticsQuestions);
+
+  const withoutSummary = filterGuestPayload(payload, { ...query, includeSummary: false });
+  assert.equal("stats" in withoutSummary, false);
+  assert.equal("analyticsQuestions" in withoutSummary, false);
 });
 
 test("recognizes the to-decide guest filter", () => {
@@ -40,6 +87,25 @@ test("recognizes the to-decide guest filter", () => {
       },
     ],
   });
+});
+
+test("recognizes the new-referrals guest filter", () => {
+  const params = new URLSearchParams({ guest_status: "new_referrals" });
+  assert.equal(parseGuestListQuery(params).filter, "new_referrals");
+});
+
+test("routes referral cohorts through the indexed guest query", () => {
+  for (const filter of [
+    "referrals",
+    "new_referrals",
+    "invited_referrals",
+    "invited_referral_no_response",
+    "invited_referral_accepted",
+    "invited_referral_declined",
+  ] as const) {
+    assert.equal(guestFilterRequiresIndex(filter), true);
+  }
+  assert.equal(guestFilterRequiresIndex("registered"), false);
 });
 
 test("to-decide includes pending and automatic waitlist guests only", () => {
@@ -114,6 +180,9 @@ test("only treats chronologically earlier events as prior history", () => {
   assert.deepEqual(guestStatusWhere("event-2", "registered", { startsAt, date }), {
     status: { in: ["registered", "waitlisted", "going", "checked_in", "no_show"] },
   });
+  assert.deepEqual(guestStatusWhere("event-2", "invited", { startsAt, date }), {
+    OR: [{ invitedAt: { not: null } }, { status: "invited" }],
+  });
 });
 
 test("limits first registers to accepted guests and new faces to check-ins", () => {
@@ -130,7 +199,7 @@ test("limits first registers to accepted guests and new faces to check-ins", () 
     ],
     guests: [
       { personId: "person-1", status: "checked_in", isFirstRegistration: true, isNewFace: true },
-      { personId: "person-2", status: "going", isFirstRegistration: true, isNewFace: false },
+      { personId: "person-2", status: "going", invitedAt: "2026-07-01T00:00:00.000Z", isFirstRegistration: true, isNewFace: false },
       { personId: "person-3", status: "registered", isFirstRegistration: true, isNewFace: false },
       { personId: "person-4", status: "waitlisted", isFirstRegistration: true, isNewFace: false },
       { personId: "person-5", status: "no_show", isFirstRegistration: false, isNewFace: false },
@@ -150,6 +219,7 @@ test("limits first registers to accepted guests and new faces to check-ins", () 
   assert.deepEqual(result.guests.map((guest: any) => guest.personId), ["person-1"]);
   assert.equal(result.stats.accepted, 3);
   assert.equal(result.stats.registered, 5);
+  assert.equal(result.stats.invited, 2);
   assert.equal(result.stats.newFaces, 1);
   assert.equal(result.stats.firstRegisters, 2);
   assert.deepEqual(result.pageInfo, { total: 1, pageSize: 50, hasMore: false, nextCursor: null });
@@ -180,6 +250,15 @@ test("limits first registers to accepted guests and new faces to check-ins", () 
     pageSize: 50,
   });
   assert.deepEqual(registered.guests.map((guest: any) => guest.personId), ["person-1", "person-2", "person-3", "person-4", "person-5"]);
+
+  const invited = filterGuestPayload(payload, {
+    filter: "invited",
+    search: "",
+    tags: [],
+    cursor: 0,
+    pageSize: 50,
+  });
+  assert.deepEqual(invited.guests.map((guest: any) => guest.personId), ["person-2", "person-6"]);
 });
 
 test("matches any selected person tag before paginating", () => {
@@ -205,4 +284,57 @@ test("matches any selected person tag before paginating", () => {
   });
 
   assert.deepEqual(result.people.map((person: any) => person.id), ["person-1", "person-2"]);
+});
+
+test("filters exact invitation and referral funnel cohorts", () => {
+  const payload = {
+    people: ["checked", "pending", "no-show", "declined", "organic"].map((id) => ({ id, name: id })),
+    guests: [
+      { personId: "checked", status: "checked_in", invitedAt: "2026-07-01T00:00:00.000Z", checkedInAt: "2026-07-21T18:00:00.000Z", isReferred: true },
+      { personId: "pending", status: "invited", isReferred: true },
+      { personId: "no-show", status: "no_show", invitedAt: "2026-07-01T00:00:00.000Z", isReferred: false },
+      { personId: "declined", status: "declined", invitedAt: "2026-07-01T00:00:00.000Z", isReferred: true },
+      { personId: "organic", status: "checked_in", isReferred: true },
+    ],
+  };
+  const matchingIds = (filter: any) => filterGuestPayload(payload, {
+    filter,
+    search: "",
+    tags: [],
+    cursor: 0,
+    pageSize: 50,
+  }).guests.map((guest: any) => guest.personId);
+
+  assert.deepEqual(matchingIds("invited"), ["checked", "no-show", "pending", "declined"]);
+  assert.deepEqual(matchingIds("invited_no_response"), ["pending"]);
+  assert.deepEqual(matchingIds("invited_accepted"), ["checked", "no-show"]);
+  assert.deepEqual(matchingIds("invited_checked_in"), ["checked"]);
+  assert.deepEqual(matchingIds("invited_no_show"), ["no-show"]);
+  assert.deepEqual(matchingIds("invited_declined"), ["declined"]);
+  assert.deepEqual(matchingIds("referrals"), ["checked", "organic"]);
+  assert.deepEqual(matchingIds("invited_referrals"), ["checked", "pending", "declined"]);
+  assert.deepEqual(matchingIds("invited_referral_no_response"), ["pending"]);
+  assert.deepEqual(matchingIds("invited_referral_accepted"), ["checked"]);
+  assert.deepEqual(matchingIds("invited_referral_declined"), ["declined"]);
+});
+
+test("keeps historical active referrals in totals without marking them new", () => {
+  const payload = {
+    people: ["historical", "new", "not-referred"].map((id) => ({ id, name: id })),
+    guests: [
+      { personId: "historical", status: "checked_in", isReferred: true, isNewReferral: false },
+      { personId: "new", status: "checked_in", isReferred: true, isNewReferral: true },
+      { personId: "not-referred", status: "checked_in", isReferred: false, isNewReferral: false },
+    ],
+  };
+  const matchingIds = (filter: any) => filterGuestPayload(payload, {
+    filter,
+    search: "",
+    tags: [],
+    cursor: 0,
+    pageSize: 50,
+  }).guests.map((guest: any) => guest.personId);
+
+  assert.deepEqual(matchingIds("referrals"), ["historical", "new"]);
+  assert.deepEqual(matchingIds("new_referrals"), ["new"]);
 });

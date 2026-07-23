@@ -18,15 +18,18 @@ model LumaEvent {
   category    String?
   capacity    Int?
   lumaUrl     String?   @map("luma_url")
+  catalogActive Boolean @default(true) @map("catalog_active")
   raw         Json      @default("{}")
   firstSeenAt DateTime  @default(now()) @map("first_seen_at") @db.Timestamptz(6)
   lastSeenAt  DateTime  @default(now()) @map("last_seen_at") @db.Timestamptz(6)
   syncedAt    DateTime  @default(now()) @map("synced_at") @db.Timestamptz(6)
 
-  guests    LumaEventGuest[]
-  syncState LumaEventSyncState?
+  guests             LumaEventGuest[]
+  syncState          LumaEventSyncState?
+  manualTagMutations ManualTagMutation[]
 
   @@index([startsAt(sort: Desc)])
+  @@index([catalogActive, startsAt(sort: Desc)])
   @@index([visibility, startsAt(sort: Desc)])
   @@map("luma_events")
 }
@@ -57,6 +60,7 @@ model LumaPerson {
 
   eventGuests         LumaEventGuest[]
   automaticTagMatches AutomaticTagAssignment[]
+  manualTagMutations  ManualTagMutation[]
 
   @@index([lumaUserIdLower])
   @@index([emailLower])
@@ -64,17 +68,60 @@ model LumaPerson {
 }
 
 model GuestTag {
-  id        String   @id
-  name      String
-  color     String   @default("#0f766e")
-  managed   Boolean  @default(false)
-  ruleKey   String?  @unique @map("rule_key")
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id          String   @id
+  name        String
+  color       String   @default("#0f766e")
+  managed     Boolean  @default(false)
+  ruleKey     String?  @unique @map("rule_key")
+  semanticKey String?  @unique @map("semantic_key")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   automaticAssignments AutomaticTagAssignment[]
+  manualMutations      ManualTagMutation[]
 
   @@map("guest_tags")
+}
+
+model SuperTag {
+  id        String         @id
+  name      String
+  color     String         @default("#38bdf8")
+  createdAt DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+  rules     SuperTagRule[]
+
+  @@map("super_tags")
+}
+
+model SuperTagRule {
+  id         BigInt   @id @default(autoincrement())
+  superTagId String   @map("super_tag_id")
+  source     String
+  phrase     String
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  superTag   SuperTag @relation(fields: [superTagId], references: [id], onDelete: Cascade)
+
+  @@index([superTagId])
+  @@map("super_tag_rules")
+}
+
+model ManualTagMutation {
+  id              BigInt    @id @default(autoincrement())
+  personId        String    @map("person_id")
+  tagId           String    @map("tag_id")
+  assignedAt      DateTime? @default(now()) @map("assigned_at") @db.Timestamptz(6)
+  assignedEventId String?   @map("assigned_event_id")
+  removed         Boolean   @default(false)
+
+  person        LumaPerson @relation(fields: [personId], references: [personId], onDelete: Cascade)
+  tag           GuestTag   @relation(fields: [tagId], references: [id], onDelete: Cascade)
+  assignedEvent LumaEvent? @relation(fields: [assignedEventId], references: [eventId], onDelete: SetNull)
+
+  @@index([personId, tagId, assignedAt(sort: Desc), id(sort: Desc)])
+  @@index([assignedEventId, tagId, assignedAt(sort: Desc)])
+  @@index([tagId, assignedAt(sort: Desc)])
+  @@map("manual_tag_mutations")
 }
 
 model AutomaticTagAssignment {

@@ -3,12 +3,11 @@
 type Env = {
   GUESTBOOK_APP_URL: string;
   GUESTBOOK_KEY: string;
-  GUESTBOOK_SYNC_SECRET: string;
 };
 
 export default {
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(syncGuestbook(env));
+    ctx.waitUntil(refreshGuestbookEventCatalog(env));
   },
 
   async fetch(request: Request, env: Env) {
@@ -29,27 +28,26 @@ export default {
     return Response.json(
       {
         ok: true,
-        worker: "guestbook-hourly-sync",
+        worker: "guestbook-event-catalog-refresh",
         target: env.GUESTBOOK_APP_URL,
-        schedule: "0 * * * *",
+        schedule: "disabled",
       },
       { headers: { "cache-control": "private, no-store" } },
     );
   },
 };
 
-async function syncGuestbook(env: Env): Promise<void> {
-  const response = await fetch(`${env.GUESTBOOK_APP_URL}/api/luma/sync`, {
-    method: "POST",
+async function refreshGuestbookEventCatalog(env: Env): Promise<void> {
+  const response = await fetch(`${env.GUESTBOOK_APP_URL}/api/luma?refresh_events=1&trigger=worker`, {
+    method: "GET",
     headers: {
-      Authorization: `Bearer ${env.GUESTBOOK_SYNC_SECRET}`,
       "x-guestbook-session-key": env.GUESTBOOK_KEY,
     },
   });
 
   if (!response.ok) {
     const body = await response.text();
-    throw new Error(`Guestbook sync failed: ${response.status} ${body.slice(0, 500)}`);
+    throw new Error(`Guestbook event catalog refresh failed: ${response.status} ${body.slice(0, 500)}`);
   }
 }
 

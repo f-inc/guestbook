@@ -1,5 +1,6 @@
-import { createIndexedTagDefinition, hasLumaDb, listIndexedTagDefinitions, setIndexedPersonTags, updateIndexedTagDefinition } from "../luma/db";
+import { createIndexedTagDefinition, hasLumaDb, listIndexedEventGuestMutationTargets, listIndexedTagDefinitions, mutateIndexedPeopleTags, mutateIndexedPersonTag, updateIndexedTagDefinition } from "../luma/db";
 import { requireSessionKey } from "../session-auth";
+import { MAX_ALL_MATCHING_TAG_MUTATIONS, MAX_ALL_MATCHING_TAG_PEOPLE, parseBulkManualTagMutation, parseManualTagMutation } from "./manual-tag-mutation";
 
 type HttpError = Error & { code?: string; status?: number };
 
@@ -45,15 +46,54 @@ export async function PATCH(request: Request) {
   try {
     requireSessionKey(request);
     requireDatabase();
-    const body = await request.json() as { personId?: unknown; tags?: unknown };
-    const rawPersonId = body.personId;
-    const personId = typeof rawPersonId === "string" ? rawPersonId.trim() : "";
-    if (!personId) return Response.json({ error: "A person id is required." }, { status: 400 });
-
-    const person = await setIndexedPersonTags(personId, body.tags);
+    const body = await request.json() as Record<string, unknown>;
+    if (body.bulk === true) {
+      const mutation = parseBulkManualTagMutation(body);
+      let targetPeople: Array<{ personId: string; eventId: string }>;
+      if (!("people" in mutation)) {
+        const peopleById = new Map<string, { personId: string; eventId: string }>();
+        for (const eventId of mutation.eventIds) {
+          const targets = await listIndexedEventGuestMutationTargets(eventId, mutation.query, {
+            limit: MAX_ALL_MATCHING_TAG_PEOPLE + 1,
+          });
+          for (const target of targets) {
+            if (!peopleById.has(target.personId)) peopleById.set(target.personId, { personId: target.personId, eventId });
+          }
+          if (peopleById.size > MAX_ALL_MATCHING_TAG_PEOPLE) break;
+        }
+        targetPeople = [...peopleById.values()];
+        if (!targetPeople.length) throw badRequest("No guests match the selected filters.");
+        if (targetPeople.length > MAX_ALL_MATCHING_TAG_PEOPLE) {
+          throw badRequest(`All-matching tag changes support up to ${MAX_ALL_MATCHING_TAG_PEOPLE} guests at a time.`);
+        }
+        if (targetPeople.length * mutation.tagIds.length > MAX_ALL_MATCHING_TAG_MUTATIONS) {
+          throw badRequest(`All-matching tag changes support up to ${MAX_ALL_MATCHING_TAG_MUTATIONS} guest-tag updates at a time.`);
+        }
+      } else {
+        targetPeople = mutation.people;
+      }
+      const people = await mutateIndexedPeopleTags({
+        people: targetPeople,
+        tagIds: mutation.tagIds,
+        removed: mutation.removed,
+      });
+      clearEventGuestCaches();
+      return Response.json({
+        tagIds: mutation.tagIds,
+        removed: mutation.removed,
+        allMatching: "allMatching" in mutation && mutation.allMatching,
+        matchedPeople: targetPeople.length,
+        people,
+      });
+    }
+    const mutation = parseManualTagMutation(body);
+    const person = await mutateIndexedPersonTag(mutation);
     clearEventGuestCaches();
     return Response.json({
       personId: person.personId,
+      tagId: mutation.tagId,
+      eventId: mutation.eventId,
+      removed: mutation.removed,
       tags: person.tags,
       manualTags: person.manualTags,
       automaticTags: person.automaticTags,
@@ -69,6 +109,12 @@ function requireDatabase() {
     error.status = 503;
     throw error;
   }
+}
+
+function badRequest(message: string) {
+  const error = new Error(message) as HttpError;
+  error.status = 400;
+  return error;
 }
 
 function clearEventGuestCaches() {

@@ -3,8 +3,10 @@ main = "src/index.ts"
 compatibility_date = "2026-07-12"
 workers_dev = true
 
-[triggers]
-crons = ["0 * * * *"]
+# Archived: browser load/focus now refreshes event metadata, and selected-event
+# count reconciliation decides when guest snapshots need a full refresh.
+# [triggers]
+# crons = ["0 * * * *"]
 
 [vars]
 GUESTBOOK_APP_URL = "https://guestbook.up.railway.app"

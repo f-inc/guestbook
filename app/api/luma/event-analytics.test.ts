@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildRegistrationQuestionAnalytics, eventWideAnalyticsCounts } from "../../event-analytics";
+import { buildRegistrationQuestionAnalytics, eventWideAnalyticsCounts, invitationOutcomeCounts } from "../../event-analytics";
 
 test("uses event-wide stats instead of the currently loaded guest page", () => {
   const counts = eventWideAnalyticsCounts(
@@ -11,6 +11,7 @@ test("uses event-wide stats instead of the currently loaded guest page", () => {
       accepted: 43,
       checkedIn: 21,
       firstRegisters: 20,
+      newReferrals: 6,
       newFaces: 9,
       referredRegistrations: 14,
       referredAccepted: 11,
@@ -23,6 +24,7 @@ test("uses event-wide stats instead of the currently loaded guest page", () => {
       accepted: 12,
       checkedIn: 8,
       firstRegisters: 12,
+      newReferrals: 1,
       newFaces: 4,
       returningAccepted: 0,
       referredRegistrations: 2,
@@ -38,6 +40,7 @@ test("uses event-wide stats instead of the currently loaded guest page", () => {
     accepted: 43,
     checkedIn: 21,
     firstRegisters: 20,
+    newReferrals: 6,
     newFaces: 9,
     referredRegistrations: 14,
     referredAccepted: 11,
@@ -54,6 +57,7 @@ test("falls back to loaded rows when event-wide stats are unavailable", () => {
     accepted: 3,
     checkedIn: 2,
     firstRegisters: 1,
+    newReferrals: 1,
     newFaces: 1,
     returningAccepted: 2,
     referredRegistrations: 2,
@@ -73,6 +77,7 @@ test("keeps referral cohorts inside their parent funnel stages", () => {
       accepted: 6,
       checkedIn: 3,
       firstRegisters: 2,
+      newReferrals: 12,
       newFaces: 1,
       referredRegistrations: 20,
       referredAccepted: 10,
@@ -85,6 +90,7 @@ test("keeps referral cohorts inside their parent funnel stages", () => {
       accepted: 0,
       checkedIn: 0,
       firstRegisters: 0,
+      newReferrals: 0,
       newFaces: 0,
       returningAccepted: 0,
       referredRegistrations: 0,
@@ -96,6 +102,7 @@ test("keeps referral cohorts inside their parent funnel stages", () => {
   );
 
   assert.equal(counts.referredRegistrations, 8);
+  assert.equal(counts.newReferrals, 3);
   assert.equal(counts.referredAccepted, 6);
   assert.equal(counts.referredCheckedIn, 3);
   assert.equal(counts.referredFirstRegisters, 2);
@@ -115,4 +122,67 @@ test("aggregates registration answers independently of guest-list filters", () =
     { label: "Founder", count: 2 },
     { label: "Investor", count: 1 },
   ]);
+});
+
+test("retains all free-text responses for incremental rendering", () => {
+  const questions = buildRegistrationQuestionAnalytics(Array.from({ length: 12 }, (_, index) => ({
+    personId: `person-${index}`,
+    registrationAnswers: [{ id: "intro", label: "What are you building?", value: `Distinct response ${index}` }],
+  })));
+
+  assert.equal(questions[0].kind, "text");
+  assert.equal(questions[0].responseCount, 12);
+  assert.equal(questions[0].responses.length, 12);
+});
+
+test("orders founder-stage answers by progression instead of popularity", () => {
+  const values = [
+    "Launched",
+    "Launched",
+    "Raised Pre-seed",
+    "Shipped Prototype",
+    "Tinkering",
+    "None of the above",
+    "Quitting Job Soon",
+    "I Have a Job",
+    "Off Zero",
+    "Raised Seed",
+  ];
+  const questions = buildRegistrationQuestionAnalytics(values.map((value, index) => ({
+    personId: `person-${index}`,
+    registrationAnswers: [{ id: "stage", label: "Where are you at?", value }],
+  })));
+
+  assert.deepEqual(questions[0].options.map(({ label }) => label), [
+    "I Have a Job",
+    "Quitting Job Soon",
+    "Tinkering",
+    "Shipped Prototype",
+    "Launched",
+    "Off Zero",
+    "Raised Pre-seed",
+    "Raised Seed",
+    "None of the above",
+  ]);
+});
+
+test("counts invitation outcomes without including organic registrations", () => {
+  assert.deepEqual(invitationOutcomeCounts(null, [
+    { status: "checked_in", invitedAt: "2026-07-01", checkedInAt: "2026-07-02", isReferred: true },
+    { status: "no_show", invitedAt: "2026-07-01" },
+    { status: "invited", isReferred: true },
+    { status: "declined", invitedAt: "2026-07-01" },
+    { status: "checked_in", checkedInAt: "2026-07-02" },
+  ]), {
+    total: 4,
+    checkedIn: 1,
+    noShow: 1,
+    noResponse: 1,
+    declined: 1,
+    referralTotal: 2,
+    referralCheckedIn: 1,
+    referralNoShow: 0,
+    referralNoResponse: 1,
+    referralDeclined: 0,
+  });
 });

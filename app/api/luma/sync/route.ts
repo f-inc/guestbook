@@ -8,6 +8,7 @@ import { lumaEventDate } from "../event-date";
 import { requestedEventIds, shouldRefreshEventGuests } from "../sync-policy";
 import { orderAvatarCandidates } from "../../../avatar-order";
 import { requireSessionKey } from "../../session-auth";
+import { extractLumaReferrer } from "../referrer";
 
 export const runtime = "nodejs";
 
@@ -43,6 +44,8 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  // Recovery/backfill only. Routine freshness uses the event catalog endpoint
+  // plus selected-event count reconciliation.
   return runSync(request);
 }
 
@@ -652,14 +655,7 @@ function lumaProfileUrl(lumaUserId) {
 }
 
 function extractReferrer(guest) {
-  const referrer = guest.referrer || guest.referred_by || guest.referrer_user || guest.invited_by || guest.invited_by_user || {};
-  const value = {
-    name: firstString(referrer.name, referrer.user_name, referrer.full_name, guest.referrer_name, guest.referred_by_name, guest.invited_by_name),
-    email: firstString(referrer.email, referrer.user_email, guest.referrer_email, guest.referred_by_email, guest.invited_by_email),
-    url: firstUrlLike(referrer.url, referrer.profile_url, guest.referrer_url, guest.referral_url),
-    source: firstString(guest.registration_source, guest.referral_source, guest.utm_source),
-  };
-  return Object.values(value).some(Boolean) ? value : null;
+  return extractLumaReferrer(guest);
 }
 
 function extractSocialLinks(guest) {

@@ -1,11 +1,14 @@
 export type WorkspaceUrlState = {
   eventId: string;
+  eventIds: string[];
   eventView: "upcoming" | "past" | "all";
   eventSearch: string;
   tab: "overview" | "invite" | "analytics";
   guestStatus: string;
   guestSearch: string;
   guestTags: string[];
+  guestHasNotes?: boolean;
+  guestAttendedGreaterThan?: number | null;
   guestPage: number;
   profileId: string;
 };
@@ -22,6 +25,17 @@ const GUEST_STATUSES = new Set([
   "waitlisted",
   "first_registers",
   "new_faces",
+  "referrals",
+  "new_referrals",
+  "invited_no_response",
+  "invited_accepted",
+  "invited_checked_in",
+  "invited_no_show",
+  "invited_declined",
+  "invited_referrals",
+  "invited_referral_no_response",
+  "invited_referral_accepted",
+  "invited_referral_declined",
   "declined",
   "no_show",
 ]);
@@ -33,6 +47,8 @@ const WORKSPACE_PARAMS = [
   "guest_status",
   "guest_search",
   "guest_tag",
+  "guest_has_notes",
+  "guest_attended_gt",
   "guest_page",
   "profile",
 ];
@@ -43,15 +59,21 @@ export function parseWorkspaceUrl(search: string): WorkspaceUrlState {
   const tab = params.get("tab") || "overview";
   const guestStatus = params.get("guest_status") || "all";
   const requestedPage = Number.parseInt(params.get("guest_page") || "1", 10);
+  const eventIds = unique(params.getAll("event").map((eventId) => boundedText(eventId, 160)).filter(Boolean)).slice(0, 20);
 
+  const guestHasNotes = params.get("guest_has_notes") === "1";
+  const guestAttendedGreaterThan = boundedOptionalInteger(params.get("guest_attended_gt"), 0, 10_000);
   return {
-    eventId: boundedText(params.get("event"), 160),
+    eventId: eventIds.at(-1) || "",
+    eventIds,
     eventView: EVENT_VIEWS.has(eventView) ? eventView as WorkspaceUrlState["eventView"] : "upcoming",
     eventSearch: boundedText(params.get("event_search"), 120),
     tab: EVENT_TABS.has(tab) ? tab as WorkspaceUrlState["tab"] : "overview",
     guestStatus: GUEST_STATUSES.has(guestStatus) ? guestStatus : "all",
     guestSearch: boundedText(params.get("guest_search"), 120),
     guestTags: unique(params.getAll("guest_tag").map((tag) => boundedText(tag, 40)).filter(Boolean)).slice(0, 20),
+    ...(guestHasNotes ? { guestHasNotes: true } : {}),
+    ...(guestAttendedGreaterThan === null ? {} : { guestAttendedGreaterThan }),
     guestPage: Number.isFinite(requestedPage) ? Math.min(100, Math.max(1, requestedPage)) : 1,
     profileId: boundedText(params.get("profile"), 160),
   };
@@ -61,13 +83,16 @@ export function buildWorkspaceUrlSearch(currentSearch: string, state: WorkspaceU
   const params = new URLSearchParams(currentSearch.startsWith("?") ? currentSearch.slice(1) : currentSearch);
   WORKSPACE_PARAMS.forEach((key) => params.delete(key));
 
-  if (state.eventId) params.set("event", state.eventId);
+  const eventIds = unique(state.eventIds?.length ? state.eventIds : state.eventId ? [state.eventId] : []);
+  eventIds.forEach((eventId) => params.append("event", eventId));
   if (state.eventView !== "upcoming") params.set("event_view", state.eventView);
   if (state.eventSearch) params.set("event_search", state.eventSearch);
   if (state.tab !== "overview") params.set("tab", state.tab);
   if (state.guestStatus !== "all") params.set("guest_status", state.guestStatus);
   if (state.guestSearch) params.set("guest_search", state.guestSearch);
   unique(state.guestTags).forEach((tag) => params.append("guest_tag", tag));
+  if (state.guestHasNotes) params.set("guest_has_notes", "1");
+  if (state.guestAttendedGreaterThan != null) params.set("guest_attended_gt", String(state.guestAttendedGreaterThan));
   if (state.guestPage > 1) params.set("guest_page", String(Math.floor(state.guestPage)));
   if (state.profileId) params.set("profile", state.profileId);
 
@@ -76,6 +101,12 @@ export function buildWorkspaceUrlSearch(currentSearch: string, state: WorkspaceU
 
 function boundedText(value: string | null, maximum: number) {
   return String(value || "").trim().slice(0, maximum);
+}
+
+function boundedOptionalInteger(value: string | null, minimum: number, maximum: number) {
+  if (value === null || value.trim() === "") return null;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? Math.min(maximum, Math.max(minimum, parsed)) : null;
 }
 
 function unique(values: string[]) {

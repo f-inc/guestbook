@@ -11,6 +11,7 @@ export const GUEST_FILTER_VALUES = [
   "declined",
   "no_show",
   "first_registers",
+  "accepted_first_registers",
   "new_faces",
   "referrals",
   "new_referrals",
@@ -160,7 +161,8 @@ export function guestStatusWhere(
     return { AND: [cohort, activeReferralWhere()] };
   }
   if (filter === "invited_referrals") return { AND: [invitationEvidenceWhere(), activeReferralWhere()] };
-  if (filter === "first_registers") {
+  if (filter === "first_registers") return { AND: [registeredGuestWhere(), firstRegistrationPersonWhere(eventId, boundary)] };
+  if (filter === "accepted_first_registers") {
     return { AND: [{ status: { in: GUEST_ACCEPTED_STATUSES } }, firstRegistrationPersonWhere(eventId, boundary)] };
   }
   if (filter === "new_faces") return { AND: [{ status: "checked_in" }, firstRegistrationPersonWhere(eventId, boundary)] };
@@ -232,6 +234,7 @@ export function filterGuestPayload(payload: any, query: GuestListQuery) {
 
 export function summarizeGuests(guests: any[]) {
   const firstRegisters = guests.filter(isFirstRegister);
+  const newRegistrations = guests.filter((guest) => isRegisteredGuest(guest) && isFirstRegistration(guest));
   return {
     total: guests.length,
     checkedIn: guests.filter((guest) => guest.status === "checked_in").length,
@@ -244,6 +247,7 @@ export function summarizeGuests(guests: any[]) {
     toDecide: guests.filter((guest) => guest.status === "registered" || (guest.status === "waitlisted" && guest.operatorDecision !== "waitlisted")).length,
     waitlisted: guests.filter((guest) => guest.status === "waitlisted").length,
     firstRegisters: firstRegisters.length,
+    newRegistrations: newRegistrations.length,
     newFaces: guests.filter((guest) => guest.status === "checked_in" && isFirstRegistration(guest)).length,
     newReferrals: guests.filter((guest) => guest.isReferred && guest.isNewReferral && (Boolean(guest.checkedInAt) || guest.status === "checked_in")).length,
   };
@@ -317,7 +321,8 @@ function guestMatchesFilter(guest: any, filter: GuestFilter): boolean {
   if (filter === "invited_referral_no_response") return Boolean(guest.isReferred) && guest.status === "invited";
   if (filter === "invited_referral_accepted") return Boolean(guest.isReferred) && hasInvitationEvidence(guest) && (Boolean(guest.checkedInAt) || ["checked_in", "no_show"].includes(guest.status));
   if (filter === "invited_referral_declined") return Boolean(guest.isReferred && guest.invitedAt) && guest.status === "declined";
-  if (filter === "first_registers") return isFirstRegister(guest);
+  if (filter === "first_registers") return isRegisteredGuest(guest) && isFirstRegistration(guest);
+  if (filter === "accepted_first_registers") return isFirstRegister(guest);
   if (filter === "new_faces") return guest.status === "checked_in" && isFirstRegistration(guest);
   if (filter === "new_referrals") return Boolean(guest.isReferred && guest.isNewReferral) && (Boolean(guest.checkedInAt) || guest.status === "checked_in");
   return guest.status === filter;
@@ -371,7 +376,7 @@ function isFirstRegister(guest: any): boolean {
 }
 
 function isFirstRegistration(guest: any): boolean {
-  return GUEST_REGISTRATION_STATUSES.includes(guest.status)
+  return isRegisteredGuest(guest)
     && (guest.isFirstRegistration === true || guest.isNewFace === true);
 }
 

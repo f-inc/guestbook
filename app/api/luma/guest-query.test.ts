@@ -159,6 +159,28 @@ test("only treats chronologically earlier events as prior history", () => {
   });
   assert.deepEqual(guestStatusWhere("event-2", "first_registers", { startsAt, date }), {
     AND: [
+      {
+        OR: [
+          { status: { in: ["registered", "waitlisted", "going", "checked_in", "no_show"] } },
+          { status: "declined", registeredAt: { not: null } },
+        ],
+      },
+      {
+        person: {
+          is: {
+            eventGuests: {
+              none: {
+                eventId: { not: "event-2" },
+                event: { is: priorEvent },
+              },
+            },
+          },
+        },
+      },
+    ],
+  });
+  assert.deepEqual(guestStatusWhere("event-2", "accepted_first_registers", { startsAt, date }), {
+    AND: [
       { status: { in: ["going", "checked_in", "no_show"] } },
       {
         person: {
@@ -222,7 +244,7 @@ test("counts declined registrations but excludes declined invitations", () => {
   assert.equal(result.stats.declined, 2);
 });
 
-test("limits first registers to accepted guests and new faces to check-ins", () => {
+test("separates new registrations from accepted first registers and new faces", () => {
   const payload = {
     eventId: "event-1",
     people: [
@@ -259,6 +281,7 @@ test("limits first registers to accepted guests and new faces to check-ins", () 
   assert.equal(result.stats.invited, 2);
   assert.equal(result.stats.newFaces, 1);
   assert.equal(result.stats.firstRegisters, 2);
+  assert.equal(result.stats.newRegistrations, 4);
   assert.deepEqual(result.pageInfo, { total: 1, pageSize: 50, hasMore: false, nextCursor: null });
 
   const firstRegisters = filterGuestPayload(payload, {
@@ -268,7 +291,16 @@ test("limits first registers to accepted guests and new faces to check-ins", () 
     cursor: 0,
     pageSize: 50,
   });
-  assert.deepEqual(firstRegisters.guests.map((guest: any) => guest.personId), ["person-1", "person-2"]);
+  assert.deepEqual(firstRegisters.guests.map((guest: any) => guest.personId), ["person-1", "person-2", "person-3", "person-4"]);
+
+  const acceptedFirstRegisters = filterGuestPayload(payload, {
+    filter: "accepted_first_registers",
+    search: "",
+    tags: [],
+    cursor: 0,
+    pageSize: 50,
+  });
+  assert.deepEqual(acceptedFirstRegisters.guests.map((guest: any) => guest.personId), ["person-1", "person-2"]);
 
   const accepted = filterGuestPayload(payload, {
     filter: "accepted",

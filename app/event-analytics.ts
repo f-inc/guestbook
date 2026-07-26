@@ -2,6 +2,7 @@ type AnalyticsCounts = {
   accepted: number;
   checkedIn: number;
   firstRegisters: number;
+  newRegistrations: number;
   newReferrals: number;
   newFaces: number;
   referredAccepted: number;
@@ -17,6 +18,7 @@ type GuestStats = {
   accepted?: unknown;
   checkedIn?: unknown;
   firstRegisters?: unknown;
+  newRegistrations?: unknown;
   newReferrals?: unknown;
   newFaces?: unknown;
   invited?: unknown;
@@ -92,6 +94,10 @@ export function eventWideAnalyticsCounts(stats: GuestStats | null | undefined, f
     accepted,
     nonnegativeCount(stats?.firstRegisters) ?? fallback.firstRegisters,
   );
+  const newRegistrations = Math.min(
+    registrations,
+    nonnegativeCount(stats?.newRegistrations) ?? fallback.newRegistrations,
+  );
   const newFaces = Math.min(
     checkedIn,
     nonnegativeCount(stats?.newFaces) ?? fallback.newFaces,
@@ -117,6 +123,7 @@ export function eventWideAnalyticsCounts(stats: GuestStats | null | undefined, f
   );
   const referredFirstRegisters = Math.min(
     firstRegisters,
+    newRegistrations,
     referredAccepted,
     nonnegativeCount(stats?.referredFirstRegisters) ?? fallback.referredFirstRegisters,
   );
@@ -132,6 +139,7 @@ export function eventWideAnalyticsCounts(stats: GuestStats | null | undefined, f
     accepted,
     checkedIn,
     firstRegisters,
+    newRegistrations,
     newFaces,
     newReferrals,
     referredRegistrations,

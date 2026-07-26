@@ -1050,7 +1050,7 @@ export async function listIndexedEventGuests(
   const includeSummary = query.includeSummary !== false;
   const includeEventCounts = query.includeEventCounts !== false;
   const statusDateSortDirection = query.sortDirection === "asc" ? Prisma.sql`ASC` : Prisma.sql`DESC`;
-  const needsChronology = includeSummary || includeEventCounts || ["first_registers", "new_faces"].includes(query.filter);
+  const needsChronology = includeSummary || includeEventCounts || ["first_registers", "accepted_first_registers", "new_faces"].includes(query.filter);
   // EVENT_SWITCH_DIAGNOSTICS: each report isolates one database phase without adding log I/O to the query path.
   let diagnosticStartedAt = Date.now();
   const eventBoundary = needsChronology
@@ -1403,7 +1403,7 @@ function indexedMultiEventGuestPageWhereSql(query: GuestListQuery) {
     predicates.push(indexedInvitationOutcomeFilterPredicateSql(query.filter));
   } else if (isIndexedReferralFilter(query.filter)) {
     predicates.push(indexedReferralFilterPredicateSql(query.filter));
-  } else if (query.filter === "first_registers" || query.filter === "new_faces") {
+  } else if (["first_registers", "accepted_first_registers", "new_faces"].includes(query.filter)) {
     predicates.push(query.filter === "new_faces"
       ? Prisma.sql`guest.status = 'checked_in'`
       : Prisma.sql`guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)})`);
@@ -1498,7 +1498,7 @@ function indexedGuestPageWhereSql(
     predicates.push(indexedInvitationOutcomeFilterPredicateSql(query.filter));
   } else if (isIndexedReferralFilter(query.filter)) {
     predicates.push(indexedReferralFilterPredicateSql(query.filter));
-  } else if (query.filter === "first_registers" || query.filter === "new_faces") {
+  } else if (["first_registers", "accepted_first_registers", "new_faces"].includes(query.filter)) {
     predicates.push(query.filter === "new_faces"
       ? Prisma.sql`guest.status = 'checked_in'`
       : Prisma.sql`guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)})`);
@@ -1809,6 +1809,7 @@ export async function getIndexedMultiEventStats(eventIds: string[]) {
     waitlisted: number;
     toDecide: number;
     firstRegisters: number;
+    newRegistrations: number;
     newFaces: number;
     referredRegistrations: number;
     newReferrals: number;
@@ -1938,6 +1939,9 @@ export async function getIndexedMultiEventStats(eventIds: string[]) {
         WHERE guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)}) AND NOT guest.has_prior_event
       )::integer AS "firstRegisters",
       COUNT(DISTINCT guest.person_id) FILTER (
+        WHERE ${indexedRegisteredGuestPredicateSql()} AND NOT guest.has_prior_event
+      )::integer AS "newRegistrations",
+      COUNT(DISTINCT guest.person_id) FILTER (
         WHERE (guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in') AND NOT guest.has_prior_event
       )::integer AS "newFaces",
       COUNT(DISTINCT guest.person_id) FILTER (
@@ -1978,6 +1982,7 @@ export async function getIndexedMultiEventStats(eventIds: string[]) {
       waitlisted: 0,
       toDecide: 0,
       firstRegisters: 0,
+      newRegistrations: 0,
       newFaces: 0,
       referredRegistrations: 0,
       newReferrals: 0,
@@ -2137,7 +2142,7 @@ async function indexedEventAnalytics(
   const priorRegistrationBoundary = previousEventBoundarySql(eventBoundary);
   const diagnosticStartedAt = Date.now();
   const [summaryRows, analyticsQuestionRows] = await db.$transaction([
-    db.$queryRaw<Array<{ total: number; checkedIn: number; accepted: number; registered: number; pending: number; declined: number; invited: number; waitlisted: number; toDecide: number; firstRegisters: number; newFaces: number; referredRegistrations: number; newReferrals: number; referredAccepted: number; referredCheckedIn: number; referredFirstRegisters: number; referredReturning: number; invitationTotal: number; invitedCheckedIn: number; invitedNoShow: number; invitedNoResponse: number; invitedDeclined: number; invitedReferralTotal: number; invitedReferralCheckedIn: number; invitedReferralNoShow: number; invitedReferralNoResponse: number; invitedReferralDeclined: number }>>(Prisma.sql`
+    db.$queryRaw<Array<{ total: number; checkedIn: number; accepted: number; registered: number; pending: number; declined: number; invited: number; waitlisted: number; toDecide: number; firstRegisters: number; newRegistrations: number; newFaces: number; referredRegistrations: number; newReferrals: number; referredAccepted: number; referredCheckedIn: number; referredFirstRegisters: number; referredReturning: number; invitationTotal: number; invitedCheckedIn: number; invitedNoShow: number; invitedNoResponse: number; invitedDeclined: number; invitedReferralTotal: number; invitedReferralCheckedIn: number; invitedReferralNoShow: number; invitedReferralNoResponse: number; invitedReferralDeclined: number }>>(Prisma.sql`
       WITH latest_manual_tag_mutations AS MATERIALIZED (
         SELECT DISTINCT ON (mutation.person_id, mutation.tag_id)
           mutation.person_id,
@@ -2238,6 +2243,10 @@ async function indexedEventAnalytics(
             AND NOT guest.has_prior_event
         )::integer AS "firstRegisters",
         COUNT(*) FILTER (
+          WHERE ${indexedRegisteredGuestPredicateSql()}
+            AND NOT guest.has_prior_event
+        )::integer AS "newRegistrations",
+        COUNT(*) FILTER (
           WHERE guest.status = 'checked_in'
             AND NOT guest.has_prior_event
         )::integer AS "newFaces",
@@ -2284,7 +2293,7 @@ async function indexedEventAnalytics(
     answerRowCount: analyticsQuestionRows.length,
   });
   return {
-    stats: summaryRows[0] || { total: 0, checkedIn: 0, accepted: 0, registered: 0, pending: 0, declined: 0, invited: 0, waitlisted: 0, toDecide: 0, firstRegisters: 0, newFaces: 0, referredRegistrations: 0, newReferrals: 0, referredAccepted: 0, referredCheckedIn: 0, referredFirstRegisters: 0, referredReturning: 0, invitationTotal: 0, invitedCheckedIn: 0, invitedNoShow: 0, invitedNoResponse: 0, invitedDeclined: 0, invitedReferralTotal: 0, invitedReferralCheckedIn: 0, invitedReferralNoShow: 0, invitedReferralNoResponse: 0, invitedReferralDeclined: 0 },
+    stats: summaryRows[0] || { total: 0, checkedIn: 0, accepted: 0, registered: 0, pending: 0, declined: 0, invited: 0, waitlisted: 0, toDecide: 0, firstRegisters: 0, newRegistrations: 0, newFaces: 0, referredRegistrations: 0, newReferrals: 0, referredAccepted: 0, referredCheckedIn: 0, referredFirstRegisters: 0, referredReturning: 0, invitationTotal: 0, invitedCheckedIn: 0, invitedNoShow: 0, invitedNoResponse: 0, invitedDeclined: 0, invitedReferralTotal: 0, invitedReferralCheckedIn: 0, invitedReferralNoShow: 0, invitedReferralNoResponse: 0, invitedReferralDeclined: 0 },
     analyticsQuestions: buildRegistrationQuestionAnalytics(analyticsQuestionRows),
   };
 }

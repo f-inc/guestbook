@@ -4736,7 +4736,7 @@ function EventStats({ stats, mode = "past", loading = false, uniquePeople = fals
           { value: "checked_in", label: "Check-ins", count: stats.checkedIn },
         ]),
     ...(mode === "upcoming" ? [{ value: "new_referrals", label: "New Referrals", count: stats.newReferrals ?? 0 }] : []),
-    { value: "first_registers", label: "First Registers", count: stats.firstRegisters ?? 0 },
+    { value: "first_registers", label: "First Registers", count: stats.newRegistrations ?? stats.firstRegisters ?? 0 },
     { value: "accepted", label: "Accepted", count: stats.accepted ?? stats.confirmed ?? 0 },
     { value: "registered", label: "Registered", count: stats.registered },
     { value: "invited", label: "Invited", count: stats.invited },
@@ -5814,10 +5814,10 @@ function AnalyticsTab({ event, analytics, loading = false, uniquePeople = false,
   const registrationFunnel = [
     ...analytics.funnel.map((stage) => {
       if (stage.id === "registered") {
-        return { ...stage, filter: "registered", overlay: { label: "New registrations", value: Number(analytics.firstRegisters) || 0, filter: "first_registers" } };
+        return { ...stage, filter: "registered", overlay: { label: "New registrations", value: Number(analytics.newRegistrations) || 0, filter: "first_registers" } };
       }
       if (stage.id === "accepted") {
-        return { ...stage, filter: "accepted", overlay: { ...stage.overlay, label: "New registrations", filter: "first_registers" } };
+        return { ...stage, filter: "accepted", overlay: { ...stage.overlay, label: "New registrations", filter: "accepted_first_registers" } };
       }
       return { ...stage, filter: "checked_in", overlay: { ...stage.overlay, filter: "new_faces" } };
     }),
@@ -5910,7 +5910,7 @@ function AnalyticsTab({ event, analytics, loading = false, uniquePeople = false,
       <section className="answer-analytics">
         <div className="event-tab-heading compact">
           <div><p className="eyebrow">First Registers</p><h2>Registration answers</h2></div>
-          <span className="analytics-sample">{analytics.firstRegisters} first registers</span>
+          <span className="analytics-sample">{analytics.newRegistrations} first registers</span>
         </div>
         {analytics.questions.length ? (
           <div className="question-grid">
@@ -7469,7 +7469,8 @@ function eventGuests(state, event, dateSortDirection: "asc" | "desc" = "desc") {
         || (selectedStatus === "accepted" && acceptedStatuses.includes(guest.status))
         || (selectedStatus === "registered" && isRegisteredGuest(guest))
         || (selectedStatus === "invited" && hasInvitationEvidence(guest))
-        || (selectedStatus === "first_registers" && isFirstRegister(guest))
+        || (selectedStatus === "first_registers" && isRegisteredGuest(guest) && isFirstRegistration(guest))
+        || (selectedStatus === "accepted_first_registers" && isFirstRegister(guest))
         || (selectedStatus === "new_faces" && guest.status === "checked_in" && isFirstRegistration(guest))
         || (selectedStatus === "new_referrals" && guest.isReferred && guest.isNewReferral && registeredStatuses.includes(guest.status))
         || (selectedStatus !== "invited" && guest.status === selectedStatus);
@@ -7714,6 +7715,7 @@ function buildEventAnalytics(state, event) {
     registrations: 0,
     returningAccepted: 0,
     firstRegisters: 0,
+    newRegistrations: 0,
     newReferrals: 0,
     newFaces: 0,
     referredRegistrations: 0,
@@ -7739,6 +7741,7 @@ function buildEventAnalytics(state, event) {
       history: personHistoryForGuest(state, guest),
     }))
     .filter((row) => row.person);
+  const firstRegistrationRows = registrationRows.filter(({ guest }) => isFirstRegistrationAtEvent(state, guest, event));
   const acceptedRows = registrationRows.filter(({ guest }) => acceptedStatuses.includes(guest.status));
   const firstRegisterRows = acceptedRows.filter(({ guest }) => isFirstRegistrationAtEvent(state, guest, event));
   const referredRows = registrationRows.filter(({ person }) => personHasExactTag(person, REFERRED_PERSON_TAG));
@@ -7752,6 +7755,7 @@ function buildEventAnalytics(state, event) {
     registrations: registrationRows.length,
     returningAccepted,
     firstRegisters: firstRegisterRows.length,
+    newRegistrations: firstRegistrationRows.length,
     newReferrals: 0,
     accepted,
     checkedIn,
@@ -7783,6 +7787,7 @@ function buildEventAnalytics(state, event) {
     registrations,
     returningAccepted: counts.returningAccepted,
     firstRegisters: counts.firstRegisters,
+    newRegistrations: counts.newRegistrations,
     newReferrals: counts.newReferrals,
     newFaces: counts.newFaces,
     referredRegistrations: counts.referredRegistrations,
@@ -7833,6 +7838,7 @@ function eventHeaderStatsReady(event) {
     stats.invited,
     stats.waitlisted,
     stats.firstRegisters,
+    stats.newRegistrations,
     stats.newFaces,
     stats.newReferrals,
   ].every((value) => Number.isFinite(Number(value)));
@@ -7844,6 +7850,7 @@ function buildWorkspaceAnalytics(state, events, uniqueStats = null) {
   const sum = (key) => analytics.reduce((total, item) => total + (Number(item[key]) || 0), 0);
   const registrations = uniqueStats ? Number(uniqueStats.registered) || 0 : sum("registrations");
   const firstRegisters = uniqueStats ? Number(uniqueStats.firstRegisters) || 0 : sum("firstRegisters");
+  const newRegistrations = uniqueStats ? Number(uniqueStats.newRegistrations) || 0 : sum("newRegistrations");
   const newFaces = uniqueStats ? Number(uniqueStats.newFaces) || 0 : sum("newFaces");
   const newReferrals = uniqueStats ? Number(uniqueStats.newReferrals) || 0 : sum("newReferrals");
   const accepted = uniqueStats ? Number(uniqueStats.accepted) || 0 : sum("returningAccepted") + firstRegisters;
@@ -7875,6 +7882,7 @@ function buildWorkspaceAnalytics(state, events, uniqueStats = null) {
     registrations,
     returningAccepted,
     firstRegisters,
+    newRegistrations,
     newReferrals,
     newFaces,
     referredRegistrations,
@@ -8105,6 +8113,7 @@ function eventStats(event) {
     invitedNoResponse: 0,
     toDecide: 0,
     firstRegisters: 0,
+    newRegistrations: 0,
     newFaces: 0,
   };
   event.guests.forEach((guest) => {
@@ -8119,6 +8128,7 @@ function eventStats(event) {
     if (guest.status === "invited") stats.invitedNoResponse += 1;
     if (isGuestToDecide(guest)) stats.toDecide += 1;
     if (isFirstRegister(guest)) stats.firstRegisters += 1;
+    if (isRegisteredGuest(guest) && isFirstRegistration(guest)) stats.newRegistrations += 1;
     if (guest.status === "checked_in" && isFirstRegistration(guest)) stats.newFaces += 1;
   });
   return stats;
@@ -8161,6 +8171,7 @@ function adjustGuestStatusStats(stats, before, after) {
     invited: (guest) => hasInvitationEvidence(guest),
     toDecide: (guest) => isGuestToDecide(guest),
     firstRegisters: (guest) => isFirstRegister(guest),
+    newRegistrations: (guest) => isRegisteredGuest(guest) && isFirstRegistration(guest),
     newFaces: (guest) => guest?.status === "checked_in" && isFirstRegistration(guest),
     newReferrals: (guest) => Boolean(guest?.isReferred && guest?.isNewReferral && registeredStatuses.includes(guest?.status)),
     referredRegistrations: (guest) => Boolean(guest?.isReferred && isRegisteredGuest(guest)),
@@ -8253,7 +8264,7 @@ function isFirstRegister(guest) {
 }
 
 function isFirstRegistration(guest) {
-  return registrationStatuses.includes(guest.status)
+  return isRegisteredGuest(guest)
     && (guest.isFirstRegistration === true || guest.isNewFace === true);
 }
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { filterGuestPayload, guestFilterRequiresIndex, guestQueryRequiresIndex, guestStatusWhere, parseGuestListQuery, priorEventWhere } from "./guest-query";
+import { filterGuestPayload, guestFilterRequiresIndex, guestQueryRequiresIndex, guestStatusWhere, isRegisteredGuest, parseGuestListQuery, priorEventWhere } from "./guest-query";
 
 test("parses bounded server-side guest query parameters", () => {
   const params = new URLSearchParams({
@@ -178,11 +178,48 @@ test("only treats chronologically earlier events as prior history", () => {
     status: { in: ["going", "checked_in", "no_show"] },
   });
   assert.deepEqual(guestStatusWhere("event-2", "registered", { startsAt, date }), {
-    status: { in: ["registered", "waitlisted", "going", "checked_in", "no_show"] },
+    OR: [
+      { status: { in: ["registered", "waitlisted", "going", "checked_in", "no_show"] } },
+      { status: "declined", registeredAt: { not: null } },
+    ],
   });
   assert.deepEqual(guestStatusWhere("event-2", "invited", { startsAt, date }), {
     OR: [{ invitedAt: { not: null } }, { status: "invited" }],
   });
+});
+
+test("counts declined registrations but excludes declined invitations", () => {
+  assert.equal(isRegisteredGuest({
+    status: "declined",
+    registeredAt: "2026-07-24T18:00:00.000Z",
+    invitedAt: null,
+  }), true);
+  assert.equal(isRegisteredGuest({
+    status: "declined",
+    registeredAt: null,
+    invitedAt: "2026-07-20T18:00:00.000Z",
+  }), false);
+
+  const result = filterGuestPayload({
+    people: [
+      { id: "registered-decline", name: "Registered decline" },
+      { id: "invited-decline", name: "Invited decline" },
+    ],
+    guests: [
+      { personId: "registered-decline", status: "declined", registeredAt: "2026-07-24T18:00:00.000Z" },
+      { personId: "invited-decline", status: "declined", invitedAt: "2026-07-20T18:00:00.000Z" },
+    ],
+  }, {
+    filter: "registered",
+    search: "",
+    tags: [],
+    cursor: 0,
+    pageSize: 50,
+  });
+
+  assert.deepEqual(result.guests.map((guest: any) => guest.personId), ["registered-decline"]);
+  assert.equal(result.stats.registered, 1);
+  assert.equal(result.stats.declined, 2);
 });
 
 test("limits first registers to accepted guests and new faces to check-ins", () => {

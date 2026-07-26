@@ -54,9 +54,11 @@ export function changedLiveEventCountKeys(stats: WrapperEventStats | null | unde
     invited: Number(stats.invitedNoResponse),
     declined: Number(stats.declined),
     checkedIn: Number(stats.checkedIn),
-    registered: Number(stats.registered),
   };
   if (Object.values(wrapper).some((value) => !Number.isFinite(value))) return [];
-  return (["accepted", "waitlisted", "pending", "invited", "declined", "checkedIn", "registered"] as const)
+  // Guestbook's Registered cohort also includes declined guests with an actual
+  // registration timestamp. Luma's event summary cannot distinguish those from
+  // invite-only declines, so compare the underlying status counts instead.
+  return (["accepted", "waitlisted", "pending", "invited", "declined", "checkedIn"] as const)
     .filter((key) => wrapper[key] !== live[key]);
 }

@@ -163,6 +163,13 @@ function indexedGuestStatusDateSql() {
   `;
 }
 
+function indexedRegisteredGuestPredicateSql() {
+  return Prisma.sql`(
+    guest.status IN (${Prisma.join(GUEST_REGISTERED_STATUSES)})
+    OR (guest.status = 'declined' AND guest.registered_at IS NOT NULL)
+  )`;
+}
+
 export function hasLumaDb() {
   return Boolean(process.env.DB_URL);
 }
@@ -496,7 +503,7 @@ export async function listIndexedPeopleByEventCohort(
         ? Prisma.sql`(guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')`
         : cohort === "invited"
           ? Prisma.sql`(guest.invited_at IS NOT NULL OR guest.status = 'invited')`
-          : Prisma.sql`guest.status IN (${Prisma.join(GUEST_REGISTRATION_STATUSES)})`}
+          : indexedRegisteredGuestPredicateSql()}
     ORDER BY person.name ASC, person.person_id
     LIMIT ${resultLimit}
   `);
@@ -660,7 +667,7 @@ function audienceEventCohortsWhereSql(selections: Array<{ eventId: string; cohor
       ? Prisma.sql`(guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')`
       : cohort === "invited"
         ? Prisma.sql`(guest.invited_at IS NOT NULL OR guest.status = 'invited')`
-        : Prisma.sql`guest.status IN (${Prisma.join(GUEST_REGISTRATION_STATUSES)})`})
+        : indexedRegisteredGuestPredicateSql()})
   `), " OR ")})`;
 }
 
@@ -994,7 +1001,7 @@ export async function listIndexedEventCohortCounts() {
     SELECT
       guest.event_id AS "eventId",
       COUNT(*) FILTER (WHERE guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')::integer AS attended,
-      COUNT(*) FILTER (WHERE guest.status IN (${Prisma.join(GUEST_REGISTRATION_STATUSES)}))::integer AS registered,
+      COUNT(*) FILTER (WHERE ${indexedRegisteredGuestPredicateSql()})::integer AS registered,
       COUNT(*) FILTER (WHERE guest.invited_at IS NOT NULL OR guest.status = 'invited')::integer AS invited
     FROM luma_event_guests AS guest
     GROUP BY guest.event_id
@@ -1389,7 +1396,7 @@ function indexedMultiEventGuestPageWhereSql(query: GuestListQuery) {
       OR (guest.status = 'waitlisted' AND guest.operator_decision IS DISTINCT FROM 'waitlisted')
     )`);
   } else if (query.filter === "registered") {
-    predicates.push(Prisma.sql`guest.status IN (${Prisma.join(GUEST_REGISTERED_STATUSES)})`);
+    predicates.push(indexedRegisteredGuestPredicateSql());
   } else if (query.filter === "invited") {
     predicates.push(Prisma.sql`(guest.invited_at IS NOT NULL OR guest.status = 'invited')`);
   } else if (isIndexedInvitationOutcomeFilter(query.filter)) {
@@ -1484,7 +1491,7 @@ function indexedGuestPageWhereSql(
       OR (guest.status = 'waitlisted' AND guest.operator_decision IS DISTINCT FROM 'waitlisted')
     )`);
   } else if (query.filter === "registered") {
-    predicates.push(Prisma.sql`guest.status IN (${Prisma.join(GUEST_REGISTERED_STATUSES)})`);
+    predicates.push(indexedRegisteredGuestPredicateSql());
   } else if (query.filter === "invited") {
     predicates.push(Prisma.sql`(guest.invited_at IS NOT NULL OR guest.status = 'invited')`);
   } else if (isIndexedInvitationOutcomeFilter(query.filter)) {
@@ -1889,7 +1896,7 @@ export async function getIndexedMultiEventStats(eventIds: string[]) {
       COUNT(DISTINCT guest.person_id)::integer AS total,
       COUNT(DISTINCT guest.person_id) FILTER (WHERE guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')::integer AS "checkedIn",
       COUNT(DISTINCT guest.person_id) FILTER (WHERE guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)}))::integer AS accepted,
-      COUNT(DISTINCT guest.person_id) FILTER (WHERE guest.status IN (${Prisma.join(GUEST_REGISTERED_STATUSES)}))::integer AS registered,
+      COUNT(DISTINCT guest.person_id) FILTER (WHERE ${indexedRegisteredGuestPredicateSql()})::integer AS registered,
       COUNT(DISTINCT guest.person_id) FILTER (WHERE guest.status = 'registered')::integer AS pending,
       COUNT(DISTINCT guest.person_id) FILTER (WHERE guest.status = 'declined')::integer AS declined,
       COUNT(DISTINCT guest.person_id) FILTER (WHERE guest.invited_at IS NOT NULL OR guest.status = 'invited')::integer AS invited,
@@ -1934,7 +1941,7 @@ export async function getIndexedMultiEventStats(eventIds: string[]) {
         WHERE (guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in') AND NOT guest.has_prior_event
       )::integer AS "newFaces",
       COUNT(DISTINCT guest.person_id) FILTER (
-        WHERE guest.is_referred AND guest.status IN (${Prisma.join(GUEST_REGISTERED_STATUSES)})
+        WHERE guest.is_referred AND ${indexedRegisteredGuestPredicateSql()}
       )::integer AS "referredRegistrations",
       COUNT(DISTINCT guest.person_id) FILTER (
         WHERE guest.is_referred
@@ -2188,7 +2195,7 @@ async function indexedEventAnalytics(
         COUNT(*)::integer AS total,
         COUNT(*) FILTER (WHERE guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')::integer AS "checkedIn",
         COUNT(*) FILTER (WHERE guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)}))::integer AS accepted,
-        COUNT(*) FILTER (WHERE guest.status IN (${Prisma.join(GUEST_REGISTERED_STATUSES)}))::integer AS registered,
+        COUNT(*) FILTER (WHERE ${indexedRegisteredGuestPredicateSql()})::integer AS registered,
         COUNT(*) FILTER (WHERE guest.status = 'registered')::integer AS pending,
         COUNT(*) FILTER (WHERE guest.status = 'declined')::integer AS declined,
         COUNT(*) FILTER (WHERE guest.invited_at IS NOT NULL OR guest.status = 'invited')::integer AS invited,
@@ -2236,7 +2243,7 @@ async function indexedEventAnalytics(
         )::integer AS "newFaces",
         COUNT(*) FILTER (
           WHERE guest.is_referred
-            AND guest.status IN (${Prisma.join(GUEST_REGISTERED_STATUSES)})
+            AND ${indexedRegisteredGuestPredicateSql()}
         )::integer AS "referredRegistrations",
         COUNT(*) FILTER (
           WHERE guest.is_referred

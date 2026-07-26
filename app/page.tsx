@@ -5413,7 +5413,7 @@ function eventCohortCount(event, cohort, indexedCounts: any = null) {
   return event.guests.filter((guest) => {
     if (cohort === "attended") return guest.status === "checked_in" || Boolean(guest.checkedInAt);
     if (cohort === "invited") return hasInvitationEvidence(guest);
-    return registeredStatuses.includes(guest.status);
+    return isRegisteredGuest(guest);
   }).length;
 }
 
@@ -7467,7 +7467,7 @@ function eventGuests(state, event, dateSortDirection: "asc" | "desc" = "desc") {
       const matchesStatus = selectedStatus === "all"
         || (selectedStatus === "to_decide" && (guest.status === "registered" || (guest.status === "waitlisted" && guest.operatorDecision !== "waitlisted")))
         || (selectedStatus === "accepted" && acceptedStatuses.includes(guest.status))
-        || (selectedStatus === "registered" && registeredStatuses.includes(guest.status))
+        || (selectedStatus === "registered" && isRegisteredGuest(guest))
         || (selectedStatus === "invited" && hasInvitationEvidence(guest))
         || (selectedStatus === "first_registers" && isFirstRegister(guest))
         || (selectedStatus === "new_faces" && guest.status === "checked_in" && isFirstRegistration(guest))
@@ -7732,7 +7732,7 @@ function buildEventAnalytics(state, event) {
   if (!event) return empty;
 
   const registrationRows = event.guests
-    .filter((guest) => registeredStatuses.includes(guest.status))
+    .filter(isRegisteredGuest)
     .map((guest) => ({
       guest,
       person: getPerson(state, guest.personId),
@@ -8057,7 +8057,7 @@ function getPersonHistory(state, personId) {
 
 function personHistoryFromRecords(records) {
   const attendedRecords = records.filter(({ guest }) => guest.status === "checked_in" || Boolean(guest.checkedInAt));
-  const registeredRecords = records.filter(({ guest }) => registeredStatuses.includes(guest.status));
+  const registeredRecords = records.filter(({ guest }) => isRegisteredGuest(guest));
   const noShowRecords = records.filter(({ guest }) => guest.status === "no_show");
   const categories = {};
   attendedRecords.forEach(({ event }) => {
@@ -8110,7 +8110,7 @@ function eventStats(event) {
   event.guests.forEach((guest) => {
     if (["going", "checked_in"].includes(guest.status)) stats.confirmed += 1;
     if (acceptedStatuses.includes(guest.status)) stats.accepted += 1;
-    if (registeredStatuses.includes(guest.status)) stats.registered += 1;
+    if (isRegisteredGuest(guest)) stats.registered += 1;
     if (guest.status === "registered") stats.pending += 1;
     if (guest.status === "declined") stats.declined += 1;
     if (guest.status === "waitlisted") stats.waitlisted += 1;
@@ -8126,6 +8126,11 @@ function eventStats(event) {
 
 function hasInvitationEvidence(guest) {
   return Boolean(guest?.invitedAt) || guest?.status === "invited";
+}
+
+function isRegisteredGuest(guest) {
+  return registeredStatuses.includes(guest?.status)
+    || (guest?.status === "declined" && Boolean(guest?.registeredAt));
 }
 
 function guestAfterStatusChange(guest, status, changedAt) {
@@ -8148,7 +8153,7 @@ function adjustGuestStatusStats(stats, before, after) {
   const predicates = {
     confirmed: (guest) => ["going", "checked_in"].includes(guest?.status),
     accepted: (guest) => acceptedStatuses.includes(guest?.status),
-    registered: (guest) => registeredStatuses.includes(guest?.status),
+    registered: (guest) => isRegisteredGuest(guest),
     pending: (guest) => guest?.status === "registered",
     declined: (guest) => guest?.status === "declined",
     waitlisted: (guest) => guest?.status === "waitlisted",
@@ -8158,7 +8163,7 @@ function adjustGuestStatusStats(stats, before, after) {
     firstRegisters: (guest) => isFirstRegister(guest),
     newFaces: (guest) => guest?.status === "checked_in" && isFirstRegistration(guest),
     newReferrals: (guest) => Boolean(guest?.isReferred && guest?.isNewReferral && registeredStatuses.includes(guest?.status)),
-    referredRegistrations: (guest) => Boolean(guest?.isReferred && registeredStatuses.includes(guest?.status)),
+    referredRegistrations: (guest) => Boolean(guest?.isReferred && isRegisteredGuest(guest)),
     referredAccepted: (guest) => Boolean(guest?.isReferred && acceptedStatuses.includes(guest?.status)),
     referredCheckedIn: (guest) => Boolean(guest?.isReferred && guest?.status === "checked_in"),
     referredFirstRegisters: (guest) => Boolean(guest?.isReferred && isFirstRegister(guest)),

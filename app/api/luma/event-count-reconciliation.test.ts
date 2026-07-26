@@ -46,7 +46,7 @@ test("detects changes across the complete event guest-count fingerprint", () => 
     invitedNoResponse: 41,
     declined: 17,
     checkedIn: 92,
-    registered: 628,
+    registered: 645,
   }, live), []);
   assert.deepEqual(changedLiveEventCountKeys({
     accepted: 248,
@@ -56,7 +56,7 @@ test("detects changes across the complete event guest-count fingerprint", () => 
     declined: 16,
     checkedIn: 91,
     registered: 626,
-  }, live), ["accepted", "waitlisted", "pending", "invited", "declined", "checkedIn", "registered"]);
+  }, live), ["accepted", "waitlisted", "pending", "invited", "declined", "checkedIn"]);
 });
 
 test("does not force a refresh before wrapper summary stats are ready", () => {

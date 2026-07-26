@@ -123,7 +123,7 @@ export function guestStatusWhere(
     };
   }
   if (filter === "accepted") return { status: { in: GUEST_ACCEPTED_STATUSES } };
-  if (filter === "registered") return { status: { in: GUEST_REGISTERED_STATUSES } };
+  if (filter === "registered") return registeredGuestWhere();
   if (filter === "invited") return { OR: [{ invitedAt: { not: null } }, { status: "invited" }] };
   if (filter === "invited_no_response") return { status: "invited" };
   if (filter === "invited_accepted") {
@@ -236,7 +236,7 @@ export function summarizeGuests(guests: any[]) {
     total: guests.length,
     checkedIn: guests.filter((guest) => guest.status === "checked_in").length,
     accepted: guests.filter((guest) => GUEST_ACCEPTED_STATUSES.includes(guest.status)).length,
-    registered: guests.filter((guest) => GUEST_REGISTERED_STATUSES.includes(guest.status)).length,
+    registered: guests.filter(isRegisteredGuest).length,
     pending: guests.filter((guest) => guest.status === "registered").length,
     declined: guests.filter((guest) => guest.status === "declined").length,
     invited: guests.filter(hasInvitationEvidence).length,
@@ -305,7 +305,7 @@ function guestMatchesFilter(guest: any, filter: GuestFilter): boolean {
       || (guest.status === "waitlisted" && guest.operatorDecision !== "waitlisted");
   }
   if (filter === "accepted") return GUEST_ACCEPTED_STATUSES.includes(guest.status);
-  if (filter === "registered") return GUEST_REGISTERED_STATUSES.includes(guest.status);
+  if (filter === "registered") return isRegisteredGuest(guest);
   if (filter === "invited") return hasInvitationEvidence(guest);
   if (filter === "invited_no_response") return guest.status === "invited";
   if (filter === "invited_accepted") return hasInvitationEvidence(guest) && (Boolean(guest.checkedInAt) || ["checked_in", "no_show"].includes(guest.status));
@@ -325,6 +325,20 @@ function guestMatchesFilter(guest: any, filter: GuestFilter): boolean {
 
 export function hasInvitationEvidence(guest: any): boolean {
   return Boolean(guest?.invitedAt) || guest?.status === "invited";
+}
+
+export function isRegisteredGuest(guest: any): boolean {
+  return GUEST_REGISTERED_STATUSES.includes(guest?.status)
+    || (guest?.status === "declined" && Boolean(guest?.registeredAt));
+}
+
+export function registeredGuestWhere() {
+  return {
+    OR: [
+      { status: { in: GUEST_REGISTERED_STATUSES } },
+      { status: "declined", registeredAt: { not: null } },
+    ],
+  };
 }
 
 function invitationEvidenceWhere() {

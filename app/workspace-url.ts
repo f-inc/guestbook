@@ -24,6 +24,7 @@ const GUEST_STATUSES = new Set([
   "invited",
   "waitlisted",
   "first_registers",
+  "accepted_first_registers",
   "new_faces",
   "referrals",
   "new_referrals",

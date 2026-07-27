@@ -69,3 +69,8 @@ test("preserves analytics funnel guest filters in workspace URLs", () => {
     assert.match(buildWorkspaceUrlSearch("", state), new RegExp(`guest_status=${guestStatus}`));
   }
 });
+
+test("preserves accepted first-register drill-downs in workspace URLs", () => {
+  const state = parseWorkspaceUrl("?guest_status=accepted_first_registers");
+  assert.equal(state.guestStatus, "accepted_first_registers");
+});

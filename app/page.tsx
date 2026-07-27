@@ -7144,7 +7144,10 @@ function mergeLumaState(current, lumaData) {
 
   const existingEventsById = new Map(current.events.map((event) => [event.id, event]));
   const events = lumaData.events.map((event) => mergeIndexedEventState(existingEventsById.get(event.id), event));
-  const firstUpcomingEventId = upcomingEvents({ events })[0]?.id || sortEvents(events).at(-1)?.id || "";
+  const preferredEventId = preferredEventIdForView(events, current.filters.event);
+  const currentSelectedEvent = events.find((event) => event.id === current.selectedEventId);
+  const keepCurrentSelection = Boolean(currentSelectedEvent && eventMatchesView(currentSelectedEvent, current.filters.event));
+  const selectedEventId = keepCurrentSelection ? current.selectedEventId : preferredEventId;
 
   return normalizeState({
     ...current,
@@ -7152,12 +7155,14 @@ function mergeLumaState(current, lumaData) {
     loadedAt: lumaData.loadedAt,
     events,
     people,
-    selectedEventId: events.some((event) => event.id === current.selectedEventId) ? current.selectedEventId : firstUpcomingEventId,
-    selectedEventIds: (current.selectedEventIds || []).filter((eventId) => events.some((event) => event.id === eventId)),
+    selectedEventId,
+    selectedEventIds: keepCurrentSelection
+      ? (current.selectedEventIds || []).filter((eventId) => events.some((event) => event.id === eventId))
+      : selectedEventId ? [selectedEventId] : [],
     selectedPersonId: people.some((person) => person.id === current.selectedPersonId) ? current.selectedPersonId : people[0]?.id || "",
     invite: {
       ...current.invite,
-      targetEventId: events.some((event) => event.id === current.invite.targetEventId) ? current.invite.targetEventId : firstUpcomingEventId,
+      targetEventId: events.some((event) => event.id === current.invite.targetEventId) ? current.invite.targetEventId : preferredEventIdForView(events, "upcoming"),
       sourceEventId: events.some((event) => event.id === current.invite.sourceEventId) ? current.invite.sourceEventId : events[0]?.id || "",
     },
   });
@@ -7256,7 +7261,7 @@ function normalizeState(value) {
   ));
   next.filters.guestTags = sortedTags(unique(Array.isArray(next.filters.guestTags) ? next.filters.guestTags : []));
   if (!next.events.some((event) => event.id === next.selectedEventId)) {
-    next.selectedEventId = sortEvents(next.events)[0]?.id || "";
+    next.selectedEventId = preferredEventIdForView(next.events, next.filters.event);
   }
   next.selectedEventIds = unique(Array.isArray(next.selectedEventIds) ? next.selectedEventIds : [])
     .filter((eventId) => next.events.some((event) => event.id === eventId));
@@ -7293,12 +7298,12 @@ function visibleEvents(state, now = Date.now()) {
 }
 
 function initialEventWindow(events, filter, selectedEventId = "") {
+  if (filter !== "all") return { start: 0, end: Math.min(events.length, EVENT_PAGE_SIZE) };
   const selectedIndex = selectedEventId ? events.findIndex((event) => event.id === selectedEventId) : -1;
   if (selectedIndex >= 0) {
     const start = Math.max(0, Math.min(selectedIndex - 4, events.length - EVENT_PAGE_SIZE));
     return { start, end: Math.min(events.length, start + EVENT_PAGE_SIZE) };
   }
-  if (filter !== "all") return { start: 0, end: Math.min(events.length, EVENT_PAGE_SIZE) };
   if (!events.length) return { start: 0, end: 0 };
 
   const upcomingIndex = events.findIndex(isUpcoming);
@@ -8331,7 +8336,28 @@ function pastEvents(state) {
 }
 
 function sortEvents(events) {
-  return [...events].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+  return [...events].sort((a, b) => eventSortTime(a) - eventSortTime(b));
+}
+
+function eventSortTime(event) {
+  const startsAt = new Date(event?.startsAt || "").getTime();
+  if (Number.isFinite(startsAt)) return startsAt;
+  const date = new Date(`${String(event?.date || "").slice(0, 10)}T12:00:00`).getTime();
+  return Number.isFinite(date) ? date : Number.MAX_SAFE_INTEGER;
+}
+
+function eventMatchesView(event, view, now = Date.now()) {
+  if (view === "upcoming") return isUpcoming(event, now);
+  if (view === "past") return !isUpcoming(event, now);
+  return true;
+}
+
+function preferredEventIdForView(events, view, now = Date.now()) {
+  const ordered = sortEvents(events);
+  if (view === "past") return ordered.filter((event) => !isUpcoming(event, now)).at(-1)?.id || "";
+  const nearestUpcoming = ordered.find((event) => isUpcoming(event, now))?.id || "";
+  if (view === "upcoming") return nearestUpcoming || ordered.at(-1)?.id || "";
+  return nearestUpcoming || ordered.at(-1)?.id || "";
 }
 
 function isUpcoming(event, now = Date.now()) {

@@ -7,6 +7,8 @@ test("normalizes an explicit all-matching guest query", () => {
     guestStatus: "registered",
     guestSearch: " founder ",
     guestTags: ["Referred", "New"],
+    guestTagMode: "all",
+    guestExcludedTags: ["Flaker"],
     guestHasNotes: true,
     guestAttendedGreaterThan: 2,
   });
@@ -17,12 +19,16 @@ test("normalizes an explicit all-matching guest query", () => {
   });
   assert.equal(query.hasNotes, true);
   assert.equal(query.attendedGreaterThan, 2);
+  assert.equal(query.tagMode, "all");
+  assert.deepEqual(query.excludedTags, ["Flaker"]);
 });
 
 test("fails closed when an all-matching query is missing or malformed", () => {
   assert.throws(() => parseAllMatchingGuestQuery({}), /valid guest status/i);
   assert.throws(() => parseAllMatchingGuestQuery({ guestStatus: "everything" }), /valid guest status/i);
   assert.throws(() => parseAllMatchingGuestQuery({ guestStatus: "all", guestTags: "Referred" }), /array/i);
+  assert.throws(() => parseAllMatchingGuestQuery({ guestStatus: "all", guestTagMode: "none" }), /any or all/i);
+  assert.throws(() => parseAllMatchingGuestQuery({ guestStatus: "all", guestExcludedTags: "Flaker" }), /array/i);
 });
 
 test("normalizes and validates all-matching event ids", () => {

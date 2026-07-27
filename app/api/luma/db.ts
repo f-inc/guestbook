@@ -1202,6 +1202,8 @@ export async function listIndexedEventGuests(
       filter: query.filter,
       search: query.search,
       tags: query.tags,
+      tagMode: query.tagMode || "any",
+      excludedTags: query.excludedTags || [],
       hasNotes: Boolean(query.hasNotes),
       attendedGreaterThan: query.attendedGreaterThan ?? null,
     },
@@ -1380,6 +1382,8 @@ export async function listIndexedMultiEventGuests(
       filter: query.filter,
       search: query.search,
       tags: query.tags,
+      tagMode: query.tagMode || "any",
+      excludedTags: query.excludedTags || [],
       hasNotes: Boolean(query.hasNotes),
       attendedGreaterThan: query.attendedGreaterThan ?? null,
     },
@@ -1452,7 +1456,15 @@ function indexedMultiEventGuestPageWhereSql(query: GuestListQuery) {
     predicates.push(Prisma.sql`EXISTS (
       SELECT 1 FROM luma_people AS tag_person
       WHERE tag_person.person_id = guest.person_id
-        AND (${Prisma.join(tagPredicates, " OR ")})
+        AND (${Prisma.join(tagPredicates, query.tagMode === "all" ? " AND " : " OR ")})
+    )`);
+  }
+  if (query.excludedTags?.length) {
+    const excludedTagPredicates = query.excludedTags.map((tag) => Prisma.sql`excluded_tag_person.tags @> CAST(${JSON.stringify([tag])} AS jsonb)`);
+    predicates.push(Prisma.sql`NOT EXISTS (
+      SELECT 1 FROM luma_people AS excluded_tag_person
+      WHERE excluded_tag_person.person_id = guest.person_id
+        AND (${Prisma.join(excludedTagPredicates, " OR ")})
     )`);
   }
 
@@ -1549,7 +1561,20 @@ function indexedGuestPageWhereSql(
         SELECT 1
         FROM luma_people AS tag_person
         WHERE tag_person.person_id = guest.person_id
-          AND (${Prisma.join(tagPredicates, " OR ")})
+          AND (${Prisma.join(tagPredicates, query.tagMode === "all" ? " AND " : " OR ")})
+      )
+    `);
+  }
+  if (query.excludedTags?.length) {
+    const excludedTagPredicates = query.excludedTags.map((tag) => Prisma.sql`
+      excluded_tag_person.tags @> CAST(${JSON.stringify([tag])} AS jsonb)
+    `);
+    predicates.push(Prisma.sql`
+      NOT EXISTS (
+        SELECT 1
+        FROM luma_people AS excluded_tag_person
+        WHERE excluded_tag_person.person_id = guest.person_id
+          AND (${Prisma.join(excludedTagPredicates, " OR ")})
       )
     `);
   }

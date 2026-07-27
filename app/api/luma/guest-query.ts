@@ -44,6 +44,8 @@ export type GuestListQuery = {
   filter: GuestFilter;
   search: string;
   tags: string[];
+  tagMode?: "any" | "all";
+  excludedTags?: string[];
   sortDirection?: "asc" | "desc";
   hasNotes?: boolean;
   attendedGreaterThan?: number | null;
@@ -67,6 +69,8 @@ export function parseGuestListQuery(params: URLSearchParams): GuestListQuery {
     filter,
     search: (params.get("guest_search") || "").trim().slice(0, 120),
     tags: parseTagFilters(params.getAll("guest_tag")),
+    tagMode: params.get("guest_tag_mode") === "all" ? "all" : "any",
+    excludedTags: parseTagFilters(params.getAll("guest_tag_not")),
     sortDirection: params.get("guest_sort") === "asc" ? "asc" : "desc",
     ...(hasNotes ? { hasNotes: true } : {}),
     ...(attendedGreaterThan === null ? {} : { attendedGreaterThan }),
@@ -95,7 +99,7 @@ export function eventGuestWhere(
   const filters = [
     guestStatusWhere(eventId, query.filter, boundary),
     guestSearchWhere(query.search),
-    guestTagsWhere(query.tags),
+    guestTagsWhere(query.tags, query.tagMode, query.excludedTags),
     query.hasNotes ? { person: { is: { crmNotes: { not: "" } } } } : null,
   ].filter(Boolean);
   return {
@@ -196,7 +200,7 @@ export function filterGuestPayload(payload: any, query: GuestListQuery) {
   const filteredRows = rows.filter(({ guest, person }: any) => {
     return guestMatchesFilter(guest, query.filter)
       && guestMatchesSearch(guest, person, query.search)
-      && guestMatchesTags(person, query.tags)
+      && guestMatchesTags(person, query.tags, query.tagMode, query.excludedTags)
       && (!query.hasNotes || Boolean(person.crmNotes?.trim()))
       && (query.attendedGreaterThan == null || Number(guest.eventCounts?.attended) > query.attendedGreaterThan);
   });
@@ -226,6 +230,8 @@ export function filterGuestPayload(payload: any, query: GuestListQuery) {
       filter: query.filter,
       search: query.search,
       tags: query.tags,
+      tagMode: query.tagMode || "any",
+      excludedTags: query.excludedTags || [],
       hasNotes: query.hasNotes,
       attendedGreaterThan: query.attendedGreaterThan,
     },
@@ -293,13 +299,23 @@ function guestSearchWhere(search: string): Record<string, any> | null {
   };
 }
 
-function guestTagsWhere(tags: string[]): Record<string, any> | null {
-  if (!tags.length) return null;
-  return {
-    OR: tags.map((tag) => ({
-      person: { is: { tags: { array_contains: [tag] } } },
-    })),
-  };
+function guestTagsWhere(
+  tags: string[],
+  tagMode: "any" | "all" = "any",
+  excludedTags: string[] = [],
+): Record<string, any> | null {
+  const tagPredicate = (tag: string) => ({
+    person: { is: { tags: { array_contains: [tag] } } },
+  });
+  const predicates: Record<string, any>[] = [];
+  if (tags.length) {
+    predicates.push({
+      [tagMode === "all" ? "AND" : "OR"]: tags.map(tagPredicate),
+    });
+  }
+  predicates.push(...excludedTags.map((tag) => ({ NOT: tagPredicate(tag) })));
+  if (!predicates.length) return null;
+  return predicates.length === 1 ? predicates[0] : { AND: predicates };
 }
 
 function guestMatchesFilter(guest: any, filter: GuestFilter): boolean {
@@ -390,10 +406,18 @@ function guestMatchesSearch(guest: any, person: any, search: string): boolean {
     .includes(query);
 }
 
-function guestMatchesTags(person: any, tags: string[]): boolean {
-  if (!tags.length) return true;
+function guestMatchesTags(
+  person: any,
+  tags: string[],
+  tagMode: "any" | "all" = "any",
+  excludedTags: string[] = [],
+): boolean {
   const personTags = new Set((Array.isArray(person.tags) ? person.tags : []).map((tag: unknown) => String(tag).toLocaleLowerCase()));
-  return tags.some((tag) => personTags.has(tag.toLocaleLowerCase()));
+  if (excludedTags.some((tag) => personTags.has(tag.toLocaleLowerCase()))) return false;
+  if (!tags.length) return true;
+  return tagMode === "all"
+    ? tags.every((tag) => personTags.has(tag.toLocaleLowerCase()))
+    : tags.some((tag) => personTags.has(tag.toLocaleLowerCase()));
 }
 
 function boundedInteger(value: string | null, fallback: number, min: number, max: number): number {

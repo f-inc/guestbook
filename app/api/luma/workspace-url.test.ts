@@ -12,9 +12,20 @@ test("parses workspace navigation state from the URL", () => {
     guestStatus: "accepted",
     guestSearch: "ada",
     guestTags: ["VIP", "Builder"],
+    guestTagMode: "any",
+    guestExcludedTags: [],
     guestPage: 3,
     profileId: "person-2",
   });
+});
+
+test("persists ALL tag matching and excluded tags", () => {
+  const state = parseWorkspaceUrl("?guest_tag=Builder&guest_tag=Referred&guest_tag_mode=all&guest_tag_not=Flaker");
+  assert.equal(state.guestTagMode, "all");
+  assert.deepEqual(state.guestExcludedTags, ["Flaker"]);
+  const search = buildWorkspaceUrlSearch("", state);
+  assert.match(search, /guest_tag_mode=all/);
+  assert.match(search, /guest_tag_not=Flaker/);
 });
 
 test("parses ordered multi-event selections and keeps the last event primary", () => {

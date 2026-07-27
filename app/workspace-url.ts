@@ -7,6 +7,8 @@ export type WorkspaceUrlState = {
   guestStatus: string;
   guestSearch: string;
   guestTags: string[];
+  guestTagMode?: "any" | "all";
+  guestExcludedTags?: string[];
   guestHasNotes?: boolean;
   guestAttendedGreaterThan?: number | null;
   guestPage: number;
@@ -48,6 +50,8 @@ const WORKSPACE_PARAMS = [
   "guest_status",
   "guest_search",
   "guest_tag",
+  "guest_tag_mode",
+  "guest_tag_not",
   "guest_has_notes",
   "guest_attended_gt",
   "guest_page",
@@ -73,6 +77,8 @@ export function parseWorkspaceUrl(search: string): WorkspaceUrlState {
     guestStatus: GUEST_STATUSES.has(guestStatus) ? guestStatus : "all",
     guestSearch: boundedText(params.get("guest_search"), 120),
     guestTags: unique(params.getAll("guest_tag").map((tag) => boundedText(tag, 40)).filter(Boolean)).slice(0, 20),
+    guestTagMode: params.get("guest_tag_mode") === "all" ? "all" : "any",
+    guestExcludedTags: unique(params.getAll("guest_tag_not").map((tag) => boundedText(tag, 40)).filter(Boolean)).slice(0, 20),
     ...(guestHasNotes ? { guestHasNotes: true } : {}),
     ...(guestAttendedGreaterThan === null ? {} : { guestAttendedGreaterThan }),
     guestPage: Number.isFinite(requestedPage) ? Math.min(100, Math.max(1, requestedPage)) : 1,
@@ -92,6 +98,8 @@ export function buildWorkspaceUrlSearch(currentSearch: string, state: WorkspaceU
   if (state.guestStatus !== "all") params.set("guest_status", state.guestStatus);
   if (state.guestSearch) params.set("guest_search", state.guestSearch);
   unique(state.guestTags).forEach((tag) => params.append("guest_tag", tag));
+  if (state.guestTagMode === "all") params.set("guest_tag_mode", "all");
+  unique(state.guestExcludedTags || []).forEach((tag) => params.append("guest_tag_not", tag));
   if (state.guestHasNotes) params.set("guest_has_notes", "1");
   if (state.guestAttendedGreaterThan != null) params.set("guest_attended_gt", String(state.guestAttendedGreaterThan));
   if (state.guestPage > 1) params.set("guest_page", String(Math.floor(state.guestPage)));

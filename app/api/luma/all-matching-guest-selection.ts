@@ -5,6 +5,8 @@ type AllMatchingGuestQueryInput = {
   guestStatus?: unknown;
   guestSearch?: unknown;
   guestTags?: unknown;
+  guestTagMode?: unknown;
+  guestExcludedTags?: unknown;
   guestHasNotes?: unknown;
   guestAttendedGreaterThan?: unknown;
 };
@@ -22,6 +24,15 @@ export function parseAllMatchingGuestQuery(input: AllMatchingGuestQueryInput = {
   if (Array.isArray(input.guestTags) && input.guestTags.some((tag) => typeof tag !== "string")) {
     throw badRequest("Every guest tag must be a string.");
   }
+  if (input.guestTagMode !== undefined && !["any", "all"].includes(String(input.guestTagMode))) {
+    throw badRequest("Guest tag mode must be any or all.");
+  }
+  if (input.guestExcludedTags !== undefined && !Array.isArray(input.guestExcludedTags)) {
+    throw badRequest("Excluded guest tags must be an array.");
+  }
+  if (Array.isArray(input.guestExcludedTags) && input.guestExcludedTags.some((tag) => typeof tag !== "string")) {
+    throw badRequest("Every excluded guest tag must be a string.");
+  }
   if (input.guestHasNotes !== undefined && typeof input.guestHasNotes !== "boolean") {
     throw badRequest("Guest notes filter must be a boolean.");
   }
@@ -38,6 +49,8 @@ export function parseAllMatchingGuestQuery(input: AllMatchingGuestQueryInput = {
     guest_summary: "0",
   });
   for (const tag of Array.isArray(input.guestTags) ? input.guestTags : []) params.append("guest_tag", tag);
+  if (input.guestTagMode === "all") params.set("guest_tag_mode", "all");
+  for (const tag of Array.isArray(input.guestExcludedTags) ? input.guestExcludedTags : []) params.append("guest_tag_not", tag);
   if (input.guestHasNotes) params.set("guest_has_notes", "1");
   if (input.guestAttendedGreaterThan !== undefined && input.guestAttendedGreaterThan !== null) {
     params.set("guest_attended_gt", String(input.guestAttendedGreaterThan));

@@ -14,6 +14,8 @@ type BulkManualTagMutationInput = {
   guestStatus?: unknown;
   guestSearch?: unknown;
   guestTags?: unknown;
+  guestTagMode?: unknown;
+  guestExcludedTags?: unknown;
   guestHasNotes?: unknown;
   guestAttendedGreaterThan?: unknown;
   people?: unknown;

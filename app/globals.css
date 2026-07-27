@@ -807,7 +807,7 @@
   }
 
   .tag-filter-popover {
-    @apply absolute right-0 top-[calc(100%+6px)] z-30 grid max-h-80 w-72 overflow-x-hidden overflow-y-auto rounded-lg border border-border bg-surface p-2 shadow-xl;
+    @apply absolute right-0 top-[calc(100%+6px)] z-30 grid max-h-96 w-[26rem] overflow-x-hidden overflow-y-auto rounded-lg border border-border bg-surface p-2 shadow-xl;
   }
 
   .status-filter-popover {
@@ -857,6 +857,22 @@
     @apply sticky -top-2 z-10 mb-1 grid gap-1.5 border-b border-border bg-surface px-1 pb-2 pt-2;
   }
 
+  .tag-filter-mode {
+    @apply flex items-center justify-between gap-3 rounded-md bg-canvas px-2.5 py-2 text-[11px] font-medium text-muted;
+  }
+
+  .tag-filter-mode > div {
+    @apply inline-flex rounded-md border border-border bg-surface p-0.5;
+  }
+
+  .tag-filter-mode button {
+    @apply min-w-11 rounded border-0 bg-transparent px-2 py-1 text-[11px] font-semibold text-muted transition hover:text-ink;
+  }
+
+  .tag-filter-mode button.active {
+    @apply bg-brand text-white shadow-sm;
+  }
+
   .filter-popover-search {
     @apply flex h-9 items-center gap-2 rounded-md border border-border bg-canvas px-2.5 text-muted focus-within:border-brand focus-within:ring-2 focus-within:ring-brand/10;
   }
@@ -866,20 +882,39 @@
   }
 
   .tag-filter-option {
-    @apply flex min-h-10 min-w-0 cursor-pointer items-center gap-2.5 rounded-md px-2.5 py-2 text-sm font-medium text-ink hover:bg-subtle;
+    @apply flex min-h-11 min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium text-ink hover:bg-subtle;
   }
 
-  .tag-filter-option:has(input:checked) {
-    @apply bg-brand-soft text-brand;
+  .tag-filter-option.included {
+    @apply bg-brand-soft/60;
   }
 
-  .tag-filter-option input,
+  .tag-filter-option.excluded {
+    @apply bg-danger-soft/70;
+  }
+
   .tag-option input {
     @apply m-0 size-4 w-4 shrink-0 accent-brand;
   }
 
-  .tag-filter-option > span:last-child {
+  .tag-filter-option-name {
     @apply min-w-0 flex-1 truncate;
+  }
+
+  .tag-filter-option-actions {
+    @apply inline-flex shrink-0 gap-1;
+  }
+
+  .tag-filter-choice {
+    @apply inline-flex h-7 items-center gap-1 rounded-md border border-border bg-surface px-2 text-[10px] font-semibold text-muted transition hover:border-border-strong hover:text-ink;
+  }
+
+  .tag-filter-choice.include.active {
+    @apply border-brand bg-brand text-white;
+  }
+
+  .tag-filter-choice.exclude.active {
+    @apply border-danger bg-danger text-white;
   }
 
   .tag-filter-empty {

@@ -56,6 +56,8 @@ test("accepts an all-matching bulk tag mutation without person ids", () => {
     guestStatus: "registered",
     guestSearch: "founder",
     guestTags: ["Referred"],
+    guestTagMode: "all",
+    guestExcludedTags: ["Flaker"],
     tagIds: ["tag-1"],
     removed: false,
   });
@@ -67,6 +69,8 @@ test("accepts an all-matching bulk tag mutation without person ids", () => {
     search: "founder",
     tags: ["Referred"],
   });
+  assert.equal(mutation.query.tagMode, "all");
+  assert.deepEqual(mutation.query.excludedTags, ["Flaker"]);
 });
 
 test("rejects malformed or unbounded bulk tag mutations", () => {

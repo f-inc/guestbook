@@ -185,6 +185,8 @@ const initialState = {
     guestStatus: "all",
     guestSearch: "",
     guestTags: [],
+    guestTagMode: "any",
+    guestExcludedTags: [],
     guestHasNotes: false,
     guestAttendedGreaterThan: "",
     globalSearch: "",
@@ -315,6 +317,8 @@ export default function Home() {
         guestStatus: urlState.guestStatus,
         guestSearch: urlState.guestSearch,
         guestTags: urlState.guestTags,
+        guestTagMode: urlState.guestTagMode || "any",
+        guestExcludedTags: urlState.guestExcludedTags || [],
         guestHasNotes: Boolean(urlState.guestHasNotes),
         guestAttendedGreaterThan: urlState.guestAttendedGreaterThan == null ? "" : String(urlState.guestAttendedGreaterThan),
       },
@@ -675,7 +679,7 @@ export default function Home() {
     () => workspaceEventGuests(state, selectedEvents, guestDateSortDirection),
     [state, selectedEventIdsKey, guestDateSortDirection],
   );
-  const guestTagFilterKey = state.filters.guestTags.join("\u0000");
+  const guestTagFilterKey = `${state.filters.guestTagMode}:${state.filters.guestTags.join("\u0000")}:${state.filters.guestExcludedTags.join("\u0000")}`;
   const multiEventGuestQueryKey = `${multiEventStatsKey}:${state.filters.guestStatus}:${debouncedGuestSearch}:${guestTagFilterKey}:${state.filters.guestHasNotes ? 1 : 0}:${state.filters.guestAttendedGreaterThan}:${guestDateSortDirection}`;
   const normalizedUniversalQuery = universalQuery.trim().toLocaleLowerCase();
   const activeUniversalPeopleSearch = universalPeopleSearch.query === normalizedUniversalQuery ? universalPeopleSearch : null;
@@ -691,6 +695,7 @@ export default function Home() {
   const guestTableColumnCount = 9 + Number(showGuestGroups) + Number(showGuestReferrer);
   const hasActiveGuestFilters = state.filters.guestStatus !== "all"
     || state.filters.guestTags.length > 0
+    || state.filters.guestExcludedTags.length > 0
     || state.filters.guestHasNotes
     || state.filters.guestAttendedGreaterThan !== ""
     || Boolean(state.filters.guestSearch.trim());
@@ -746,6 +751,8 @@ export default function Home() {
       guestStatus: state.filters.guestStatus,
       guestSearch: state.filters.guestSearch.trim(),
       guestTags: state.filters.guestTags,
+      guestTagMode: state.filters.guestTagMode === "all" ? "all" : "any",
+      guestExcludedTags: state.filters.guestExcludedTags,
       guestHasNotes: state.filters.guestHasNotes,
       guestAttendedGreaterThan: state.filters.guestAttendedGreaterThan === ""
         ? null
@@ -1112,6 +1119,8 @@ export default function Home() {
         draft.filters.guestStatus = "all";
         draft.filters.guestSearch = "";
         draft.filters.guestTags = [];
+        draft.filters.guestTagMode = "any";
+        draft.filters.guestExcludedTags = [];
         draft.filters.guestHasNotes = false;
         draft.filters.guestAttendedGreaterThan = "";
       }
@@ -1125,7 +1134,7 @@ export default function Home() {
   };
 
   const setFilter = (key, value) => {
-    if (["guestStatus", "guestSearch", "guestTags"].includes(key)) {
+    if (["guestStatus", "guestSearch", "guestTags", "guestTagMode", "guestExcludedTags"].includes(key)) {
       setGuestPageTarget(1);
       setAllMatchingGuestsSelected(false);
       setSelectedGuestIds(new Set());
@@ -1145,6 +1154,8 @@ export default function Home() {
     updateState((draft) => {
       draft.filters.guestStatus = "all";
       draft.filters.guestTags = [];
+      draft.filters.guestTagMode = "any";
+      draft.filters.guestExcludedTags = [];
       draft.filters.guestSearch = "";
       draft.filters.guestHasNotes = false;
       draft.filters.guestAttendedGreaterThan = "";
@@ -1167,12 +1178,14 @@ export default function Home() {
       status = state.filters.guestStatus,
       search = debouncedGuestSearch,
       tags = state.filters.guestTags,
+      tagMode = state.filters.guestTagMode === "all" ? "all" : "any",
+      excludedTags = state.filters.guestExcludedTags,
       hasNotes = state.filters.guestHasNotes,
       attendedGreaterThan = state.filters.guestAttendedGreaterThan,
       cursor = "",
       priority = false,
       background = false,
-    }: { force?: boolean; append?: boolean; status?: string; search?: string; tags?: string[]; hasNotes?: boolean; attendedGreaterThan?: string; cursor?: string; priority?: boolean; background?: boolean } = {},
+    }: { force?: boolean; append?: boolean; status?: string; search?: string; tags?: string[]; tagMode?: "any" | "all"; excludedTags?: string[]; hasNotes?: boolean; attendedGreaterThan?: string; cursor?: string; priority?: boolean; background?: boolean } = {},
   ) => {
     const event = getEvent(state, eventId);
     if (!event) {
@@ -1198,6 +1211,8 @@ export default function Home() {
     if (event.startsAt) params.set("event_starts_at", event.startsAt);
     if (event.date) params.set("event_date", String(event.date).slice(0, 10));
     tags.forEach((tag) => params.append("guest_tag", tag));
+    if (tagMode === "all") params.set("guest_tag_mode", "all");
+    excludedTags.forEach((tag) => params.append("guest_tag_not", tag));
     if (nextCursor) params.set("guest_cursor", nextCursor);
     if (!force && event.guestStats) params.set("guest_summary", "0");
     if (priority && !force) params.set("guest_mode", "page");
@@ -1393,17 +1408,19 @@ export default function Home() {
       status = state.filters.guestStatus,
       search = debouncedGuestSearch,
       tags = state.filters.guestTags,
+      tagMode = state.filters.guestTagMode === "all" ? "all" : "any",
+      excludedTags = state.filters.guestExcludedTags,
       hasNotes = state.filters.guestHasNotes,
       attendedGreaterThan = state.filters.guestAttendedGreaterThan,
       cursor = "",
-    }: { append?: boolean; status?: string; search?: string; tags?: string[]; hasNotes?: boolean; attendedGreaterThan?: string; cursor?: string } = {},
+    }: { append?: boolean; status?: string; search?: string; tags?: string[]; tagMode?: "any" | "all"; excludedTags?: string[]; hasNotes?: boolean; attendedGreaterThan?: string; cursor?: string } = {},
   ) => {
     const eventIds = selectedWorkspaceEvents(state)
       .filter((event) => event.source === "luma")
       .map((event) => event.id);
     if (eventIds.length < 2) return;
 
-    const queryKey = `${[...eventIds].sort().join("\u0000")}:${status}:${search}:${tags.join("\u0000")}:${hasNotes ? 1 : 0}:${attendedGreaterThan}`;
+    const queryKey = `${[...eventIds].sort().join("\u0000")}:${status}:${search}:${tagMode}:${tags.join("\u0000")}:${excludedTags.join("\u0000")}:${hasNotes ? 1 : 0}:${attendedGreaterThan}`;
     if (append && (multiEventGuestState.loading || !cursor || (multiEventGuestAbortRef.current && !multiEventGuestAbortRef.current.signal.aborted))) return;
     multiEventGuestAbortRef.current?.abort();
     const controller = new AbortController();
@@ -1422,6 +1439,8 @@ export default function Home() {
     if (hasNotes) params.set("guest_has_notes", "1");
     if (attendedGreaterThan !== "") params.set("guest_attended_gt", attendedGreaterThan);
     tags.forEach((tag) => params.append("guest_tag", tag));
+    if (tagMode === "all") params.set("guest_tag_mode", "all");
+    excludedTags.forEach((tag) => params.append("guest_tag_not", tag));
     if (cursor) params.set("guest_cursor", cursor);
 
     setMultiEventGuestState((current) => ({
@@ -1672,6 +1691,7 @@ export default function Home() {
     const hasActiveGuestQuery = state.filters.guestStatus !== "all"
       || Boolean(debouncedGuestSearch.trim())
       || state.filters.guestTags.length > 0
+      || state.filters.guestExcludedTags.length > 0
       || state.filters.guestHasNotes
       || state.filters.guestAttendedGreaterThan !== "";
     if (hasActiveGuestQuery) return;
@@ -1766,6 +1786,8 @@ export default function Home() {
       draft.filters.guestStatus = filter;
       draft.filters.guestSearch = "";
       draft.filters.guestTags = [];
+      draft.filters.guestTagMode = "any";
+      draft.filters.guestExcludedTags = [];
     });
     setActiveEventTab("overview");
   };
@@ -2212,6 +2234,8 @@ export default function Home() {
     guestStatus: state.filters.guestStatus,
     guestSearch: debouncedGuestSearch,
     guestTags: [...state.filters.guestTags],
+    guestTagMode: state.filters.guestTagMode,
+    guestExcludedTags: [...state.filters.guestExcludedTags],
     guestHasNotes: state.filters.guestHasNotes,
     guestAttendedGreaterThan: state.filters.guestAttendedGreaterThan === ""
       ? null
@@ -2296,6 +2320,8 @@ export default function Home() {
             guestStatus: selection?.guestStatus,
             guestSearch: selection?.guestSearch,
             guestTags: selection?.guestTags,
+            guestTagMode: selection?.guestTagMode,
+            guestExcludedTags: selection?.guestExcludedTags,
             guestHasNotes: selection?.guestHasNotes,
             guestAttendedGreaterThan: selection?.guestAttendedGreaterThan,
           } : {
@@ -2427,6 +2453,10 @@ export default function Home() {
           guestStatus: selection?.guestStatus,
           guestSearch: selection?.guestSearch,
           guestTags: selection?.guestTags,
+          guestTagMode: selection?.guestTagMode,
+          guestExcludedTags: selection?.guestExcludedTags,
+          guestHasNotes: selection?.guestHasNotes,
+          guestAttendedGreaterThan: selection?.guestAttendedGreaterThan,
           tagIds,
           removed,
         } : { bulk: true, people, tagIds, removed }),
@@ -2461,7 +2491,7 @@ export default function Home() {
       lastSelectedGuestIdRef.current = "";
       setAllMatchingGuestsSelected(false);
       setSelectedGuestIds(new Set());
-      if (state.filters.guestTags.length) {
+      if (state.filters.guestTags.length || state.filters.guestExcludedTags.length) {
         if (multiEventMode) {
           await loadMultiEventGuests({
             status: state.filters.guestStatus,
@@ -3222,8 +3252,12 @@ export default function Home() {
                     />
                     <TagFilter
                       definitions={state.tagDefinitions}
-                      selected={state.filters.guestTags}
-                      onChange={(tags) => setFilter("guestTags", tags)}
+                      included={state.filters.guestTags}
+                      excluded={state.filters.guestExcludedTags}
+                      mode={state.filters.guestTagMode}
+                      onIncludedChange={(tags) => setFilter("guestTags", tags)}
+                      onExcludedChange={(tags) => setFilter("guestExcludedTags", tags)}
+                      onModeChange={(mode) => setFilter("guestTagMode", mode)}
                     />
                     <GuestAttributeFilter
                       hasNotes={state.filters.guestHasNotes}
@@ -4420,25 +4454,60 @@ function GuestAttributeFilter({ hasNotes, attendedGreaterThan, onHasNotesChange,
   );
 }
 
-function TagFilter({ definitions, selected, onChange }) {
+function TagFilter({
+  definitions,
+  included,
+  excluded,
+  mode,
+  onIncludedChange,
+  onExcludedChange,
+  onModeChange,
+}) {
   const menuRef = useDismissableDetails();
   const searchRef = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const tags = definitions.map((tag) => tag.name);
-  const selectedTags = Array.isArray(selected) ? selected : [];
-  const selectedSet = new Set(selectedTags);
+  const includedTags = Array.isArray(included) ? included : [];
+  const excludedTags = Array.isArray(excluded) ? excluded : [];
+  const includedSet = new Set(includedTags);
+  const excludedSet = new Set(excludedTags);
+  const activeCount = includedTags.length + excludedTags.length;
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const filteredTags = tags
     .map((tag, index) => ({ tag, index }))
     .filter(({ tag }) => tagDisplayName(tag).toLocaleLowerCase().includes(normalizedQuery))
-    .sort((left, right) => Number(selectedSet.has(right.tag)) - Number(selectedSet.has(left.tag)) || left.index - right.index)
+    .sort((left, right) => {
+      const priority = (tag) => includedSet.has(tag) ? 0 : excludedSet.has(tag) ? 1 : 2;
+      return priority(left.tag) - priority(right.tag) || left.index - right.index;
+    })
     .map(({ tag }) => tag);
-  const primaryLabel = selectedTags.length ? tagDisplayName(selectedTags[0]) : "All tags";
-  const remainingCount = Math.max(0, selectedTags.length - 1);
-  const toggleTag = (tag) => onChange(selectedSet.has(tag)
-    ? selectedTags.filter((item) => item !== tag)
-    : sortedTags(unique([...selectedTags, tag])));
+  const primaryLabel = includedTags.length
+    ? tagDisplayName(includedTags[0])
+    : excludedTags.length
+      ? `Not ${tagDisplayName(excludedTags[0])}`
+      : "All tags";
+  const remainingCount = Math.max(0, activeCount - 1);
+  const setTagState = (tag, nextState: "include" | "exclude" | "off") => {
+    onIncludedChange(nextState === "include"
+      ? sortedTags(unique([...includedTags, tag]))
+      : includedTags.filter((item) => item !== tag));
+    onExcludedChange(nextState === "exclude"
+      ? sortedTags(unique([...excludedTags, tag]))
+      : excludedTags.filter((item) => item !== tag));
+  };
+  const cycleTag = (tag) => setTagState(
+    tag,
+    includedSet.has(tag) ? "exclude" : excludedSet.has(tag) ? "off" : "include",
+  );
+  const clear = () => {
+    onIncludedChange([]);
+    onExcludedChange([]);
+  };
+  const title = [
+    includedTags.length ? `Include (${mode === "all" ? "all" : "any"}): ${includedTags.map(tagDisplayName).join(", ")}` : "",
+    excludedTags.length ? `Exclude: ${excludedTags.map(tagDisplayName).join(", ")}` : "",
+  ].filter(Boolean).join(". ") || "All tags";
 
   useEffect(() => {
     setActiveIndex((current) => Math.min(current, Math.max(0, filteredTags.length - 1)));
@@ -4448,7 +4517,7 @@ function TagFilter({ definitions, selected, onChange }) {
     <div className="tag-filter-control">
       <span>Tags</span>
       <details
-        className={`tag-filter-menu toolbar-filter-menu ${selectedTags.length ? "filter-active" : ""}`}
+        className={`tag-filter-menu toolbar-filter-menu ${activeCount ? "filter-active" : ""}`}
         ref={menuRef}
         onToggle={(event) => {
           if (!event.currentTarget.open) return;
@@ -4464,11 +4533,11 @@ function TagFilter({ definitions, selected, onChange }) {
           event.currentTarget.querySelector("summary")?.focus();
         }}
       >
-        <summary title={selectedTags.length ? selectedTags.map(tagDisplayName).join(", ") : "All tags"}>
+        <summary title={title}>
           <Tag size={14} aria-hidden="true" />
           <span className="tag-filter-summary-label">
             <span>{primaryLabel}</span>
-            {selectedTags.length ? (
+            {activeCount ? (
               <span className="tag-filter-count">{remainingCount ? `+${remainingCount}` : "1"}</span>
             ) : null}
           </span>
@@ -4476,8 +4545,15 @@ function TagFilter({ definitions, selected, onChange }) {
         <div className="tag-filter-popover">
           <div className="filter-popover-header">
             <div className="tag-filter-head">
-              <strong>Match any tag</strong>
-              {selectedTags.length ? <button type="button" onClick={() => onChange([])}>Clear</button> : null}
+              <strong>Tag rules</strong>
+              {activeCount ? <button type="button" onClick={clear}>Clear</button> : null}
+            </div>
+            <div className="tag-filter-mode" aria-label="Included tag matching mode">
+              <span>Match included tags</span>
+              <div>
+                <button className={mode !== "all" ? "active" : ""} type="button" aria-pressed={mode !== "all"} onClick={() => onModeChange("any")}>Any</button>
+                <button className={mode === "all" ? "active" : ""} type="button" aria-pressed={mode === "all"} onClick={() => onModeChange("all")}>All</button>
+              </div>
             </div>
             <label className="filter-popover-search">
               <Search size={14} aria-hidden="true" />
@@ -4504,23 +4580,46 @@ function TagFilter({ definitions, selected, onChange }) {
                     setActiveIndex((current) => filteredTags.length ? (current - 1 + filteredTags.length) % filteredTags.length : 0);
                   } else if (event.key === "Enter" && filteredTags[activeIndex]) {
                     event.preventDefault();
-                    toggleTag(filteredTags[activeIndex]);
+                    cycleTag(filteredTags[activeIndex]);
                   }
                 }}
               />
             </label>
           </div>
-          <div id="tag-filter-options" role="listbox" aria-multiselectable="true">
+          <div id="tag-filter-options" className="tag-filter-options" role="list" aria-label="Tag rules">
           {filteredTags.length ? filteredTags.map((tag, index) => (
-            <label className={`tag-filter-option ${index === activeIndex ? "keyboard-active" : ""}`} id={`tag-filter-option-${index}`} role="option" aria-selected={selectedSet.has(tag)} key={tag} onMouseEnter={() => setActiveIndex(index)}>
-              <input
-                type="checkbox"
-                checked={selectedSet.has(tag)}
-                onChange={() => toggleTag(tag)}
-              />
+            <div
+              className={`tag-filter-option ${includedSet.has(tag) ? "included" : ""} ${excludedSet.has(tag) ? "excluded" : ""} ${index === activeIndex ? "keyboard-active" : ""}`}
+              id={`tag-filter-option-${index}`}
+              role="listitem"
+              key={tag}
+              onMouseEnter={() => setActiveIndex(index)}
+            >
               <span className="tag-filter-dot" style={{ backgroundColor: tagDefinitionForName(definitions, tag).color }} aria-hidden="true" />
-              <span>{tagDisplayName(tag)}</span>
-            </label>
+              <span className="tag-filter-option-name">{tagDisplayName(tag)}</span>
+              <span className="tag-filter-option-actions">
+                <button
+                  className={`tag-filter-choice include ${includedSet.has(tag) ? "active" : ""}`}
+                  type="button"
+                  aria-pressed={includedSet.has(tag)}
+                  title={`Include ${tagDisplayName(tag)}`}
+                  onClick={() => setTagState(tag, includedSet.has(tag) ? "off" : "include")}
+                >
+                  <CircleCheck size={14} aria-hidden="true" />
+                  <span>Include</span>
+                </button>
+                <button
+                  className={`tag-filter-choice exclude ${excludedSet.has(tag) ? "active" : ""}`}
+                  type="button"
+                  aria-pressed={excludedSet.has(tag)}
+                  title={`Exclude ${tagDisplayName(tag)}`}
+                  onClick={() => setTagState(tag, excludedSet.has(tag) ? "off" : "exclude")}
+                >
+                  <CircleX size={14} aria-hidden="true" />
+                  <span>Exclude</span>
+                </button>
+              </span>
+            </div>
           )) : <span className="tag-filter-empty">{query ? "No matching tags" : "No tags yet"}</span>}
           </div>
         </div>
@@ -7260,6 +7359,9 @@ function normalizeState(value) {
     name,
   ));
   next.filters.guestTags = sortedTags(unique(Array.isArray(next.filters.guestTags) ? next.filters.guestTags : []));
+  next.filters.guestExcludedTags = sortedTags(unique(Array.isArray(next.filters.guestExcludedTags) ? next.filters.guestExcludedTags : []))
+    .filter((tag) => !next.filters.guestTags.includes(tag));
+  next.filters.guestTagMode = next.filters.guestTagMode === "all" ? "all" : "any";
   if (!next.events.some((event) => event.id === next.selectedEventId)) {
     next.selectedEventId = preferredEventIdForView(next.events, next.filters.event);
   }
@@ -8506,7 +8608,11 @@ function applyTagDefinitionUpdates(state, updates) {
     const previousName = update.previousName || update.name;
     const rename = (tags) => sortedTags(unique(tags.map((tag) => tag.toLocaleLowerCase() === previousName.toLocaleLowerCase() ? update.name : tag)));
     next.people = next.people.map((person) => ({ ...person, tags: rename(person.tags || []) }));
-    next.filters = { ...next.filters, guestTags: rename(next.filters.guestTags || []) };
+    next.filters = {
+      ...next.filters,
+      guestTags: rename(next.filters.guestTags || []),
+      guestExcludedTags: rename(next.filters.guestExcludedTags || []),
+    };
     next.tags = rename(next.tags || []);
   });
   return next;

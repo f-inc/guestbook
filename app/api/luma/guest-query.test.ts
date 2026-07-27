@@ -15,11 +15,38 @@ test("parses bounded server-side guest query parameters", () => {
     filter: "new_faces",
     search: "Ada",
     tags: ["Founder"],
+    tagMode: "any",
+    excludedTags: [],
     sortDirection: "desc",
     cursor: 20,
     pageSize: 100,
     includeSummary: true,
   });
+});
+
+test("supports ALL included tags and excludes guests with any blocked tag", () => {
+  const query = parseGuestListQuery(new URLSearchParams([
+    ["guest_tag", "Builder"],
+    ["guest_tag", "Referred"],
+    ["guest_tag_mode", "all"],
+    ["guest_tag_not", "Flaker"],
+  ]));
+  const result = filterGuestPayload({
+    people: [
+      { id: "match", tags: ["Builder", "Referred"] },
+      { id: "missing", tags: ["Builder"] },
+      { id: "blocked", tags: ["Builder", "Referred", "Flaker"] },
+    ],
+    guests: [
+      { personId: "match", status: "going" },
+      { personId: "missing", status: "going" },
+      { personId: "blocked", status: "going" },
+    ],
+  }, query);
+
+  assert.equal(query.tagMode, "all");
+  assert.deepEqual(query.excludedTags, ["Flaker"]);
+  assert.deepEqual(result.people.map((person) => person.id), ["match"]);
 });
 
 test("parses ascending guest date order through the indexed query", () => {

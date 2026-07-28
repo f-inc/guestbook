@@ -3,6 +3,9 @@ import { normalizeMultiEventIds } from "./multi-event-stats";
 
 type AllMatchingGuestQueryInput = {
   guestStatus?: unknown;
+  guestStatuses?: unknown;
+  guestStatusMode?: unknown;
+  guestExcludedStatuses?: unknown;
   guestSearch?: unknown;
   guestTags?: unknown;
   guestTagMode?: unknown;
@@ -12,6 +15,21 @@ type AllMatchingGuestQueryInput = {
 };
 
 export function parseAllMatchingGuestQuery(input: AllMatchingGuestQueryInput = {}): GuestListQuery {
+  if (input.guestStatuses !== undefined && !Array.isArray(input.guestStatuses)) {
+    throw badRequest("Guest statuses must be an array.");
+  }
+  if (Array.isArray(input.guestStatuses) && input.guestStatuses.some((status) => typeof status !== "string" || !GUEST_FILTER_VALUES.includes(status as never))) {
+    throw badRequest("Every included guest status must be valid.");
+  }
+  if (input.guestStatusMode !== undefined && !["any", "all"].includes(String(input.guestStatusMode))) {
+    throw badRequest("Guest status mode must be any or all.");
+  }
+  if (input.guestExcludedStatuses !== undefined && !Array.isArray(input.guestExcludedStatuses)) {
+    throw badRequest("Excluded guest statuses must be an array.");
+  }
+  if (Array.isArray(input.guestExcludedStatuses) && input.guestExcludedStatuses.some((status) => typeof status !== "string" || !GUEST_FILTER_VALUES.includes(status as never))) {
+    throw badRequest("Every excluded guest status must be valid.");
+  }
   if (typeof input.guestStatus !== "string" || !GUEST_FILTER_VALUES.includes(input.guestStatus as never)) {
     throw badRequest("A valid guest status filter is required for an all-matching update.");
   }
@@ -43,11 +61,22 @@ export function parseAllMatchingGuestQuery(input: AllMatchingGuestQueryInput = {
   }
 
   const params = new URLSearchParams({
-    guest_status: input.guestStatus,
     guest_search: typeof input.guestSearch === "string" ? input.guestSearch : "",
     guest_limit: "100",
     guest_summary: "0",
   });
+  const includedStatuses = Array.isArray(input.guestStatuses)
+    ? input.guestStatuses
+    : input.guestStatus === "all"
+      ? []
+      : [input.guestStatus];
+  for (const status of includedStatuses) {
+    if (status !== "all") params.append("guest_status", status);
+  }
+  if (input.guestStatusMode === "all") params.set("guest_status_mode", "all");
+  for (const status of Array.isArray(input.guestExcludedStatuses) ? input.guestExcludedStatuses : []) {
+    if (status !== "all") params.append("guest_status_not", status);
+  }
   for (const tag of Array.isArray(input.guestTags) ? input.guestTags : []) params.append("guest_tag", tag);
   if (input.guestTagMode === "all") params.set("guest_tag_mode", "all");
   for (const tag of Array.isArray(input.guestExcludedTags) ? input.guestExcludedTags : []) params.append("guest_tag_not", tag);

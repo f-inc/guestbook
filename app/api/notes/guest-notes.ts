@@ -15,3 +15,19 @@ export function normalizeGuestNote(value: unknown): string {
   }
   return normalized;
 }
+
+export function normalizeGuestComment(value: unknown): string {
+  const normalized = normalizeGuestNote(value);
+  if (normalized) return normalized;
+  const error = new Error("Write a comment before adding it.") as Error & { status?: number };
+  error.status = 400;
+  throw error;
+}
+
+export function normalizeGuestCommentId(value: unknown): bigint {
+  const normalized = typeof value === "bigint" ? value.toString() : typeof value === "string" ? value.trim() : "";
+  if (/^[1-9]\d*$/.test(normalized)) return BigInt(normalized);
+  const error = new Error("A valid comment id is required.") as Error & { status?: number };
+  error.status = 400;
+  throw error;
+}

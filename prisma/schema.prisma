@@ -51,20 +51,31 @@ model LumaPerson {
   tags              Json      @default("[]")
   manualTags        Json      @default("[]") @map("manual_tags")
   automaticTags     Json      @default("[]") @map("automatic_tags")
-  crmNotes          String    @default("") @map("crm_notes") @db.Text
-  crmNotesUpdatedAt DateTime? @map("crm_notes_updated_at") @db.Timestamptz(6)
   raw               Json      @default("{}")
   firstSeenAt       DateTime  @default(now()) @map("first_seen_at") @db.Timestamptz(6)
   lastSeenAt        DateTime  @default(now()) @map("last_seen_at") @db.Timestamptz(6)
   syncedAt          DateTime  @default(now()) @map("synced_at") @db.Timestamptz(6)
 
   eventGuests         LumaEventGuest[]
+  comments            GuestComment[]
   automaticTagMatches AutomaticTagAssignment[]
   manualTagMutations  ManualTagMutation[]
 
   @@index([lumaUserIdLower])
   @@index([emailLower])
   @@map("luma_people")
+}
+
+model GuestComment {
+  id        BigInt     @id @default(autoincrement())
+  personId  String     @map("person_id")
+  body      String     @db.Text
+  author    String     @default("Guestbook")
+  createdAt DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  person    LumaPerson @relation(fields: [personId], references: [personId], onDelete: Cascade)
+
+  @@index([personId, createdAt(sort: Desc), id(sort: Desc)])
+  @@map("guest_comments")
 }
 
 model GuestTag {

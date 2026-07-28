@@ -278,6 +278,14 @@
     @apply h-9 min-w-0 pl-9 pr-3 text-xs;
   }
 
+  .calendar-search-selection {
+    @apply -mt-1 mb-2 flex min-h-7 items-center justify-between gap-2 text-[11px] font-semibold text-muted;
+  }
+
+  .calendar-select-all {
+    @apply inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-border bg-surface px-2 text-[11px] font-semibold text-ink shadow-sm transition hover:border-brand/40 hover:bg-brand-soft hover:text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/25 disabled:cursor-default disabled:border-border disabled:bg-subtle disabled:text-muted disabled:shadow-none;
+  }
+
   .segmented {
     @apply mb-3 grid h-10 min-w-0 grid-cols-3 gap-1 rounded-lg border border-border bg-subtle p-1;
   }
@@ -435,7 +443,7 @@
   }
 
   .main-stack {
-    @apply h-full min-h-0 min-w-0 space-y-4 overflow-y-auto overscroll-contain pr-1;
+    @apply h-full min-h-0 min-w-0 space-y-4 overflow-x-hidden overflow-y-auto overscroll-contain pr-1;
   }
 
   .accordion {
@@ -488,6 +496,10 @@
 
   .event-action-tooltip {
     @apply relative;
+  }
+
+  .event-sync-button:disabled {
+    @apply cursor-wait border-border bg-subtle text-muted opacity-50 shadow-none;
   }
 
   .event-action-tooltip::before,
@@ -807,11 +819,16 @@
   }
 
   .tag-filter-popover {
-    @apply absolute right-0 top-[calc(100%+6px)] z-30 grid max-h-96 w-[26rem] overflow-x-hidden overflow-y-auto rounded-lg border border-border bg-surface p-2 shadow-xl;
+    @apply absolute right-0 top-[calc(100%+6px)] z-30 grid max-h-96 w-80 max-w-[calc(100vw-2rem)] overflow-x-hidden overflow-y-auto rounded-lg border border-border bg-surface p-2 shadow-xl;
   }
 
   .status-filter-popover {
-    @apply absolute left-0 top-[calc(100%+6px)] z-30 grid max-h-96 min-w-full w-60 overflow-x-hidden overflow-y-auto rounded-lg border border-border bg-surface p-2 shadow-xl;
+    @apply absolute left-0 top-[calc(100%+6px)] z-30 grid max-h-96 min-w-full w-80 max-w-[calc(100vw-2rem)] overflow-x-hidden overflow-y-auto rounded-lg border border-border bg-surface p-2 shadow-xl;
+  }
+
+  .tag-filter-popover > *,
+  .status-filter-popover > * {
+    @apply min-w-0 w-full;
   }
 
   .status-filter-head {
@@ -819,20 +836,23 @@
   }
 
   .status-filter-option {
-    @apply flex min-h-10 w-full items-center gap-2.5 rounded-md border-0 bg-transparent px-2.5 py-2 text-left text-sm font-medium text-ink transition hover:bg-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/20;
+    @apply flex min-h-11 w-full cursor-pointer items-center gap-2 rounded-md bg-transparent px-2 py-1.5 text-left text-sm font-medium text-ink transition hover:bg-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/20;
   }
 
-  .status-filter-option > span:nth-child(2) {
-    @apply min-w-0 flex-1;
+  .status-filter-option-name {
+    @apply min-w-0 flex-1 truncate;
   }
 
-  .status-filter-option > svg {
-    color: var(--status-filter-color);
+  .status-filter-option-actions {
+    @apply inline-flex shrink-0 gap-1;
   }
 
-  .status-filter-option.active {
-    color: var(--status-filter-color);
-    background: color-mix(in srgb, var(--status-filter-color) 10%, white);
+  .status-filter-option.included {
+    @apply bg-brand-soft/60;
+  }
+
+  .status-filter-option.excluded {
+    @apply bg-danger-soft/70;
   }
 
   .status-filter-option.keyboard-active,
@@ -858,15 +878,11 @@
   }
 
   .tag-filter-mode {
-    @apply flex items-center justify-between gap-3 rounded-md bg-canvas px-2.5 py-2 text-[11px] font-medium text-muted;
-  }
-
-  .tag-filter-mode > div {
     @apply inline-flex rounded-md border border-border bg-surface p-0.5;
   }
 
   .tag-filter-mode button {
-    @apply min-w-11 rounded border-0 bg-transparent px-2 py-1 text-[11px] font-semibold text-muted transition hover:text-ink;
+    @apply min-w-20 rounded border-0 bg-transparent px-2 py-1 text-[11px] font-semibold text-muted transition hover:text-ink;
   }
 
   .tag-filter-mode button.active {
@@ -882,7 +898,7 @@
   }
 
   .tag-filter-option {
-    @apply flex min-h-11 min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium text-ink hover:bg-subtle;
+    @apply flex min-h-11 min-w-0 cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium text-ink hover:bg-subtle;
   }
 
   .tag-filter-option.included {
@@ -909,10 +925,6 @@
     @apply inline-flex h-7 items-center gap-1 rounded-md border border-border bg-surface px-2 text-[10px] font-semibold text-muted transition hover:border-border-strong hover:text-ink;
   }
 
-  .tag-filter-choice.include.active {
-    @apply border-brand bg-brand text-white;
-  }
-
   .tag-filter-choice.exclude.active {
     @apply border-danger bg-danger text-white;
   }
@@ -922,7 +934,7 @@
   }
 
   .table-wrap {
-    @apply max-w-full overflow-auto rounded-lg border border-border;
+    @apply w-full min-w-0 max-w-full overflow-x-auto overflow-y-auto rounded-lg border border-border;
     container-type: inline-size;
   }
 
@@ -1100,20 +1112,33 @@
   }
 
   .note-cell {
-    @apply min-w-36;
-    width: 9rem;
+    @apply min-w-48;
+    width: 12rem;
   }
 
   .guest-note-trigger {
-    @apply flex h-9 w-full min-w-0 items-center gap-2 rounded-md border border-transparent bg-transparent px-2 text-left text-xs font-semibold text-muted transition hover:border-border hover:bg-surface hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/25;
+    @apply flex min-h-11 w-full min-w-0 items-center gap-2 rounded-md border border-transparent bg-transparent px-2 py-1.5 text-left text-xs font-semibold text-muted transition hover:border-border hover:bg-surface hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/25;
   }
 
-  .guest-note-trigger svg {
+  .guest-note-trigger > svg {
     @apply shrink-0;
   }
 
-  .guest-note-trigger span {
-    @apply truncate;
+  .guest-note-trigger-copy {
+    @apply grid min-w-0 flex-1 gap-0.5;
+  }
+
+  .guest-note-trigger-copy strong,
+  .guest-note-trigger-copy small {
+    @apply block truncate;
+  }
+
+  .guest-note-trigger-copy small {
+    @apply text-[10px] font-medium text-muted;
+  }
+
+  .guest-comment-count {
+    @apply inline-grid min-w-5 shrink-0 place-items-center rounded-full bg-brand px-1.5 py-0.5 text-[10px] font-bold tabular-nums text-white;
   }
 
   .guest-note-trigger.has-note {
@@ -1136,6 +1161,15 @@
 
   .date-sort-trigger {
     @apply inline-flex items-center gap-1 whitespace-nowrap rounded-sm text-[inherit] font-[inherit] uppercase tracking-[inherit] text-inherit transition hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/25;
+  }
+
+  .guest-sort-trigger {
+    @apply inline-flex min-h-7 items-center justify-center gap-0.5 rounded-sm px-1 text-[inherit] font-[inherit] uppercase tracking-[inherit] text-inherit transition hover:bg-subtle hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/25;
+  }
+
+  .guest-sort-trigger.active,
+  .date-sort-trigger.active {
+    @apply text-brand;
   }
 
   .table-header-abbr {
@@ -3211,8 +3245,13 @@
   }
 
   .analytics-respondent-row {
-    @apply grid min-h-16 w-full min-w-0 items-center gap-3 rounded-md border-0 bg-transparent px-3 py-2 text-left text-ink transition hover:bg-brand-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/25;
-    grid-template-columns: auto minmax(0, 1fr) minmax(0, auto) auto;
+    @apply grid min-h-16 w-full min-w-0 items-center gap-3 rounded-md bg-transparent px-3 py-2 text-ink transition hover:bg-brand-soft focus-within:bg-brand-soft;
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .analytics-respondent-open {
+    @apply grid min-w-0 items-center gap-3 border-0 bg-transparent p-0 text-left text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/25;
+    grid-template-columns: minmax(0, 1fr) minmax(0, auto) auto;
   }
 
   .analytics-respondent-identity,
@@ -3240,12 +3279,12 @@
     @apply max-w-44 justify-items-end text-right text-xs;
   }
 
-  .analytics-respondent-row > svg {
+  .analytics-respondent-open > svg {
     @apply shrink-0 text-muted transition;
   }
 
-  .analytics-respondent-row:hover > svg,
-  .analytics-respondent-row:focus-visible > svg {
+  .analytics-respondent-open:hover > svg,
+  .analytics-respondent-open:focus-visible > svg {
     @apply translate-x-0.5 text-brand;
   }
 
@@ -3299,7 +3338,9 @@
   }
 
   .guest-note-dialog {
-    @apply max-w-3xl;
+    @apply max-h-[92vh] overflow-y-auto;
+    width: min(42rem, calc(100vw - 2rem));
+    max-width: 42rem;
   }
 
   .guest-note-head {
@@ -3321,6 +3362,110 @@
 
   .guest-note-person > div > p:last-child {
     @apply mt-0.5 text-xs text-muted;
+  }
+
+  .guest-comment-thread {
+    @apply grid min-h-48 overflow-hidden rounded-xl border border-border bg-canvas;
+    grid-template-rows: auto minmax(0, 1fr);
+    max-height: 44vh;
+  }
+
+  .guest-comment-thread-head {
+    @apply flex items-center justify-between border-b border-border bg-subtle/55 px-4 py-3 text-xs font-bold text-muted;
+  }
+
+  .guest-comment-thread-head > span {
+    @apply flex items-center gap-2 text-ink;
+  }
+
+  .guest-comment-thread-head > strong {
+    @apply inline-grid min-w-6 place-items-center rounded-full bg-surface px-2 py-0.5 text-[10px] tabular-nums text-brand ring-1 ring-border;
+  }
+
+  .guest-comment-list {
+    @apply grid content-start gap-4 overflow-y-auto p-4;
+  }
+
+  .guest-comment-entry {
+    @apply grid gap-2;
+  }
+
+  .guest-comment-entry header {
+    @apply flex min-h-8 items-center gap-2 px-1 text-xs;
+  }
+
+  .guest-comment-meta {
+    @apply flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-0.5;
+  }
+
+  .guest-comment-entry header strong {
+    @apply font-bold text-ink;
+  }
+
+  .guest-comment-entry header time {
+    @apply text-[11px] font-medium text-muted;
+  }
+
+  .guest-comment-actions {
+    @apply ml-auto flex shrink-0 items-center gap-1 opacity-0 transition-opacity;
+    pointer-events: none;
+  }
+
+  .guest-comment-entry:hover .guest-comment-actions,
+  .guest-comment-entry:focus-within .guest-comment-actions {
+    @apply opacity-100;
+    pointer-events: auto;
+  }
+
+  .guest-comment-actions button {
+    @apply inline-grid size-7 place-items-center rounded-full border border-border bg-surface p-0 text-muted shadow-sm transition hover:border-brand/30 hover:bg-brand-soft hover:text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/25 disabled:cursor-not-allowed disabled:opacity-45;
+  }
+
+  .guest-comment-actions button.delete {
+    @apply hover:border-danger/30 hover:bg-danger-soft hover:text-danger;
+  }
+
+  .guest-comment-state {
+    @apply grid min-h-40 place-items-center content-center gap-1.5 p-6 text-center text-xs text-muted;
+  }
+
+  .guest-comment-state strong {
+    @apply text-sm text-ink;
+  }
+
+  .markdown-preview.guest-comment-body {
+    @apply min-h-0 max-h-none overflow-visible rounded-xl bg-surface px-4 py-3 shadow-sm;
+  }
+
+  .guest-comment-inline-editor {
+    @apply overflow-hidden rounded-xl border border-brand/35 bg-surface shadow-sm ring-2 ring-brand/10;
+  }
+
+  .guest-comment-inline-editor textarea {
+    @apply min-h-24 w-full resize-y rounded-none border-0 bg-surface px-4 py-3 font-mono text-sm leading-6 shadow-none outline-none ring-0;
+  }
+
+  .guest-comment-inline-editor > div {
+    @apply flex items-center justify-end gap-2 border-t border-border bg-canvas px-3 py-2;
+  }
+
+  .guest-comment-inline-editor > div > span {
+    @apply mr-auto text-[10px] tabular-nums text-muted;
+  }
+
+  .guest-comment-inline-editor .button {
+    @apply min-h-8 px-3 text-xs;
+  }
+
+  @media (hover: none) {
+    .guest-comment-actions {
+      @apply opacity-100;
+      pointer-events: auto;
+    }
+  }
+
+  .guest-comment-composer {
+    @apply mt-4 rounded-xl border border-border bg-subtle/35 p-3;
   }
 
   .guest-note-tabs {
@@ -3353,6 +3498,14 @@
 
   .guest-note-editor textarea {
     @apply min-h-80 w-full resize-y rounded-none border-0 bg-surface p-4 font-mono text-sm leading-6 shadow-none outline-none ring-0;
+  }
+
+  .guest-comment-composer .guest-note-editor textarea {
+    @apply min-h-32 resize-none;
+  }
+
+  .markdown-toolbar .guest-comment-submit {
+    @apply ml-auto flex h-8 w-auto items-center gap-1.5 rounded-md bg-brand px-3 text-xs font-bold text-white hover:bg-brand/90 hover:text-white disabled:cursor-not-allowed disabled:opacity-45;
   }
 
   .markdown-preview {
@@ -4292,9 +4445,19 @@
   .group-member-controls {
     grid-template-columns: minmax(0, 1fr);
   }
+
+  .status-filter-popover {
+    @apply left-auto right-0;
+  }
 }
 
 @media (max-width: 600px) {
+  .tag-filter-popover,
+  .status-filter-popover {
+    @apply fixed bottom-4 left-4 right-4 top-auto z-50 w-auto max-w-none;
+    max-height: min(28rem, calc(100vh - 2rem));
+  }
+
   .event-summary {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -4354,20 +4517,20 @@
   }
 
   .analytics-respondent-row {
-    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-columns: auto minmax(0, 1fr);
   }
 
-  .analytics-respondent-row > .avatar {
-    grid-row: 1 / span 2;
+  .analytics-respondent-open {
+    grid-template-columns: minmax(0, 1fr) auto;
   }
 
   .analytics-respondent-context {
     @apply max-w-none justify-items-start text-left;
-    grid-column: 2;
+    grid-column: 1;
   }
 
-  .analytics-respondent-row > svg {
-    grid-column: 3;
+  .analytics-respondent-open > svg {
+    grid-column: 2;
     grid-row: 1 / span 2;
   }
 }

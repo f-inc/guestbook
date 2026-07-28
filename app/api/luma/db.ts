@@ -6,11 +6,22 @@ type HttpError = Error & { status?: number };
 import { orderAvatarCandidates } from "../../avatar-order";
 import { databaseUrlWithPoolLimits } from "./database-url";
 import { lumaEventDate } from "./event-date";
-import { GUEST_ACCEPTED_STATUSES, GUEST_REGISTERED_STATUSES, GUEST_REGISTRATION_STATUSES, guestStatusWhere, type GuestListQuery } from "./guest-query";
+import {
+  GUEST_ACCEPTED_STATUSES,
+  GUEST_REGISTERED_STATUSES,
+  GUEST_REGISTRATION_STATUSES,
+  guestQueryIncludedStatusFilters,
+  guestQueryStatusFilters,
+  guestStatusWhere,
+  isOnlyInvitedStatusFilter,
+  type GuestFilter,
+  type GuestListQuery,
+} from "./guest-query";
 import { MAX_PERSON_TAGS, normalizePersonTags } from "./person-tags";
 import { DEFAULT_TAG_COLOR, normalizeTagColor, normalizeTagName } from "./tag-catalog";
 import { buildRegistrationQuestionAnalytics, REFERRED_PERSON_TAG } from "../../event-analytics";
 import type { EventSwitchDiagnosticReporter } from "../../event-switch-diagnostics";
+import { MAX_SELECTED_EVENT_IDS } from "../../event-selection";
 import { AUTOMATIC_TAG_DEFINITIONS, AUTOMATIC_TAG_RULESET_VERSION, NEW_GUEST_MAX_REGISTRATIONS, automaticTagRunMode, normalizeAutomaticTagPersonIds } from "./auto-tags";
 import type { AnalyticsRespondentQuery } from "./analytics-respondents";
 
@@ -68,8 +79,19 @@ const INDEXED_PERSON_SELECT = {
   tags: true,
   manualTags: true,
   automaticTags: true,
-  crmNotes: true,
-  crmNotesUpdatedAt: true,
+  comments: {
+    orderBy: [{ createdAt: "desc" as const }, { id: "desc" as const }],
+    take: 1,
+    select: {
+      body: true,
+      createdAt: true,
+    },
+  },
+  _count: {
+    select: {
+      comments: true,
+    },
+  },
 };
 
 const INDEXED_AUDIENCE_PERSON_SELECT = {
@@ -140,8 +162,9 @@ type IndexedGuestPageRow = {
   personTags: Prisma.JsonValue;
   personManualTags: Prisma.JsonValue;
   personAutomaticTags: Prisma.JsonValue;
-  personCrmNotes: string;
+  personCrmNotes: string | null;
   personCrmNotesUpdatedAt: Date | null;
+  personCrmNoteCount: number;
 };
 
 type IndexedMultiEventGuestPageRow = IndexedGuestPageRow & {
@@ -213,13 +236,20 @@ export async function searchIndexedPeople(search: string, { limit = 8 } = {}) {
             ELSE 4
           END AS rank
         FROM luma_people AS person
-        WHERE LOWER(
-          COALESCE(person.name, '') || ' ' ||
-          COALESCE(person.email, '') || ' ' ||
-          COALESCE(person.title, '') || ' ' ||
-          COALESCE(person.bio, '') || ' ' ||
-          COALESCE(person.crm_notes, '')
-        ) LIKE LOWER(${containsQuery}) ESCAPE '\\'
+        WHERE (
+          LOWER(
+            COALESCE(person.name, '') || ' ' ||
+            COALESCE(person.email, '') || ' ' ||
+            COALESCE(person.title, '') || ' ' ||
+            COALESCE(person.bio, '')
+          ) LIKE LOWER(${containsQuery}) ESCAPE '\\'
+          OR EXISTS (
+            SELECT 1
+            FROM guest_comments AS comment
+            WHERE comment.person_id = person.person_id
+              AND LOWER(comment.body) LIKE LOWER(${containsQuery}) ESCAPE '\\'
+          )
+        )
         ORDER BY rank, person.last_seen_at DESC, person.name ASC
         LIMIT ${personCandidateLimit}
     ),
@@ -1049,8 +1079,10 @@ export async function listIndexedEventGuests(
   const db = prisma();
   const includeSummary = query.includeSummary !== false;
   const includeEventCounts = query.includeEventCounts !== false;
-  const statusDateSortDirection = query.sortDirection === "asc" ? Prisma.sql`ASC` : Prisma.sql`DESC`;
-  const needsChronology = includeSummary || includeEventCounts || ["first_registers", "accepted_first_registers", "new_faces"].includes(query.filter);
+  const guestPageSort = indexedGuestPageSortSql(query);
+  const needsChronology = includeSummary
+    || includeEventCounts
+    || guestQueryStatusFilters(query).some((filter) => ["first_registers", "accepted_first_registers", "new_faces"].includes(filter));
   // EVENT_SWITCH_DIAGNOSTICS: each report isolates one database phase without adding log I/O to the query path.
   let diagnosticStartedAt = Date.now();
   const eventBoundary = needsChronology
@@ -1079,11 +1111,10 @@ export async function listIndexedEventGuests(
       FROM luma_event_guests AS guest
       ${indexedGuestPageWhereSql(eventId, query, eventBoundary)}
       ORDER BY
-        CASE WHEN ${query.filter === "invited"} THEN
+        CASE WHEN ${isOnlyInvitedStatusFilter(query) && (query.sortBy || "status_date") === "status_date"} THEN
           CASE WHEN guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)}) THEN 0 WHEN guest.status = 'invited' THEN 1 ELSE 2 END
         ELSE 0 END,
-        ${indexedGuestStatusDateSql()} ${statusDateSortDirection} NULLS LAST,
-        guest.person_id
+        ${guestPageSort}
       LIMIT ${query.pageSize}
       OFFSET ${query.cursor}
     )
@@ -1121,19 +1152,27 @@ export async function listIndexedEventGuests(
       person.tags AS "personTags",
       person.manual_tags AS "personManualTags",
       person.automatic_tags AS "personAutomaticTags",
-      person.crm_notes AS "personCrmNotes",
-      person.crm_notes_updated_at AS "personCrmNotesUpdatedAt"
+      latest_comment.body AS "personCrmNotes",
+      latest_comment.created_at AS "personCrmNotesUpdatedAt",
+      COALESCE(latest_comment.comment_count, 0)::integer AS "personCrmNoteCount"
     FROM guest_page AS guest
     JOIN luma_people AS person
       ON person.person_id = guest.person_id
+    LEFT JOIN LATERAL (
+      SELECT
+        comment.body,
+        comment.created_at,
+        COUNT(*) OVER ()::integer AS comment_count
+      FROM guest_comments AS comment
+      WHERE comment.person_id = person.person_id
+      ORDER BY comment.created_at DESC, comment.id DESC
+      LIMIT 1
+    ) AS latest_comment ON TRUE
     ORDER BY
-      CASE WHEN ${query.filter === "invited"} THEN
+      CASE WHEN ${isOnlyInvitedStatusFilter(query) && (query.sortBy || "status_date") === "status_date"} THEN
         CASE WHEN guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)}) THEN 0 WHEN guest.status = 'invited' THEN 1 ELSE 2 END
       ELSE 0 END,
-      guest.checked_in_at DESC,
-      guest.registered_at DESC,
-      guest.created_at DESC,
-      guest.last_seen_at DESC
+      ${guestPageSort}
   `);
   const rows = pageRows.map(indexedGuestPageRowToRecord);
   const filteredCount = pageRows[0]?.totalCount ?? query.cursor;
@@ -1200,10 +1239,15 @@ export async function listIndexedEventGuests(
     },
     query: {
       filter: query.filter,
+      filters: guestQueryIncludedStatusFilters(query),
+      filterMode: query.filterMode || "any",
+      excludedFilters: query.excludedFilters || [],
       search: query.search,
       tags: query.tags,
       tagMode: query.tagMode || "any",
       excludedTags: query.excludedTags || [],
+      sortBy: query.sortBy || "status_date",
+      sortDirection: query.sortDirection || "desc",
       hasNotes: Boolean(query.hasNotes),
       attendedGreaterThan: query.attendedGreaterThan ?? null,
     },
@@ -1243,11 +1287,14 @@ export async function listIndexedMultiEventGuests(
   eventIds: string[],
   query: GuestListQuery = { filter: "all", search: "", tags: [], cursor: 0, pageSize: 50, includeSummary: false },
 ) {
-  const boundedEventIds = [...new Set(eventIds.filter(Boolean))].slice(0, 50);
+  const boundedEventIds = [...new Set(eventIds.filter(Boolean))].slice(0, MAX_SELECTED_EVENT_IDS);
   if (boundedEventIds.length < 2) return null;
   const db = prisma();
   const statusDateSortDirection = query.sortDirection === "asc" ? Prisma.sql`ASC` : Prisma.sql`DESC`;
-  const statusDateAggregate = query.sortDirection === "asc" ? Prisma.sql`MIN` : Prisma.sql`MAX`;
+  const statusDateAggregate = (query.sortBy || "status_date") === "status_date" && query.sortDirection === "asc" ? Prisma.sql`MIN` : Prisma.sql`MAX`;
+  const withinPersonSortDirection = (query.sortBy || "status_date") === "status_date" ? statusDateSortDirection : Prisma.sql`DESC`;
+  const personPageSort = indexedPersonPageSortSql(query, "person");
+  const resultPageSort = indexedPersonPageSortSql(query, "page");
   const pageRows = await db.$queryRaw<IndexedMultiEventGuestPageRow[]>(Prisma.sql`
     WITH selected_events AS MATERIALIZED (
       SELECT event_id, starts_at, date
@@ -1266,6 +1313,18 @@ export async function listIndexedMultiEventGuests(
         guest.person_id,
         ${statusDateAggregate}(${indexedGuestStatusDateSql()}) AS latest_activity,
         MIN(CASE WHEN guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)}) THEN 0 WHEN guest.status = 'invited' THEN 1 ELSE 2 END)::integer AS invitation_sort,
+        (
+          SELECT COUNT(*)::integer
+          FROM luma_event_guests AS lifetime_guest
+          WHERE lifetime_guest.person_id = guest.person_id
+            AND (lifetime_guest.checked_in_at IS NOT NULL OR lifetime_guest.status = 'checked_in')
+        ) AS events_attended,
+        (
+          SELECT COUNT(*)::integer
+          FROM luma_event_guests AS lifetime_guest
+          WHERE lifetime_guest.person_id = guest.person_id
+            AND lifetime_guest.status IN ('registered', 'going', 'waitlisted', 'checked_in', 'no_show')
+        ) AS events_registered,
         COUNT(*)::integer AS registration_count
       FROM matching_guests AS guest
       GROUP BY guest.person_id
@@ -1275,13 +1334,14 @@ export async function listIndexedMultiEventGuests(
         person.person_id,
         person.latest_activity,
         person.invitation_sort,
+        person.events_attended,
+        person.events_registered,
         COUNT(*) OVER ()::integer AS total_count,
         SUM(person.registration_count) OVER ()::integer AS matching_registration_count
       FROM matching_people AS person
       ORDER BY
-        CASE WHEN ${query.filter === "invited"} THEN person.invitation_sort ELSE 0 END,
-        person.latest_activity ${statusDateSortDirection} NULLS LAST,
-        person.person_id
+        CASE WHEN ${isOnlyInvitedStatusFilter(query) && (query.sortBy || "status_date") === "status_date"} THEN person.invitation_sort ELSE 0 END,
+        ${personPageSort}
       LIMIT ${query.pageSize}
       OFFSET ${query.cursor}
     )
@@ -1320,15 +1380,26 @@ export async function listIndexedMultiEventGuests(
       person.tags AS "personTags",
       person.manual_tags AS "personManualTags",
       person.automatic_tags AS "personAutomaticTags",
-      person.crm_notes AS "personCrmNotes",
-      person.crm_notes_updated_at AS "personCrmNotesUpdatedAt"
+      latest_comment.body AS "personCrmNotes",
+      latest_comment.created_at AS "personCrmNotesUpdatedAt",
+      COALESCE(latest_comment.comment_count, 0)::integer AS "personCrmNoteCount"
     FROM person_page AS page
     JOIN matching_guests AS guest ON guest.person_id = page.person_id
     JOIN luma_people AS person ON person.person_id = page.person_id
+    LEFT JOIN LATERAL (
+      SELECT
+        comment.body,
+        comment.created_at,
+        COUNT(*) OVER ()::integer AS comment_count
+      FROM guest_comments AS comment
+      WHERE comment.person_id = person.person_id
+      ORDER BY comment.created_at DESC, comment.id DESC
+      LIMIT 1
+    ) AS latest_comment ON TRUE
     ORDER BY
-      CASE WHEN ${query.filter === "invited"} THEN page.invitation_sort ELSE 0 END,
-      page.latest_activity ${statusDateSortDirection} NULLS LAST,
-      ${indexedGuestStatusDateSql()} ${statusDateSortDirection} NULLS LAST,
+      CASE WHEN ${isOnlyInvitedStatusFilter(query) && (query.sortBy || "status_date") === "status_date"} THEN page.invitation_sort ELSE 0 END,
+      ${resultPageSort},
+      ${indexedGuestStatusDateSql()} ${withinPersonSortDirection} NULLS LAST,
       guest.event_id
   `);
 
@@ -1380,56 +1451,66 @@ export async function listIndexedMultiEventGuests(
     },
     query: {
       filter: query.filter,
+      filters: guestQueryIncludedStatusFilters(query),
+      filterMode: query.filterMode || "any",
+      excludedFilters: query.excludedFilters || [],
       search: query.search,
       tags: query.tags,
       tagMode: query.tagMode || "any",
       excludedTags: query.excludedTags || [],
+      sortBy: query.sortBy || "status_date",
+      sortDirection: query.sortDirection || "desc",
       hasNotes: Boolean(query.hasNotes),
       attendedGreaterThan: query.attendedGreaterThan ?? null,
     },
   };
 }
 
+function indexedGuestPageSortSql(query: GuestListQuery) {
+  const direction = query.sortDirection === "asc" ? Prisma.sql`ASC` : Prisma.sql`DESC`;
+  const countExpression = query.sortBy === "events_attended"
+    ? Prisma.sql`(
+        SELECT COUNT(*)::integer
+        FROM luma_event_guests AS lifetime_guest
+        WHERE lifetime_guest.person_id = guest.person_id
+          AND (lifetime_guest.checked_in_at IS NOT NULL OR lifetime_guest.status = 'checked_in')
+      )`
+    : query.sortBy === "events_registered"
+      ? Prisma.sql`(
+          SELECT COUNT(*)::integer
+          FROM luma_event_guests AS lifetime_guest
+          WHERE lifetime_guest.person_id = guest.person_id
+            AND lifetime_guest.status IN ('registered', 'going', 'waitlisted', 'checked_in', 'no_show')
+        )`
+      : null;
+  return countExpression
+    ? Prisma.sql`${countExpression} ${direction}, ${indexedGuestStatusDateSql()} DESC NULLS LAST, guest.person_id`
+    : Prisma.sql`${indexedGuestStatusDateSql()} ${direction} NULLS LAST, guest.person_id`;
+}
+
+function indexedPersonPageSortSql(query: GuestListQuery, alias: "person" | "page") {
+  const direction = query.sortDirection === "asc" ? Prisma.sql`ASC` : Prisma.sql`DESC`;
+  if (alias === "person") {
+    if (query.sortBy === "events_attended") {
+      return Prisma.sql`person.events_attended ${direction}, person.latest_activity DESC NULLS LAST, person.person_id`;
+    }
+    if (query.sortBy === "events_registered") {
+      return Prisma.sql`person.events_registered ${direction}, person.latest_activity DESC NULLS LAST, person.person_id`;
+    }
+    return Prisma.sql`person.latest_activity ${direction} NULLS LAST, person.person_id`;
+  }
+  if (query.sortBy === "events_attended") {
+    return Prisma.sql`page.events_attended ${direction}, page.latest_activity DESC NULLS LAST, page.person_id`;
+  }
+  if (query.sortBy === "events_registered") {
+    return Prisma.sql`page.events_registered ${direction}, page.latest_activity DESC NULLS LAST, page.person_id`;
+  }
+  return Prisma.sql`page.latest_activity ${direction} NULLS LAST, page.person_id`;
+}
+
 function indexedMultiEventGuestPageWhereSql(query: GuestListQuery) {
   const predicates: Prisma.Sql[] = [];
-  if (query.filter === "accepted") {
-    predicates.push(Prisma.sql`guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)})`);
-  } else if (query.filter === "to_decide") {
-    predicates.push(Prisma.sql`(
-      guest.status = 'registered'
-      OR (guest.status = 'waitlisted' AND guest.operator_decision IS DISTINCT FROM 'waitlisted')
-    )`);
-  } else if (query.filter === "registered") {
-    predicates.push(indexedRegisteredGuestPredicateSql());
-  } else if (query.filter === "invited") {
-    predicates.push(Prisma.sql`(guest.invited_at IS NOT NULL OR guest.status = 'invited')`);
-  } else if (isIndexedInvitationOutcomeFilter(query.filter)) {
-    predicates.push(indexedInvitationOutcomeFilterPredicateSql(query.filter));
-  } else if (isIndexedReferralFilter(query.filter)) {
-    predicates.push(indexedReferralFilterPredicateSql(query.filter));
-  } else if (["first_registers", "accepted_first_registers", "new_faces"].includes(query.filter)) {
-    predicates.push(query.filter === "new_faces"
-      ? Prisma.sql`guest.status = 'checked_in'`
-      : Prisma.sql`guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)})`);
-    predicates.push(Prisma.sql`
-      NOT EXISTS (
-        SELECT 1
-        FROM luma_event_guests AS previous_guest
-        LEFT JOIN luma_events AS previous_event ON previous_event.event_id = previous_guest.event_id
-        WHERE previous_guest.person_id = guest.person_id
-          AND previous_guest.event_id <> guest.event_id
-          AND (
-            (selected_event.starts_at IS NOT NULL AND (
-              previous_event.starts_at < selected_event.starts_at
-              OR (previous_event.starts_at IS NULL AND selected_event.date IS NOT NULL AND previous_event.date < selected_event.date)
-            ))
-            OR (selected_event.starts_at IS NULL AND selected_event.date IS NOT NULL AND previous_event.date < selected_event.date)
-          )
-      )
-    `);
-  } else if (query.filter !== "all") {
-    predicates.push(Prisma.sql`guest.status = ${query.filter}`);
-  }
+  appendIndexedStatusRules(predicates, query, indexedMultiEventStatusPredicateSql);
 
   if (query.search) {
     const searchPattern = `%${query.search}%`;
@@ -1445,8 +1526,13 @@ function indexedMultiEventGuestPageWhereSql(query: GuestListQuery) {
             OR search_person.email ILIKE ${searchPattern}
             OR search_person.title ILIKE ${searchPattern}
             OR search_person.bio ILIKE ${searchPattern}
-            OR search_person.crm_notes ILIKE ${searchPattern}
           )
+      )
+      OR EXISTS (
+        SELECT 1
+        FROM guest_comments AS search_comment
+        WHERE search_comment.person_id = guest.person_id
+          AND search_comment.body ILIKE ${searchPattern}
       )
     )`);
   }
@@ -1470,9 +1556,9 @@ function indexedMultiEventGuestPageWhereSql(query: GuestListQuery) {
 
   if (query.hasNotes) {
     predicates.push(Prisma.sql`EXISTS (
-      SELECT 1 FROM luma_people AS noted_person
-      WHERE noted_person.person_id = guest.person_id
-        AND NULLIF(BTRIM(noted_person.crm_notes), '') IS NOT NULL
+      SELECT 1
+      FROM guest_comments AS noted_comment
+      WHERE noted_comment.person_id = guest.person_id
     )`);
   }
 
@@ -1494,40 +1580,11 @@ function indexedGuestPageWhereSql(
   eventBoundary: { startsAt?: Date | null; date?: Date | null } | null,
 ) {
   const predicates: Prisma.Sql[] = [Prisma.sql`guest.event_id = ${eventId}`];
-
-  if (query.filter === "accepted") {
-    predicates.push(Prisma.sql`guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)})`);
-  } else if (query.filter === "to_decide") {
-    predicates.push(Prisma.sql`(
-      guest.status = 'registered'
-      OR (guest.status = 'waitlisted' AND guest.operator_decision IS DISTINCT FROM 'waitlisted')
-    )`);
-  } else if (query.filter === "registered") {
-    predicates.push(indexedRegisteredGuestPredicateSql());
-  } else if (query.filter === "invited") {
-    predicates.push(Prisma.sql`(guest.invited_at IS NOT NULL OR guest.status = 'invited')`);
-  } else if (isIndexedInvitationOutcomeFilter(query.filter)) {
-    predicates.push(indexedInvitationOutcomeFilterPredicateSql(query.filter));
-  } else if (isIndexedReferralFilter(query.filter)) {
-    predicates.push(indexedReferralFilterPredicateSql(query.filter));
-  } else if (["first_registers", "accepted_first_registers", "new_faces"].includes(query.filter)) {
-    predicates.push(query.filter === "new_faces"
-      ? Prisma.sql`guest.status = 'checked_in'`
-      : Prisma.sql`guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)})`);
-    predicates.push(Prisma.sql`
-      NOT EXISTS (
-        SELECT 1
-        FROM luma_event_guests AS previous_guest
-        LEFT JOIN luma_events AS previous_event
-          ON previous_event.event_id = previous_guest.event_id
-        WHERE previous_guest.person_id = guest.person_id
-          AND previous_guest.event_id <> ${eventId}
-          ${previousEventBoundarySql(eventBoundary)}
-      )
-    `);
-  } else if (query.filter !== "all") {
-    predicates.push(Prisma.sql`guest.status = ${query.filter}`);
-  }
+  appendIndexedStatusRules(
+    predicates,
+    query,
+    (filter) => indexedEventStatusPredicateSql(filter, eventId, eventBoundary),
+  );
 
   if (query.search) {
     const searchPattern = `%${query.search}%`;
@@ -1545,8 +1602,13 @@ function indexedGuestPageWhereSql(
               OR search_person.email ILIKE ${searchPattern}
               OR search_person.title ILIKE ${searchPattern}
               OR search_person.bio ILIKE ${searchPattern}
-              OR search_person.crm_notes ILIKE ${searchPattern}
             )
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM guest_comments AS search_comment
+          WHERE search_comment.person_id = guest.person_id
+            AND search_comment.body ILIKE ${searchPattern}
         )
       )
     `);
@@ -1582,9 +1644,8 @@ function indexedGuestPageWhereSql(
   if (query.hasNotes) {
     predicates.push(Prisma.sql`EXISTS (
       SELECT 1
-      FROM luma_people AS noted_person
-      WHERE noted_person.person_id = guest.person_id
-        AND NULLIF(BTRIM(noted_person.crm_notes), '') IS NOT NULL
+      FROM guest_comments AS noted_comment
+      WHERE noted_comment.person_id = guest.person_id
     )`);
   }
 
@@ -1600,8 +1661,95 @@ function indexedGuestPageWhereSql(
   return Prisma.sql`WHERE ${Prisma.join(predicates, " AND ")}`;
 }
 
+function appendIndexedStatusRules(
+  predicates: Prisma.Sql[],
+  query: GuestListQuery,
+  predicateForFilter: (filter: GuestFilter) => Prisma.Sql,
+) {
+  const included = guestQueryIncludedStatusFilters(query).map(predicateForFilter);
+  if (included.length) {
+    predicates.push(included.length === 1
+      ? included[0]
+      : Prisma.sql`(${Prisma.join(included.map((predicate) => Prisma.sql`(${predicate})`), query.filterMode === "all" ? " AND " : " OR ")})`);
+  }
+  for (const predicate of (query.excludedFilters || []).filter((filter) => filter !== "all").map(predicateForFilter)) {
+    predicates.push(Prisma.sql`NOT (${predicate})`);
+  }
+}
+
+function indexedMultiEventStatusPredicateSql(filter: GuestFilter): Prisma.Sql {
+  if (["first_registers", "accepted_first_registers", "new_faces"].includes(filter)) {
+    const cohort = filter === "new_faces"
+      ? Prisma.sql`guest.status = 'checked_in'`
+      : filter === "first_registers"
+        ? indexedRegisteredGuestPredicateSql()
+        : Prisma.sql`guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)})`;
+    return Prisma.sql`(
+      ${cohort}
+      AND NOT EXISTS (
+        SELECT 1
+        FROM luma_event_guests AS previous_guest
+        LEFT JOIN luma_events AS previous_event ON previous_event.event_id = previous_guest.event_id
+        WHERE previous_guest.person_id = guest.person_id
+          AND previous_guest.event_id <> guest.event_id
+          AND (
+            (selected_event.starts_at IS NOT NULL AND (
+              previous_event.starts_at < selected_event.starts_at
+              OR (previous_event.starts_at IS NULL AND selected_event.date IS NOT NULL AND previous_event.date < selected_event.date)
+            ))
+            OR (selected_event.starts_at IS NULL AND selected_event.date IS NOT NULL AND previous_event.date < selected_event.date)
+          )
+      )
+    )`;
+  }
+  return indexedSimpleStatusPredicateSql(filter);
+}
+
+function indexedEventStatusPredicateSql(
+  filter: GuestFilter,
+  eventId: string,
+  eventBoundary: { startsAt?: Date | null; date?: Date | null } | null,
+): Prisma.Sql {
+  if (["first_registers", "accepted_first_registers", "new_faces"].includes(filter)) {
+    const cohort = filter === "new_faces"
+      ? Prisma.sql`guest.status = 'checked_in'`
+      : filter === "first_registers"
+        ? indexedRegisteredGuestPredicateSql()
+        : Prisma.sql`guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)})`;
+    return Prisma.sql`(
+      ${cohort}
+      AND NOT EXISTS (
+        SELECT 1
+        FROM luma_event_guests AS previous_guest
+        LEFT JOIN luma_events AS previous_event
+          ON previous_event.event_id = previous_guest.event_id
+        WHERE previous_guest.person_id = guest.person_id
+          AND previous_guest.event_id <> ${eventId}
+          ${previousEventBoundarySql(eventBoundary)}
+      )
+    )`;
+  }
+  return indexedSimpleStatusPredicateSql(filter);
+}
+
+function indexedSimpleStatusPredicateSql(filter: GuestFilter): Prisma.Sql {
+  if (filter === "accepted") return Prisma.sql`guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)})`;
+  if (filter === "to_decide") {
+    return Prisma.sql`(
+      guest.status = 'registered'
+      OR (guest.status = 'waitlisted' AND guest.operator_decision IS DISTINCT FROM 'waitlisted')
+    )`;
+  }
+  if (filter === "registered") return indexedRegisteredGuestPredicateSql();
+  if (filter === "invited") return Prisma.sql`(guest.invited_at IS NOT NULL OR guest.status = 'invited')`;
+  if (isIndexedInvitationOutcomeFilter(filter)) return indexedInvitationOutcomeFilterPredicateSql(filter);
+  if (isIndexedReferralFilter(filter)) return indexedReferralFilterPredicateSql(filter);
+  return Prisma.sql`guest.status = ${filter}`;
+}
+
 function indexedNewReferralFilterCtesSql(query: GuestListQuery) {
-  if (!isIndexedReferralFilter(query.filter)) return Prisma.empty;
+  const filters = guestQueryStatusFilters(query);
+  if (!filters.some(isIndexedReferralFilter)) return Prisma.empty;
   return Prisma.sql`
     latest_referral_mutations AS MATERIALIZED (
       SELECT DISTINCT ON (mutation.person_id, mutation.tag_id)
@@ -1614,7 +1762,7 @@ function indexedNewReferralFilterCtesSql(query: GuestListQuery) {
       WHERE definition.semantic_key = 'referral'
       ORDER BY mutation.person_id, mutation.tag_id, mutation.assigned_at DESC NULLS LAST, mutation.id DESC
     ),
-    ${query.filter === "new_referrals" ? Prisma.sql`
+    ${filters.includes("new_referrals") ? Prisma.sql`
       first_referral_attributions AS MATERIALIZED (
         SELECT DISTINCT ON (mutation.person_id, mutation.tag_id)
           mutation.person_id,
@@ -1634,6 +1782,7 @@ function indexedNewReferralFilterCtesSql(query: GuestListQuery) {
 const INDEXED_INVITATION_OUTCOME_FILTERS = new Set<GuestListQuery["filter"]>([
   "invited_no_response",
   "invited_accepted",
+  "invited_going",
   "invited_checked_in",
   "invited_no_show",
   "invited_declined",
@@ -1659,21 +1808,14 @@ function isIndexedReferralFilter(filter: GuestListQuery["filter"]) {
 function indexedInvitationOutcomeFilterPredicateSql(filter: GuestListQuery["filter"]) {
   if (filter === "invited_no_response") return Prisma.sql`guest.status = 'invited'`;
   if (filter === "invited_accepted") {
-    return Prisma.sql`
-      (guest.invited_at IS NOT NULL OR guest.status = 'invited')
-      AND (guest.checked_in_at IS NOT NULL OR guest.status IN ('checked_in', 'no_show'))
-    `;
+    return Prisma.sql`(guest.checked_in_at IS NOT NULL OR guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)}))`;
   }
+  if (filter === "invited_going") return Prisma.sql`guest.status = 'going'`;
   if (filter === "invited_checked_in") {
-    return Prisma.sql`
-      (guest.invited_at IS NOT NULL OR guest.status = 'invited')
-      AND (guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')
-    `;
+    return Prisma.sql`(guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')`;
   }
-  if (filter === "invited_no_show") {
-    return Prisma.sql`(guest.invited_at IS NOT NULL OR guest.status = 'invited') AND guest.status = 'no_show'`;
-  }
-  return Prisma.sql`guest.invited_at IS NOT NULL AND guest.status = 'declined'`;
+  if (filter === "invited_no_show") return Prisma.sql`guest.status = 'no_show'`;
+  return Prisma.sql`guest.status = 'declined'`;
 }
 
 function indexedReferralFilterPredicateSql(filter: GuestListQuery["filter"]) {
@@ -1684,11 +1826,8 @@ function indexedReferralFilterPredicateSql(filter: GuestListQuery["filter"]) {
       : filter === "invited_referral_no_response"
         ? Prisma.sql`guest.status = 'invited'`
         : filter === "invited_referral_accepted"
-          ? Prisma.sql`
-              (guest.invited_at IS NOT NULL OR guest.status = 'invited')
-              AND (guest.checked_in_at IS NOT NULL OR guest.status IN ('checked_in', 'no_show'))
-            `
-          : Prisma.sql`guest.invited_at IS NOT NULL AND guest.status = 'declined'`;
+          ? Prisma.sql`(guest.checked_in_at IS NOT NULL OR guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)}))`
+          : Prisma.sql`guest.status = 'declined'`;
   return Prisma.sql`
     ${cohortPredicate}
     AND EXISTS (
@@ -1746,6 +1885,7 @@ function indexedGuestPageRowToRecord(row: IndexedGuestPageRow) {
       automaticTags: row.personAutomaticTags,
       crmNotes: row.personCrmNotes,
       crmNotesUpdatedAt: row.personCrmNotesUpdatedAt,
+      crmNoteCount: Number(row.personCrmNoteCount) || 0,
     },
   };
 }
@@ -1820,7 +1960,7 @@ export async function getIndexedEventAnalytics(
 }
 
 export async function getIndexedMultiEventStats(eventIds: string[]) {
-  const boundedEventIds = [...new Set(eventIds.filter(Boolean))].slice(0, 50);
+  const boundedEventIds = [...new Set(eventIds.filter(Boolean))].slice(0, MAX_SELECTED_EVENT_IDS);
   if (!boundedEventIds.length) return null;
   const rows = await prisma().$queryRaw<Array<{
     eventCount: number;
@@ -1843,11 +1983,13 @@ export async function getIndexedMultiEventStats(eventIds: string[]) {
     referredFirstRegisters: number;
     referredReturning: number;
     invitationTotal: number;
+    invitedGoing: number;
     invitedCheckedIn: number;
     invitedNoShow: number;
     invitedNoResponse: number;
     invitedDeclined: number;
     invitedReferralTotal: number;
+    invitedReferralGoing: number;
     invitedReferralCheckedIn: number;
     invitedReferralNoShow: number;
     invitedReferralNoResponse: number;
@@ -1927,33 +2069,32 @@ export async function getIndexedMultiEventStats(eventIds: string[]) {
       COUNT(DISTINCT guest.person_id) FILTER (WHERE guest.status = 'declined')::integer AS declined,
       COUNT(DISTINCT guest.person_id) FILTER (WHERE guest.invited_at IS NOT NULL OR guest.status = 'invited')::integer AS invited,
       COUNT(*) FILTER (WHERE guest.invited_at IS NOT NULL OR guest.status = 'invited')::integer AS "invitationTotal",
+      COUNT(*) FILTER (WHERE guest.status = 'going')::integer AS "invitedGoing",
       COUNT(*) FILTER (
-        WHERE (guest.invited_at IS NOT NULL OR guest.status = 'invited')
-          AND (guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')
+        WHERE guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in'
       )::integer AS "invitedCheckedIn",
-      COUNT(*) FILTER (
-        WHERE (guest.invited_at IS NOT NULL OR guest.status = 'invited') AND guest.status = 'no_show'
-      )::integer AS "invitedNoShow",
+      COUNT(*) FILTER (WHERE guest.status = 'no_show')::integer AS "invitedNoShow",
       COUNT(*) FILTER (WHERE guest.status = 'invited')::integer AS "invitedNoResponse",
-      COUNT(*) FILTER (
-        WHERE guest.invited_at IS NOT NULL AND guest.status = 'declined'
-      )::integer AS "invitedDeclined",
+      COUNT(*) FILTER (WHERE guest.status = 'declined')::integer AS "invitedDeclined",
       COUNT(*) FILTER (
         WHERE guest.is_referred AND (guest.invited_at IS NOT NULL OR guest.status = 'invited')
       )::integer AS "invitedReferralTotal",
       COUNT(*) FILTER (
         WHERE guest.is_referred
-          AND (guest.invited_at IS NOT NULL OR guest.status = 'invited')
+          AND guest.status = 'going'
+      )::integer AS "invitedReferralGoing",
+      COUNT(*) FILTER (
+        WHERE guest.is_referred
           AND (guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')
       )::integer AS "invitedReferralCheckedIn",
       COUNT(*) FILTER (
-        WHERE guest.is_referred AND guest.invited_at IS NOT NULL AND guest.status = 'no_show'
+        WHERE guest.is_referred AND guest.status = 'no_show'
       )::integer AS "invitedReferralNoShow",
       COUNT(*) FILTER (
         WHERE guest.is_referred AND guest.status = 'invited'
       )::integer AS "invitedReferralNoResponse",
       COUNT(*) FILTER (
-        WHERE guest.is_referred AND guest.invited_at IS NOT NULL AND guest.status = 'declined'
+        WHERE guest.is_referred AND guest.status = 'declined'
       )::integer AS "invitedReferralDeclined",
       COUNT(DISTINCT guest.person_id) FILTER (WHERE guest.status = 'waitlisted')::integer AS waitlisted,
       COUNT(DISTINCT guest.person_id) FILTER (
@@ -2016,11 +2157,13 @@ export async function getIndexedMultiEventStats(eventIds: string[]) {
       referredFirstRegisters: 0,
       referredReturning: 0,
       invitationTotal: 0,
+      invitedGoing: 0,
       invitedCheckedIn: 0,
       invitedNoShow: 0,
       invitedNoResponse: 0,
       invitedDeclined: 0,
       invitedReferralTotal: 0,
+      invitedReferralGoing: 0,
       invitedReferralCheckedIn: 0,
       invitedReferralNoShow: 0,
       invitedReferralNoResponse: 0,
@@ -2030,7 +2173,7 @@ export async function getIndexedMultiEventStats(eventIds: string[]) {
 }
 
 export async function listIndexedAnalyticsRespondents(query: AnalyticsRespondentQuery) {
-  const eventIds = [...new Set(query.eventIds.filter(Boolean))].slice(0, 50);
+  const eventIds = [...new Set(query.eventIds.filter(Boolean))].slice(0, MAX_SELECTED_EVENT_IDS);
   if (!eventIds.length || !query.question) {
     return {
       source: "luma-index",
@@ -2167,7 +2310,7 @@ async function indexedEventAnalytics(
   const priorRegistrationBoundary = previousEventBoundarySql(eventBoundary);
   const diagnosticStartedAt = Date.now();
   const [summaryRows, analyticsQuestionRows] = await db.$transaction([
-    db.$queryRaw<Array<{ total: number; checkedIn: number; accepted: number; registered: number; pending: number; declined: number; invited: number; waitlisted: number; toDecide: number; firstRegisters: number; newRegistrations: number; newFaces: number; referredRegistrations: number; newReferrals: number; referredAccepted: number; referredCheckedIn: number; referredFirstRegisters: number; referredReturning: number; invitationTotal: number; invitedCheckedIn: number; invitedNoShow: number; invitedNoResponse: number; invitedDeclined: number; invitedReferralTotal: number; invitedReferralCheckedIn: number; invitedReferralNoShow: number; invitedReferralNoResponse: number; invitedReferralDeclined: number }>>(Prisma.sql`
+    db.$queryRaw<Array<{ total: number; checkedIn: number; accepted: number; registered: number; pending: number; declined: number; invited: number; waitlisted: number; toDecide: number; firstRegisters: number; newRegistrations: number; newFaces: number; referredRegistrations: number; newReferrals: number; referredAccepted: number; referredCheckedIn: number; referredFirstRegisters: number; referredReturning: number; invitationTotal: number; invitedGoing: number; invitedCheckedIn: number; invitedNoShow: number; invitedNoResponse: number; invitedDeclined: number; invitedReferralTotal: number; invitedReferralGoing: number; invitedReferralCheckedIn: number; invitedReferralNoShow: number; invitedReferralNoResponse: number; invitedReferralDeclined: number }>>(Prisma.sql`
       WITH latest_manual_tag_mutations AS MATERIALIZED (
         SELECT DISTINCT ON (mutation.person_id, mutation.tag_id)
           mutation.person_id,
@@ -2230,33 +2373,32 @@ async function indexedEventAnalytics(
         COUNT(*) FILTER (WHERE guest.status = 'declined')::integer AS declined,
         COUNT(*) FILTER (WHERE guest.invited_at IS NOT NULL OR guest.status = 'invited')::integer AS invited,
         COUNT(*) FILTER (WHERE guest.invited_at IS NOT NULL OR guest.status = 'invited')::integer AS "invitationTotal",
+        COUNT(*) FILTER (WHERE guest.status = 'going')::integer AS "invitedGoing",
         COUNT(*) FILTER (
-          WHERE (guest.invited_at IS NOT NULL OR guest.status = 'invited')
-            AND (guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')
+          WHERE guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in'
         )::integer AS "invitedCheckedIn",
-        COUNT(*) FILTER (
-          WHERE (guest.invited_at IS NOT NULL OR guest.status = 'invited') AND guest.status = 'no_show'
-        )::integer AS "invitedNoShow",
+        COUNT(*) FILTER (WHERE guest.status = 'no_show')::integer AS "invitedNoShow",
         COUNT(*) FILTER (WHERE guest.status = 'invited')::integer AS "invitedNoResponse",
-        COUNT(*) FILTER (
-          WHERE guest.invited_at IS NOT NULL AND guest.status = 'declined'
-        )::integer AS "invitedDeclined",
+        COUNT(*) FILTER (WHERE guest.status = 'declined')::integer AS "invitedDeclined",
         COUNT(*) FILTER (
           WHERE guest.is_referred AND (guest.invited_at IS NOT NULL OR guest.status = 'invited')
         )::integer AS "invitedReferralTotal",
         COUNT(*) FILTER (
           WHERE guest.is_referred
-            AND (guest.invited_at IS NOT NULL OR guest.status = 'invited')
+            AND guest.status = 'going'
+        )::integer AS "invitedReferralGoing",
+        COUNT(*) FILTER (
+          WHERE guest.is_referred
             AND (guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')
         )::integer AS "invitedReferralCheckedIn",
         COUNT(*) FILTER (
-          WHERE guest.is_referred AND guest.invited_at IS NOT NULL AND guest.status = 'no_show'
+          WHERE guest.is_referred AND guest.status = 'no_show'
         )::integer AS "invitedReferralNoShow",
         COUNT(*) FILTER (
           WHERE guest.is_referred AND guest.status = 'invited'
         )::integer AS "invitedReferralNoResponse",
         COUNT(*) FILTER (
-          WHERE guest.is_referred AND guest.invited_at IS NOT NULL AND guest.status = 'declined'
+          WHERE guest.is_referred AND guest.status = 'declined'
         )::integer AS "invitedReferralDeclined",
         COUNT(*) FILTER (WHERE guest.status = 'waitlisted')::integer AS waitlisted,
         COUNT(*) FILTER (
@@ -2318,7 +2460,7 @@ async function indexedEventAnalytics(
     answerRowCount: analyticsQuestionRows.length,
   });
   return {
-    stats: summaryRows[0] || { total: 0, checkedIn: 0, accepted: 0, registered: 0, pending: 0, declined: 0, invited: 0, waitlisted: 0, toDecide: 0, firstRegisters: 0, newRegistrations: 0, newFaces: 0, referredRegistrations: 0, newReferrals: 0, referredAccepted: 0, referredCheckedIn: 0, referredFirstRegisters: 0, referredReturning: 0, invitationTotal: 0, invitedCheckedIn: 0, invitedNoShow: 0, invitedNoResponse: 0, invitedDeclined: 0, invitedReferralTotal: 0, invitedReferralCheckedIn: 0, invitedReferralNoShow: 0, invitedReferralNoResponse: 0, invitedReferralDeclined: 0 },
+    stats: summaryRows[0] || { total: 0, checkedIn: 0, accepted: 0, registered: 0, pending: 0, declined: 0, invited: 0, waitlisted: 0, toDecide: 0, firstRegisters: 0, newRegistrations: 0, newFaces: 0, referredRegistrations: 0, newReferrals: 0, referredAccepted: 0, referredCheckedIn: 0, referredFirstRegisters: 0, referredReturning: 0, invitationTotal: 0, invitedGoing: 0, invitedCheckedIn: 0, invitedNoShow: 0, invitedNoResponse: 0, invitedDeclined: 0, invitedReferralTotal: 0, invitedReferralGoing: 0, invitedReferralCheckedIn: 0, invitedReferralNoShow: 0, invitedReferralNoResponse: 0, invitedReferralDeclined: 0 },
     analyticsQuestions: buildRegistrationQuestionAnalytics(analyticsQuestionRows),
   };
 }
@@ -2743,19 +2885,111 @@ function notFound(message: string) {
   return error;
 }
 
-export async function updateIndexedPersonCrmNotes(personId: string, notes: string) {
-  return prisma().lumaPerson.update({
+export async function listIndexedPersonComments(personId: string, { limit = 200 }: { limit?: number } = {}) {
+  const comments = await prisma().guestComment.findMany({
     where: { personId },
-    data: {
-      crmNotes: notes,
-      crmNotesUpdatedAt: new Date(),
-    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: Math.max(1, Math.min(500, Math.trunc(limit) || 200)),
     select: {
+      id: true,
       personId: true,
-      crmNotes: true,
-      crmNotesUpdatedAt: true,
+      body: true,
+      author: true,
+      createdAt: true,
     },
   });
+  return comments.reverse();
+}
+
+export async function appendIndexedPersonComment({
+  personId,
+  body,
+  author,
+}: {
+  personId: string;
+  body: string;
+  author: string;
+}) {
+  return prisma().$transaction(async (transaction) => {
+    const person = await transaction.lumaPerson.findUnique({
+      where: { personId },
+      select: { personId: true },
+    });
+    if (!person) throw notFound("Person not found.");
+    const comment = await transaction.guestComment.create({
+      data: { personId, body, author },
+      select: {
+        id: true,
+        personId: true,
+        body: true,
+        author: true,
+        createdAt: true,
+      },
+    });
+    return comment;
+  });
+}
+
+export async function updateIndexedPersonComment({
+  personId,
+  commentId,
+  body,
+}: {
+  personId: string;
+  commentId: bigint;
+  body: string;
+}) {
+  return prisma().$transaction(async (transaction) => {
+    const existing = await transaction.guestComment.findFirst({
+      where: { id: commentId, personId },
+      select: { id: true },
+    });
+    if (!existing) throw notFound("Comment not found.");
+    const comment = await transaction.guestComment.update({
+      where: { id: commentId },
+      data: { body },
+      select: {
+        id: true,
+        personId: true,
+        body: true,
+        author: true,
+        createdAt: true,
+      },
+    });
+    const summary = await indexedPersonCommentSummary(transaction, personId);
+    return { comment, ...summary };
+  });
+}
+
+export async function deleteIndexedPersonComment({
+  personId,
+  commentId,
+}: {
+  personId: string;
+  commentId: bigint;
+}) {
+  return prisma().$transaction(async (transaction) => {
+    const removed = await transaction.guestComment.deleteMany({
+      where: { id: commentId, personId },
+    });
+    if (!removed.count) throw notFound("Comment not found.");
+    return indexedPersonCommentSummary(transaction, personId);
+  });
+}
+
+async function indexedPersonCommentSummary(
+  transaction: Prisma.TransactionClient,
+  personId: string,
+) {
+  const [latestComment, commentCount] = await Promise.all([
+    transaction.guestComment.findFirst({
+      where: { personId },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      select: { body: true, createdAt: true },
+    }),
+    transaction.guestComment.count({ where: { personId } }),
+  ]);
+  return { latestComment, commentCount };
 }
 
 type AutomaticTagClassifierOptions = {
@@ -4240,6 +4474,10 @@ function indexedEventToApiEvent(row) {
 
 function indexedPersonToApiPerson(row: any, guestRow: any = {}) {
   const avatarCandidates = indexedAvatarCandidates(row.raw, row.avatarUrl);
+  const latestComment = Array.isArray(row.comments) ? row.comments[0] : null;
+  const crmNotes = row.crmNotes ?? latestComment?.body ?? "";
+  const crmNotesUpdatedAt = row.crmNotesUpdatedAt ?? latestComment?.createdAt ?? null;
+  const crmNoteCount = Number(row.crmNoteCount ?? row._count?.comments ?? (latestComment ? 1 : 0)) || 0;
   return {
     id: row.personId,
     lumaUserId: row.lumaUserId || null,
@@ -4257,8 +4495,9 @@ function indexedPersonToApiPerson(row: any, guestRow: any = {}) {
     tags: row.tags || [],
     manualTags: row.manualTags || [],
     automaticTags: row.automaticTags || [],
-    crmNotes: row.crmNotes || "",
-    crmNotesUpdatedAt: isoOrNull(row.crmNotesUpdatedAt),
+    crmNotes,
+    crmNotesUpdatedAt: isoOrNull(crmNotesUpdatedAt),
+    crmNoteCount,
     notes: row.bio || guestRow.profileDescription || "",
     source: "luma",
     dataSource: "luma-index",

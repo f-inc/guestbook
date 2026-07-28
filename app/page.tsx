@@ -39,6 +39,7 @@ import {
   Send,
   Settings2,
   Tag,
+  Trash2,
   Undo2,
   UserMinus,
   UserPlus,
@@ -47,6 +48,7 @@ import {
 } from "lucide-react";
 import { activityRecordStatus } from "./activity-status";
 import { orderAvatarCandidates } from "./avatar-order";
+import { allVisibleEventSelection, nextEventSelection } from "./event-selection";
 import { guestStatusDate, guestStatusTimestamp } from "./guest-status-date";
 import { updateGuestSelection } from "./guest-selection";
 import { MAX_INVITE_MESSAGE_LENGTH } from "./invite-message";
@@ -113,6 +115,7 @@ const guestFilterOptions = [
   { value: "new_referrals", label: "New referrals", color: "#316c86" },
   { value: "invited_no_response", label: "Invitation: no response", color: "#9a6418" },
   { value: "invited_accepted", label: "Invitation: accepted", color: "#047857" },
+  { value: "invited_going", label: "Invitation: going", color: "#047857" },
   { value: "invited_checked_in", label: "Invitation: checked in", color: "#1d4f47" },
   { value: "invited_no_show", label: "Invitation: no-show", color: "#9d3d38" },
   { value: "invited_declined", label: "Invitation: declined", color: "#9d3d38" },
@@ -183,6 +186,9 @@ const initialState = {
   filters: {
     event: "upcoming",
     guestStatus: "all",
+    guestStatuses: [],
+    guestStatusMode: "any",
+    guestExcludedStatuses: [],
     guestSearch: "",
     guestTags: [],
     guestTagMode: "any",
@@ -229,9 +235,11 @@ export default function Home() {
   const [avatarPreview, setAvatarPreview] = useState<{ person: any; url: string } | null>(null);
   const avatarPreviewRef = useRef<{ person: any; url: string } | null>(null);
   const [activeEventTab, setActiveEventTab] = useState("overview");
+  const [guestSortField, setGuestSortField] = useState<"status_date" | "events_attended" | "events_registered">("status_date");
   const [guestDateSortDirection, setGuestDateSortDirection] = useState<"asc" | "desc">("desc");
   const [commandPressed, setCommandPressed] = useState(false);
   const [loadingGuestEvents, setLoadingGuestEvents] = useState([]);
+  const [syncingEventIds, setSyncingEventIds] = useState<string[]>([]);
   const [eventDraft, setEventDraft] = useState(null);
   const [guestStatusDraft, setGuestStatusDraft] = useState(null);
   const [bulkTagConfirmation, setBulkTagConfirmation] = useState(null);
@@ -270,6 +278,7 @@ export default function Home() {
   const eventWindowRef = useRef({ start: 0, end: EVENT_PAGE_SIZE });
   const eventPrependSnapshotRef = useRef(null);
   const suppressEventScrollRef = useRef(false);
+  const eventSelectionAnchorIdRef = useRef("");
   const [activityTraces, setActivityTraces] = useState({});
   const [eventWindow, setEventWindow] = useState({ start: 0, end: EVENT_PAGE_SIZE });
   const [newGroup, setNewGroup] = useState({ name: "", color: "#0f766e" });
@@ -315,6 +324,9 @@ export default function Home() {
         event: urlState.eventView,
         globalSearch: urlState.eventSearch,
         guestStatus: urlState.guestStatus,
+        guestStatuses: urlState.guestStatuses || (urlState.guestStatus === "all" ? [] : [urlState.guestStatus]),
+        guestStatusMode: urlState.guestStatusMode || "any",
+        guestExcludedStatuses: urlState.guestExcludedStatuses || [],
         guestSearch: urlState.guestSearch,
         guestTags: urlState.guestTags,
         guestTagMode: urlState.guestTagMode || "any",
@@ -671,16 +683,21 @@ export default function Home() {
   const inviteAudience = useMemo(() => computeInviteAudience(state), [state]);
   const selectedEventAnalytics = useMemo(() => buildWorkspaceAnalytics(state, selectedEvents, uniqueWorkspaceStats), [state, selectedEventIdsKey, uniqueWorkspaceStats]);
   const filteredEvents = useMemo(() => visibleEvents(state, lifecycleNow), [state, lifecycleNow]);
+  const eventSearchActive = Boolean(state.filters.globalSearch.trim());
+  const allFilteredEventsSelected = filteredEvents.length > 0
+    && filteredEvents.length === selectedEvents.length
+    && filteredEvents.every((event) => state.selectedEventIds.includes(event.id));
   const eventListKey = `${state.filters.event}:${state.filters.globalSearch.trim().toLowerCase()}`;
   const eventListSignature = filteredEvents.map((event) => `${event.id}:${event.date}`).join("|");
   const eventAnchorId = state.filters.event === "all" ? nearestUpcomingEventId(filteredEvents) : "";
   const renderedEvents = filteredEvents.slice(eventWindow.start, eventWindow.end);
   const visibleGuests = useMemo(
-    () => workspaceEventGuests(state, selectedEvents, guestDateSortDirection),
-    [state, selectedEventIdsKey, guestDateSortDirection],
+    () => workspaceEventGuests(state, selectedEvents, guestSortField, guestDateSortDirection),
+    [state, selectedEventIdsKey, guestSortField, guestDateSortDirection],
   );
   const guestTagFilterKey = `${state.filters.guestTagMode}:${state.filters.guestTags.join("\u0000")}:${state.filters.guestExcludedTags.join("\u0000")}`;
-  const multiEventGuestQueryKey = `${multiEventStatsKey}:${state.filters.guestStatus}:${debouncedGuestSearch}:${guestTagFilterKey}:${state.filters.guestHasNotes ? 1 : 0}:${state.filters.guestAttendedGreaterThan}:${guestDateSortDirection}`;
+  const guestStatusFilterKey = `${state.filters.guestStatusMode}:${state.filters.guestStatuses.join("\u0000")}:${state.filters.guestExcludedStatuses.join("\u0000")}`;
+  const multiEventGuestQueryKey = `${multiEventStatsKey}:${guestStatusFilterKey}:${debouncedGuestSearch}:${guestTagFilterKey}:${state.filters.guestHasNotes ? 1 : 0}:${state.filters.guestAttendedGreaterThan}:${guestSortField}:${guestDateSortDirection}`;
   const normalizedUniversalQuery = universalQuery.trim().toLocaleLowerCase();
   const activeUniversalPeopleSearch = universalPeopleSearch.query === normalizedUniversalQuery ? universalPeopleSearch : null;
   const universalResults = useMemo(
@@ -693,7 +710,8 @@ export default function Home() {
   const showProfilePanel = profilePanelOpen && hasSelectedProfile;
   const showGuestReferrer = !showProfilePanel;
   const guestTableColumnCount = 9 + Number(showGuestGroups) + Number(showGuestReferrer);
-  const hasActiveGuestFilters = state.filters.guestStatus !== "all"
+  const hasActiveGuestFilters = state.filters.guestStatuses.length > 0
+    || state.filters.guestExcludedStatuses.length > 0
     || state.filters.guestTags.length > 0
     || state.filters.guestExcludedTags.length > 0
     || state.filters.guestHasNotes
@@ -703,6 +721,7 @@ export default function Home() {
   const inviteTargetEvents = selectedEvents.length ? selectedEvents : inviteTargetEvent ? [inviteTargetEvent] : [];
   const selectedEventLoadingGuests = selectedEvents.some((event) => loadingGuestEvents.includes(event.id))
     || (multiEventMode && multiEventGuestState.key === multiEventGuestQueryKey && multiEventGuestState.loading);
+  const selectedEventSyncing = selectedEvents.some((event) => syncingEventIds.includes(event.id));
   const selectedEventNeedsGuestLoad = selectedEvents.some((event) => event.source === "luma" && !event.guestsLoaded);
   const selectedGuestRows = visibleGuests.filter(({ person }) => selectedGuestIds.has(person.id));
   const activeMultiEventGuestPageInfo = multiEventMode && multiEventGuestState.key === multiEventGuestQueryKey ? multiEventGuestState.pageInfo : null;
@@ -749,6 +768,9 @@ export default function Home() {
       eventSearch: state.filters.globalSearch.trim(),
       tab: activeEventTab as WorkspaceUrlState["tab"],
       guestStatus: state.filters.guestStatus,
+      guestStatuses: state.filters.guestStatuses,
+      guestStatusMode: state.filters.guestStatusMode === "all" ? "all" : "any",
+      guestExcludedStatuses: state.filters.guestExcludedStatuses,
       guestSearch: state.filters.guestSearch.trim(),
       guestTags: state.filters.guestTags,
       guestTagMode: state.filters.guestTagMode === "all" ? "all" : "any",
@@ -777,7 +799,7 @@ export default function Home() {
     selectedPerson?.id,
     state.filters.event,
     state.filters.globalSearch,
-    state.filters.guestStatus,
+    guestStatusFilterKey,
     state.filters.guestSearch,
     guestTagFilterKey,
     state.filters.guestHasNotes,
@@ -1088,16 +1110,12 @@ export default function Home() {
     void loadAnalyticsRespondents(draft);
   };
 
-  const selectEvent = (eventId, { additive = false, preserveProfile = false }: { additive?: boolean; preserveProfile?: boolean } = {}) => {
+  const applyEventSelection = (
+    nextIds: string[],
+    nextPrimaryId: string,
+    { preserveProfile = false }: { preserveProfile?: boolean } = {},
+  ) => {
     const currentIds = selectedWorkspaceEvents(state).map((event) => event.id);
-    const alreadySelected = currentIds.includes(eventId);
-    let nextIds = [eventId];
-    if (additive) {
-      nextIds = alreadySelected
-        ? currentIds.length > 1 ? currentIds.filter((id) => id !== eventId) : currentIds
-        : [...currentIds, eventId];
-    }
-    const nextPrimaryId = nextIds.includes(eventId) ? eventId : nextIds.at(-1) || eventId;
     const eventChanged = nextPrimaryId !== state.selectedEventId || nextIds.join("\u0000") !== currentIds.join("\u0000");
     if (eventChanged) beginEventSwitchDiagnostic(nextPrimaryId);
     if (eventChanged) workspaceUrlModeRef.current = "push";
@@ -1105,6 +1123,7 @@ export default function Home() {
     setGuestPageTarget(1);
     if (eventChanged) {
       setDebouncedGuestSearch("");
+      setGuestSortField("status_date");
       setGuestDateSortDirection("desc");
       setAllMatchingGuestsSelected(false);
       setSelectedGuestIds(new Set());
@@ -1117,6 +1136,9 @@ export default function Home() {
       draft.invite.targetEventId = nextPrimaryId;
       if (eventChanged) {
         draft.filters.guestStatus = "all";
+        draft.filters.guestStatuses = [];
+        draft.filters.guestStatusMode = "any";
+        draft.filters.guestExcludedStatuses = [];
         draft.filters.guestSearch = "";
         draft.filters.guestTags = [];
         draft.filters.guestTagMode = "any";
@@ -1128,13 +1150,47 @@ export default function Home() {
     if (eventChanged && !preserveProfile) setProfilePanelOpen(false);
   };
 
+  const selectEvent = (
+    eventId,
+    {
+      additive = false,
+      range = false,
+      preserveProfile = false,
+    }: { additive?: boolean; range?: boolean; preserveProfile?: boolean } = {},
+  ) => {
+    const selection = nextEventSelection({
+      currentIds: selectedWorkspaceEvents(state).map((event) => event.id),
+      eventId,
+      additive,
+      range,
+      anchorId: eventSelectionAnchorIdRef.current,
+      orderedEventIds: filteredEvents.map((event) => event.id),
+    });
+    eventSelectionAnchorIdRef.current = selection.anchorId;
+    applyEventSelection(selection.eventIds, selection.primaryEventId, { preserveProfile });
+  };
+
+  const selectAllFilteredEvents = () => {
+    const selection = allVisibleEventSelection(
+      filteredEvents.map((event) => event.id),
+      state.selectedEventId,
+    );
+    if (!selection.eventIds.length) return;
+    eventSelectionAnchorIdRef.current = selection.anchorId;
+    applyEventSelection(selection.eventIds, selection.primaryEventId);
+  };
+
   const clearMultiEventSelection = () => {
     const firstSelectedEvent = selectedWorkspaceEvents(state)[0];
     if (firstSelectedEvent) selectEvent(firstSelectedEvent.id);
   };
 
   const setFilter = (key, value) => {
-    if (["guestStatus", "guestSearch", "guestTags", "guestTagMode", "guestExcludedTags"].includes(key)) {
+    if (key === "guestStatus") {
+      setGuestStatusRules(value === "all" ? [] : [value], [], "any");
+      return;
+    }
+    if (["guestStatuses", "guestStatusMode", "guestExcludedStatuses", "guestSearch", "guestTags", "guestTagMode", "guestExcludedTags"].includes(key)) {
       setGuestPageTarget(1);
       setAllMatchingGuestsSelected(false);
       setSelectedGuestIds(new Set());
@@ -1145,6 +1201,39 @@ export default function Home() {
     });
   };
 
+  const setGuestStatusRules = (
+    included: string[],
+    excluded: string[],
+    mode: "any" | "all" = state.filters.guestStatusMode === "all" ? "all" : "any",
+  ) => {
+    const validStatuses = new Set(guestFilterOptions.map((option) => option.value).filter((value) => value !== "all"));
+    const nextIncluded = (unique(included) as string[]).filter((status) => validStatuses.has(status));
+    const nextExcluded = (unique(excluded) as string[]).filter((status) => validStatuses.has(status) && !nextIncluded.includes(status));
+    setGuestPageTarget(1);
+    setAllMatchingGuestsSelected(false);
+    setSelectedGuestIds(new Set());
+    lastSelectedGuestIdRef.current = "";
+    updateState((draft) => {
+      draft.filters.guestStatus = nextIncluded[0] || "all";
+      draft.filters.guestStatuses = nextIncluded;
+      draft.filters.guestStatusMode = mode;
+      draft.filters.guestExcludedStatuses = nextExcluded;
+    });
+  };
+
+  const toggleGuestSort = (field: "status_date" | "events_attended" | "events_registered") => {
+    setGuestPageTarget(1);
+    setAllMatchingGuestsSelected(false);
+    setSelectedGuestIds(new Set());
+    lastSelectedGuestIdRef.current = "";
+    if (guestSortField === field) {
+      setGuestDateSortDirection((current) => current === "desc" ? "asc" : "desc");
+      return;
+    }
+    setGuestSortField(field);
+    setGuestDateSortDirection("desc");
+  };
+
   const clearGuestFilters = () => {
     setGuestPageTarget(1);
     setDebouncedGuestSearch("");
@@ -1153,6 +1242,9 @@ export default function Home() {
     lastSelectedGuestIdRef.current = "";
     updateState((draft) => {
       draft.filters.guestStatus = "all";
+      draft.filters.guestStatuses = [];
+      draft.filters.guestStatusMode = "any";
+      draft.filters.guestExcludedStatuses = [];
       draft.filters.guestTags = [];
       draft.filters.guestTagMode = "any";
       draft.filters.guestExcludedTags = [];
@@ -1176,6 +1268,9 @@ export default function Home() {
       force = false,
       append = false,
       status = state.filters.guestStatus,
+      statuses = state.filters.guestStatuses,
+      statusMode = state.filters.guestStatusMode === "all" ? "all" : "any",
+      excludedStatuses = state.filters.guestExcludedStatuses,
       search = debouncedGuestSearch,
       tags = state.filters.guestTags,
       tagMode = state.filters.guestTagMode === "all" ? "all" : "any",
@@ -1185,7 +1280,7 @@ export default function Home() {
       cursor = "",
       priority = false,
       background = false,
-    }: { force?: boolean; append?: boolean; status?: string; search?: string; tags?: string[]; tagMode?: "any" | "all"; excludedTags?: string[]; hasNotes?: boolean; attendedGreaterThan?: string; cursor?: string; priority?: boolean; background?: boolean } = {},
+    }: { force?: boolean; append?: boolean; status?: string; statuses?: string[]; statusMode?: "any" | "all"; excludedStatuses?: string[]; search?: string; tags?: string[]; tagMode?: "any" | "all"; excludedTags?: string[]; hasNotes?: boolean; attendedGreaterThan?: string; cursor?: string; priority?: boolean; background?: boolean } = {},
   ) => {
     const event = getEvent(state, eventId);
     if (!event) {
@@ -1201,10 +1296,14 @@ export default function Home() {
 
     const params = new URLSearchParams({
       event_id: eventId,
-      guest_status: status,
       guest_limit: String(GUEST_PAGE_SIZE),
+      guest_sort_by: guestSortField,
       guest_sort: guestDateSortDirection,
     });
+    const includedStatuses = statuses.length ? statuses : status !== "all" ? [status] : [];
+    includedStatuses.forEach((guestStatus) => params.append("guest_status", guestStatus));
+    if (statusMode === "all") params.set("guest_status_mode", "all");
+    excludedStatuses.forEach((guestStatus) => params.append("guest_status_not", guestStatus));
     if (search) params.set("guest_search", search);
     if (hasNotes) params.set("guest_has_notes", "1");
     if (attendedGreaterThan !== "") params.set("guest_attended_gt", attendedGreaterThan);
@@ -1338,14 +1437,17 @@ export default function Home() {
     };
   }, [sessionStatus, sessionKey, selectedEventIdsKey]);
 
-  const performSelectedEventSync = async (eventIds, token = "") => {
+  const performSelectedEventSync = async (eventIds: string[], token = "") => {
+    const requestedEventIds = [...new Set(eventIds.filter(Boolean))];
+    if (!requestedEventIds.length) return false;
     const normalizedToken = normalizeLumaSessionTokenInput(token);
     let scannedReferrers = 0;
     let updatedReferrers = 0;
     let failedReferrers = 0;
     let referrersTruncated = false;
+    setSyncingEventIds((current) => [...new Set([...current, ...requestedEventIds])]);
     try {
-      for (const eventId of eventIds) {
+      for (const eventId of requestedEventIds) {
         await loadEventGuests(eventId, { force: true });
         if (!normalizedToken) continue;
         const result = await postLumaAction({
@@ -1364,7 +1466,7 @@ export default function Home() {
         const limitText = referrersTruncated ? " The configured referrer limit was reached." : "";
         setApiState({
           status: failedReferrers ? "error" : "live",
-          message: `Synced ${eventIds.length} event${eventIds.length === 1 ? "" : "s"}; checked ${scannedReferrers} missing referrer${scannedReferrers === 1 ? "" : "s"} and filled ${updatedReferrers}.${failureText}${limitText}`,
+          message: `Synced ${requestedEventIds.length} event${requestedEventIds.length === 1 ? "" : "s"}; checked ${scannedReferrers} missing referrer${scannedReferrers === 1 ? "" : "s"} and filled ${updatedReferrers}.${failureText}${limitText}`,
         });
       }
       return true;
@@ -1372,7 +1474,7 @@ export default function Home() {
       if (error.code === "LUMA_SESSION_INVALID") {
         window.localStorage.removeItem(LUMA_SESSION_TOKEN_STORAGE_KEY);
         setLumaSessionPrompt({
-          pending: { kind: "sync_referrers", eventIds },
+          pending: { kind: "sync_referrers", eventIds: requestedEventIds },
           token: "",
           error: error.message,
           submitting: false,
@@ -1381,6 +1483,9 @@ export default function Home() {
       }
       setApiState({ status: "error", message: error.message });
       return false;
+    } finally {
+      const completedEventIds = new Set(requestedEventIds);
+      setSyncingEventIds((current) => current.filter((eventId) => !completedEventIds.has(eventId)));
     }
   };
 
@@ -1406,6 +1511,9 @@ export default function Home() {
     {
       append = false,
       status = state.filters.guestStatus,
+      statuses = state.filters.guestStatuses,
+      statusMode = state.filters.guestStatusMode === "all" ? "all" : "any",
+      excludedStatuses = state.filters.guestExcludedStatuses,
       search = debouncedGuestSearch,
       tags = state.filters.guestTags,
       tagMode = state.filters.guestTagMode === "all" ? "all" : "any",
@@ -1413,14 +1521,15 @@ export default function Home() {
       hasNotes = state.filters.guestHasNotes,
       attendedGreaterThan = state.filters.guestAttendedGreaterThan,
       cursor = "",
-    }: { append?: boolean; status?: string; search?: string; tags?: string[]; tagMode?: "any" | "all"; excludedTags?: string[]; hasNotes?: boolean; attendedGreaterThan?: string; cursor?: string } = {},
+    }: { append?: boolean; status?: string; statuses?: string[]; statusMode?: "any" | "all"; excludedStatuses?: string[]; search?: string; tags?: string[]; tagMode?: "any" | "all"; excludedTags?: string[]; hasNotes?: boolean; attendedGreaterThan?: string; cursor?: string } = {},
   ) => {
     const eventIds = selectedWorkspaceEvents(state)
       .filter((event) => event.source === "luma")
       .map((event) => event.id);
     if (eventIds.length < 2) return;
 
-    const queryKey = `${[...eventIds].sort().join("\u0000")}:${status}:${search}:${tagMode}:${tags.join("\u0000")}:${excludedTags.join("\u0000")}:${hasNotes ? 1 : 0}:${attendedGreaterThan}`;
+    const includedStatuses = statuses.length ? statuses : status !== "all" ? [status] : [];
+    const queryKey = `${[...eventIds].sort().join("\u0000")}:${statusMode}:${includedStatuses.join("\u0000")}:${excludedStatuses.join("\u0000")}:${search}:${tagMode}:${tags.join("\u0000")}:${excludedTags.join("\u0000")}:${hasNotes ? 1 : 0}:${attendedGreaterThan}:${guestSortField}:${guestDateSortDirection}`;
     if (append && (multiEventGuestState.loading || !cursor || (multiEventGuestAbortRef.current && !multiEventGuestAbortRef.current.signal.aborted))) return;
     multiEventGuestAbortRef.current?.abort();
     const controller = new AbortController();
@@ -1429,11 +1538,14 @@ export default function Home() {
 
     const params = new URLSearchParams({
       multi_event_guests: "1",
-      guest_status: status,
       guest_limit: String(GUEST_PAGE_SIZE),
       guest_summary: "0",
+      guest_sort_by: guestSortField,
       guest_sort: guestDateSortDirection,
     });
+    includedStatuses.forEach((guestStatus) => params.append("guest_status", guestStatus));
+    if (statusMode === "all") params.set("guest_status_mode", "all");
+    excludedStatuses.forEach((guestStatus) => params.append("guest_status_not", guestStatus));
     eventIds.forEach((eventId) => params.append("event_id", eventId));
     if (search) params.set("guest_search", search);
     if (hasNotes) params.set("guest_has_notes", "1");
@@ -1637,7 +1749,7 @@ export default function Home() {
     setSelectedGuestIds(new Set());
     setAllMatchingGuestsSelected(false);
     lastSelectedGuestIdRef.current = "";
-  }, [selectedEventIdsKey, state.filters.guestStatus, debouncedGuestSearch, guestTagFilterKey, state.filters.guestHasNotes, state.filters.guestAttendedGreaterThan]);
+  }, [selectedEventIdsKey, guestStatusFilterKey, debouncedGuestSearch, guestTagFilterKey, state.filters.guestHasNotes, state.filters.guestAttendedGreaterThan]);
 
   // EVENT_SWITCH_DIAGNOSTICS: records the first React commit containing the newly selected event shell.
   useLayoutEffect(() => {
@@ -1662,7 +1774,7 @@ export default function Home() {
         priority: !event.guestsLoaded,
       });
     });
-  }, [sessionStatus, selectedEventIdsKey, activeEventTab, state.filters.guestStatus, debouncedGuestSearch, guestTagFilterKey, state.filters.guestHasNotes, state.filters.guestAttendedGreaterThan, guestDateSortDirection]);
+  }, [sessionStatus, selectedEventIdsKey, activeEventTab, guestStatusFilterKey, debouncedGuestSearch, guestTagFilterKey, state.filters.guestHasNotes, state.filters.guestAttendedGreaterThan, guestSortField, guestDateSortDirection]);
 
   useEffect(() => {
     if (sessionStatus !== "ready" || activeEventTab !== "overview") return;
@@ -1688,7 +1800,8 @@ export default function Home() {
 
   useEffect(() => {
     if (sessionStatus !== "ready") return;
-    const hasActiveGuestQuery = state.filters.guestStatus !== "all"
+    const hasActiveGuestQuery = state.filters.guestStatuses.length > 0
+      || state.filters.guestExcludedStatuses.length > 0
       || Boolean(debouncedGuestSearch.trim())
       || state.filters.guestTags.length > 0
       || state.filters.guestExcludedTags.length > 0
@@ -1706,7 +1819,7 @@ export default function Home() {
         }));
     }, 220);
     return () => window.clearTimeout(timer);
-  }, [sessionStatus, selectedEventIdsKey, selectedEvents.map((event) => `${event.analyticsLoaded}:${event.guestSnapshotReady}:${event.guestSnapshotWarming}`).join("|"), state.filters.guestStatus, debouncedGuestSearch, guestTagFilterKey, state.filters.guestHasNotes, state.filters.guestAttendedGreaterThan]);
+  }, [sessionStatus, selectedEventIdsKey, selectedEvents.map((event) => `${event.analyticsLoaded}:${event.guestSnapshotReady}:${event.guestSnapshotWarming}`).join("|"), guestStatusFilterKey, debouncedGuestSearch, guestTagFilterKey, state.filters.guestHasNotes, state.filters.guestAttendedGreaterThan]);
 
   // EVENT_SWITCH_DIAGNOSTICS: completes after the active tab's data has committed and reached a paint frame.
   useEffect(() => {
@@ -1772,7 +1885,10 @@ export default function Home() {
   };
 
   const selectGuestFilter = (filter) => {
-    setFilter("guestStatus", state.filters.guestStatus === filter ? "all" : filter);
+    const selected = state.filters.guestStatuses.length === 1
+      && state.filters.guestStatuses[0] === filter
+      && state.filters.guestExcludedStatuses.length === 0;
+    setGuestStatusRules(selected ? [] : [filter], [], "any");
     setActiveEventTab("overview");
   };
 
@@ -1784,6 +1900,9 @@ export default function Home() {
     lastSelectedGuestIdRef.current = "";
     updateState((draft) => {
       draft.filters.guestStatus = filter;
+      draft.filters.guestStatuses = filter === "all" ? [] : [filter];
+      draft.filters.guestStatusMode = "any";
+      draft.filters.guestExcludedStatuses = [];
       draft.filters.guestSearch = "";
       draft.filters.guestTags = [];
       draft.filters.guestTagMode = "any";
@@ -1821,10 +1940,40 @@ export default function Home() {
     setOpenTagPersonId("");
     setGuestNoteDraft({
       personId: person.id,
-      notes: person.crmNotes || "",
-      updatedAt: person.crmNotesUpdatedAt || null,
+      comments: [],
+      comment: "",
+      loading: true,
       saving: false,
+      operation: "",
+      savingCommentId: "",
+      error: "",
     });
+    void apiFetch(`/api/notes?person_id=${encodeURIComponent(person.id)}`, { cache: "no-store" })
+      .then(async (response) => {
+        const data: any = await response.json();
+        if (!response.ok) throw new Error(data.error || "Unable to load guest comments.");
+        const comments = Array.isArray(data.comments) ? data.comments : [];
+        setState((current) => ({
+          ...current,
+          people: current.people.map((candidate) => candidate.id === person.id ? {
+            ...candidate,
+            crmNoteCount: comments.length,
+          } : candidate),
+        }));
+        setGuestNoteDraft((current) => current?.personId === person.id ? {
+          ...current,
+          comments,
+          loading: false,
+          error: "",
+        } : current);
+      })
+      .catch((error) => {
+        setGuestNoteDraft((current) => current?.personId === person.id ? {
+          ...current,
+          loading: false,
+          error: error.message,
+        } : current);
+      });
   };
 
   const closeGuestNote = () => {
@@ -1833,29 +1982,113 @@ export default function Home() {
 
   const saveGuestNote = async (event) => {
     event.preventDefault();
-    if (!guestNoteDraft || guestNoteDraft.saving) return;
+    if (!guestNoteDraft || guestNoteDraft.saving || guestNoteDraft.loading || !guestNoteDraft.comment.trim()) return;
     const personId = guestNoteDraft.personId;
-    setGuestNoteDraft((current) => current ? { ...current, saving: true } : current);
+    setGuestNoteDraft((current) => current ? { ...current, saving: true, operation: "add", savingCommentId: "" } : current);
     try {
       const response = await apiFetch("/api/notes", {
-        method: "PATCH",
+        method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ personId, notes: guestNoteDraft.notes }),
+        body: JSON.stringify({ personId, comment: guestNoteDraft.comment }),
       });
       const data: any = await response.json();
-      if (!response.ok) throw new Error(data.error || "Unable to save guest notes.");
+      if (!response.ok) throw new Error(data.error || "Unable to add guest comment.");
       setState((current) => ({
         ...current,
         people: current.people.map((person) => person.id === personId ? {
           ...person,
-          crmNotes: data.notes || "",
+          crmNotes: data.latestComment || "",
           crmNotesUpdatedAt: data.updatedAt || null,
+          crmNoteCount: Number(person.crmNoteCount || 0) + 1,
         } : person),
       }));
-      setGuestNoteDraft(null);
+      setGuestNoteDraft((current) => current?.personId === personId ? {
+        ...current,
+        comments: [...current.comments, data.comment],
+        comment: "",
+        saving: false,
+        operation: "",
+        savingCommentId: "",
+        error: "",
+      } : current);
     } catch (error) {
-      setGuestNoteDraft((current) => current ? { ...current, saving: false } : current);
+      setGuestNoteDraft((current) => current ? { ...current, saving: false, operation: "", savingCommentId: "", error: error.message } : current);
       setApiState({ status: "error", message: error.message });
+    }
+  };
+
+  const editGuestComment = async (commentId, comment) => {
+    if (!guestNoteDraft || guestNoteDraft.saving || !comment.trim()) return false;
+    const personId = guestNoteDraft.personId;
+    setGuestNoteDraft((current) => current ? { ...current, saving: true, operation: "edit", savingCommentId: commentId, error: "" } : current);
+    try {
+      const response = await apiFetch("/api/notes", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ personId, commentId, comment }),
+      });
+      const data: any = await response.json();
+      if (!response.ok) throw new Error(data.error || "Unable to edit guest comment.");
+      setState((current) => ({
+        ...current,
+        people: current.people.map((person) => person.id === personId ? {
+          ...person,
+          crmNotes: data.latestComment || "",
+          crmNotesUpdatedAt: data.updatedAt || null,
+          crmNoteCount: Number(data.commentCount || 0),
+        } : person),
+      }));
+      setGuestNoteDraft((current) => current?.personId === personId ? {
+        ...current,
+        comments: current.comments.map((candidate) => candidate.id === commentId ? data.comment : candidate),
+        saving: false,
+        operation: "",
+        savingCommentId: "",
+        error: "",
+      } : current);
+      return true;
+    } catch (error) {
+      setGuestNoteDraft((current) => current ? { ...current, saving: false, operation: "", savingCommentId: "", error: error.message } : current);
+      setApiState({ status: "error", message: error.message });
+      return false;
+    }
+  };
+
+  const deleteGuestComment = async (commentId) => {
+    if (!guestNoteDraft || guestNoteDraft.saving) return false;
+    if (!window.confirm("Delete this comment? This cannot be undone.")) return false;
+    const personId = guestNoteDraft.personId;
+    setGuestNoteDraft((current) => current ? { ...current, saving: true, operation: "delete", savingCommentId: commentId, error: "" } : current);
+    try {
+      const response = await apiFetch("/api/notes", {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ personId, commentId }),
+      });
+      const data: any = await response.json();
+      if (!response.ok) throw new Error(data.error || "Unable to delete guest comment.");
+      setState((current) => ({
+        ...current,
+        people: current.people.map((person) => person.id === personId ? {
+          ...person,
+          crmNotes: data.latestComment || "",
+          crmNotesUpdatedAt: data.updatedAt || null,
+          crmNoteCount: Number(data.commentCount || 0),
+        } : person),
+      }));
+      setGuestNoteDraft((current) => current?.personId === personId ? {
+        ...current,
+        comments: current.comments.filter((candidate) => candidate.id !== commentId),
+        saving: false,
+        operation: "",
+        savingCommentId: "",
+        error: "",
+      } : current);
+      return true;
+    } catch (error) {
+      setGuestNoteDraft((current) => current ? { ...current, saving: false, operation: "", savingCommentId: "", error: error.message } : current);
+      setApiState({ status: "error", message: error.message });
+      return false;
     }
   };
 
@@ -2232,6 +2465,9 @@ export default function Home() {
   const currentAllMatchingGuestSelection = () => ({
     eventIds: selectedEvents.filter((event) => event.source === "luma").map((event) => event.id),
     guestStatus: state.filters.guestStatus,
+    guestStatuses: [...state.filters.guestStatuses],
+    guestStatusMode: state.filters.guestStatusMode,
+    guestExcludedStatuses: [...state.filters.guestExcludedStatuses],
     guestSearch: debouncedGuestSearch,
     guestTags: [...state.filters.guestTags],
     guestTagMode: state.filters.guestTagMode,
@@ -2318,6 +2554,9 @@ export default function Home() {
           ...(allMatching ? {
             allMatching: true,
             guestStatus: selection?.guestStatus,
+            guestStatuses: selection?.guestStatuses,
+            guestStatusMode: selection?.guestStatusMode,
+            guestExcludedStatuses: selection?.guestExcludedStatuses,
             guestSearch: selection?.guestSearch,
             guestTags: selection?.guestTags,
             guestTagMode: selection?.guestTagMode,
@@ -2451,6 +2690,9 @@ export default function Home() {
           allMatching: true,
           eventIds: selection?.eventIds,
           guestStatus: selection?.guestStatus,
+          guestStatuses: selection?.guestStatuses,
+          guestStatusMode: selection?.guestStatusMode,
+          guestExcludedStatuses: selection?.guestExcludedStatuses,
           guestSearch: selection?.guestSearch,
           guestTags: selection?.guestTags,
           guestTagMode: selection?.guestTagMode,
@@ -3029,7 +3271,7 @@ export default function Home() {
                 aria-label="Clear multi-event selection"
                 onClick={clearMultiEventSelection}
               >
-                <span className="count-pill-value">{filteredEvents.length}</span>
+                <span className="count-pill-value">{selectedEvents.length}</span>
                 <X className="count-pill-clear" size={14} aria-hidden="true" />
               </button>
             ) : <span className="count-pill">{filteredEvents.length}</span>}
@@ -3046,6 +3288,22 @@ export default function Home() {
               />
             </span>
           </label>
+          {eventSearchActive ? (
+            <div className="calendar-search-selection" aria-live="polite">
+              <span>{filteredEvents.length.toLocaleString()} match{filteredEvents.length === 1 ? "" : "es"}</span>
+              {filteredEvents.length ? (
+                <button
+                  className="calendar-select-all"
+                  type="button"
+                  disabled={allFilteredEventsSelected}
+                  onClick={selectAllFilteredEvents}
+                >
+                  <Layers3 size={14} aria-hidden="true" />
+                  {allFilteredEventsSelected ? "All selected" : "Select all"}
+                </button>
+              ) : null}
+            </div>
+          ) : null}
           <div className="segmented" role="tablist" aria-label="Event filter">
             {["upcoming", "past", "all"].map((filter) => (
               <button
@@ -3074,7 +3332,10 @@ export default function Home() {
                         className="event-card-primary"
                         type="button"
                         aria-label={`${state.selectedEventIds.includes(event.id) ? "Selected: " : "Select "}${event.title}`}
-                        onClick={(clickEvent) => selectEvent(event.id, { additive: clickEvent.metaKey })}
+                        onClick={(clickEvent) => selectEvent(event.id, {
+                          additive: clickEvent.metaKey || clickEvent.ctrlKey,
+                          range: clickEvent.shiftKey,
+                        })}
                       >
                         <EventArtwork event={event} />
                         <div className="event-card-body">
@@ -3087,7 +3348,11 @@ export default function Home() {
                           type="checkbox"
                           aria-label={`Include ${event.title} in multi-event view`}
                           checked={state.selectedEventIds.includes(event.id) || event.id === state.selectedEventId}
-                          onChange={() => selectEvent(event.id, { additive: true })}
+                          readOnly
+                          onClick={(clickEvent) => selectEvent(event.id, {
+                            additive: true,
+                            range: clickEvent.shiftKey,
+                          })}
                         />
                       </label>
                       {commandPressed ? (
@@ -3095,7 +3360,10 @@ export default function Home() {
                           className="event-card-command-add"
                           type="button"
                           aria-label={`${state.selectedEventIds.includes(event.id) ? "Remove" : "Add"} ${event.title} ${state.selectedEventIds.includes(event.id) ? "from" : "to"} selection`}
-                          onClick={() => selectEvent(event.id, { additive: true })}
+                          onClick={(clickEvent) => selectEvent(event.id, {
+                            additive: true,
+                            range: clickEvent.shiftKey,
+                          })}
                         >
                           {state.selectedEventIds.includes(event.id) ? <X size={17} aria-hidden="true" /> : <Plus size={17} aria-hidden="true" />}
                         </button>
@@ -3131,15 +3399,16 @@ export default function Home() {
                         </a>
                       ) : null}
                       <button
-                        className="icon-button event-action-tooltip"
+                        className="icon-button event-action-tooltip event-sync-button"
                         type="button"
-                        aria-label={selectedEventLoadingGuests ? "Syncing selected events" : `Sync ${selectedEvents.length === 1 ? "event" : `${selectedEvents.length} events`}`}
-                        data-tooltip={selectedEventLoadingGuests ? "Syncing guest data…" : `Refresh ${selectedEvents.length === 1 ? "guests and referrers" : `${selectedEvents.length} events`}`}
-                        disabled={selectedEventLoadingGuests}
+                        aria-label={selectedEventSyncing ? "Syncing selected events" : `Sync ${selectedEvents.length === 1 ? "event" : `${selectedEvents.length} events`}`}
+                        aria-busy={selectedEventSyncing}
+                        data-tooltip={selectedEventSyncing ? "Syncing guests and referrers…" : `Refresh ${selectedEvents.length === 1 ? "guests and referrers" : `${selectedEvents.length} events`}`}
+                        disabled={selectedEventSyncing}
                         onClick={requestSelectedEventSync}
                       >
                         <RefreshCw
-                          className={selectedEventLoadingGuests ? "animate-spin" : ""}
+                          className={selectedEventSyncing ? "animate-spin" : ""}
                           size={18}
                           aria-hidden="true"
                         />
@@ -3185,7 +3454,9 @@ export default function Home() {
                     mode={eventSelectionTiming(selectedEvents, lifecycleNow)}
                     loading={workspaceStatsLoading || (!multiEventMode && selectedEvents.some((event) => event.source === "luma" && !eventHeaderStatsReady(event)))}
                     uniquePeople={multiEventMode}
-                    activeFilter={state.filters.guestStatus}
+                    activeFilter={state.filters.guestStatuses.length === 1 && !state.filters.guestExcludedStatuses.length
+                      ? state.filters.guestStatuses[0]
+                      : "all"}
                     onFilter={selectGuestFilter}
                   />
                 </div>
@@ -3247,8 +3518,10 @@ export default function Home() {
                     ) : null}
                     <StatusFilter
                       options={guestFilterOptions}
-                      selected={state.filters.guestStatus}
-                      onChange={(status) => setFilter("guestStatus", status)}
+                      included={state.filters.guestStatuses}
+                      excluded={state.filters.guestExcludedStatuses}
+                      mode={state.filters.guestStatusMode}
+                      onRulesChange={setGuestStatusRules}
                     />
                     <TagFilter
                       definitions={state.tagDefinitions}
@@ -3326,29 +3599,44 @@ export default function Home() {
                         <th className="status-cell">Status</th>
                         {showGuestReferrer ? <th className="referrer-cell">Referrer</th> : null}
                         <th className="event-count-heading text-center">
-                          <abbr className="table-header-abbr" data-tooltip="Events attended" aria-label="Events attended" tabIndex={0}>EA</abbr>
+                          <button
+                            className={`guest-sort-trigger ${guestSortField === "events_attended" ? "active" : ""}`}
+                            type="button"
+                            aria-label={`Sort by events attended ${guestSortField === "events_attended" && guestDateSortDirection === "desc" ? "ascending" : "descending"}`}
+                            onClick={() => toggleGuestSort("events_attended")}
+                          >
+                            <abbr className="table-header-abbr" data-tooltip="Events attended">EA</abbr>
+                            {guestSortField === "events_attended"
+                              ? guestDateSortDirection === "desc" ? <ArrowDown size={13} /> : <ArrowUp size={13} />
+                              : null}
+                          </button>
                         </th>
                         <th className="event-count-heading text-center">
-                          <abbr className="table-header-abbr" data-tooltip="Events registered" aria-label="Events registered" tabIndex={0}>ER</abbr>
+                          <button
+                            className={`guest-sort-trigger ${guestSortField === "events_registered" ? "active" : ""}`}
+                            type="button"
+                            aria-label={`Sort by events registered ${guestSortField === "events_registered" && guestDateSortDirection === "desc" ? "ascending" : "descending"}`}
+                            onClick={() => toggleGuestSort("events_registered")}
+                          >
+                            <abbr className="table-header-abbr" data-tooltip="Events registered">ER</abbr>
+                            {guestSortField === "events_registered"
+                              ? guestDateSortDirection === "desc" ? <ArrowDown size={13} /> : <ArrowUp size={13} />
+                              : null}
+                          </button>
                         </th>
                         <th>Actions</th>
-                        <th className="note-cell">Notes</th>
+                        <th className="note-cell">Comments</th>
                         <th className="whitespace-nowrap">
                           <button
-                            className="date-sort-trigger"
+                            className={`date-sort-trigger ${guestSortField === "status_date" ? "active" : ""}`}
                             type="button"
-                            aria-label={`Sort status date ${guestDateSortDirection === "desc" ? "oldest first" : "newest first"}`}
-                            aria-pressed={guestDateSortDirection === "asc"}
-                            onClick={() => {
-                              setGuestPageTarget(1);
-                              setAllMatchingGuestsSelected(false);
-                              setSelectedGuestIds(new Set());
-                              lastSelectedGuestIdRef.current = "";
-                              setGuestDateSortDirection((current) => current === "desc" ? "asc" : "desc");
-                            }}
+                            aria-label={`Sort status date ${guestSortField === "status_date" && guestDateSortDirection === "desc" ? "oldest first" : "newest first"}`}
+                            onClick={() => toggleGuestSort("status_date")}
                           >
                             <span>Status date</span>
-                            {guestDateSortDirection === "desc" ? <ArrowDown size={13} /> : <ArrowUp size={13} />}
+                            {guestSortField === "status_date"
+                              ? guestDateSortDirection === "desc" ? <ArrowDown size={13} /> : <ArrowUp size={13} />
+                              : null}
                           </button>
                         </th>
                       </tr>
@@ -3452,12 +3740,16 @@ export default function Home() {
                               <button
                                 className={`guest-note-trigger ${person.crmNotes ? "has-note" : ""}`}
                                 type="button"
-                                aria-label={`${person.crmNotes ? "Open notes" : "Add a note"} for ${person.name}`}
-                                title={person.crmNotes ? "Open notes" : "Add note"}
+                                aria-label={`${person.crmNotes ? "Open comments" : "Add a comment"} for ${person.name}`}
+                                title={person.crmNotes ? "Open comments" : "Add comment"}
                                 onClick={() => openGuestNote(person)}
                               >
-                                <FileText size={15} aria-hidden="true" />
-                                <span>{guestNoteSummary(person.crmNotes)}</span>
+                                <MessageSquare size={15} aria-hidden="true" />
+                                <span className="guest-note-trigger-copy">
+                                  <strong>{guestNoteSummary(person.crmNotes)}</strong>
+                                  {person.crmNotesUpdatedAt ? <small>{formatDateTime(person.crmNotesUpdatedAt)}</small> : null}
+                                </span>
+                                {Number(person.crmNoteCount) > 1 ? <span className="guest-comment-count">{person.crmNoteCount}</span> : null}
                               </button>
                             </td>
                             <td>
@@ -3606,6 +3898,7 @@ export default function Home() {
         <AnalyticsRespondentsDialog
           draft={analyticsRespondentDialog}
           onClose={() => setAnalyticsRespondentDialog(null)}
+          onAvatarClick={setAvatarPreview}
           onLoadMore={() => {
             const current = analyticsRespondentDialog;
             if (!current || current.loading) return;
@@ -3713,6 +4006,8 @@ export default function Home() {
           onChange={setGuestNoteDraft}
           onClose={closeGuestNote}
           onSubmit={saveGuestNote}
+          onEdit={editGuestComment}
+          onDelete={deleteGuestComment}
         />
       ) : null}
 
@@ -3814,7 +4109,7 @@ function AvatarPhotoViewer({ preview, onClose }) {
   );
 }
 
-function AnalyticsRespondentsDialog({ draft, onClose, onLoadMore, onOpenPerson }) {
+function AnalyticsRespondentsDialog({ draft, onClose, onLoadMore, onOpenPerson, onAvatarClick }) {
   const closeButtonRef = useRef(null);
   const respondents = Array.isArray(draft.respondents) ? draft.respondents : [];
   const total = draft.pageInfo?.total ?? draft.expectedCount;
@@ -3869,23 +4164,24 @@ function AnalyticsRespondentsDialog({ draft, onClose, onLoadMore, onOpenPerson }
           }}
         >
           {respondents.map((row) => (
-            <button
-              className="analytics-respondent-row"
-              type="button"
-              key={row.person.id}
-              onClick={() => onOpenPerson(row.person.id)}
-            >
-              <Avatar person={row.person} />
-              <span className="analytics-respondent-identity">
-                <strong>{row.person.name}</strong>
-                <small>{row.person.email || row.person.title || "Luma guest"}</small>
-              </span>
-              <span className="analytics-respondent-context">
-                {!draft.answer ? <strong>{row.response}</strong> : null}
-                {draft.eventIds.length > 1 ? <small>{row.eventTitle}</small> : null}
-              </span>
-              <ArrowRight size={15} aria-hidden="true" />
-            </button>
+            <div className="analytics-respondent-row" key={row.person.id}>
+              <Avatar person={row.person} onPreview={onAvatarClick} />
+              <button
+                className="analytics-respondent-open"
+                type="button"
+                onClick={() => onOpenPerson(row.person.id)}
+              >
+                <span className="analytics-respondent-identity">
+                  <strong>{row.person.name}</strong>
+                  <small>{row.person.email || row.person.title || "Luma guest"}</small>
+                </span>
+                <span className="analytics-respondent-context">
+                  {!draft.answer ? <strong>{row.response}</strong> : null}
+                  {draft.eventIds.length > 1 ? <small>{row.eventTitle}</small> : null}
+                </span>
+                <ArrowRight size={15} aria-hidden="true" />
+              </button>
+            </div>
           ))}
 
           {draft.loading ? (
@@ -4118,27 +4414,28 @@ function LumaSessionTokenDialog({ draft, onChange, onClose, onSubmit, onSkip }) 
   );
 }
 
-function GuestNoteDialog({ draft, person, onChange, onClose, onSubmit }) {
-  const [mode, setMode] = useState("write");
+function GuestNoteDialog({ draft, person, onChange, onClose, onSubmit, onEdit, onDelete }) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const [editingCommentId, setEditingCommentId] = useState("");
+  const [editingComment, setEditingComment] = useState("");
   if (!person) return null;
 
-  const updateNotes = (notes) => onChange((current) => current ? { ...current, notes } : current);
+  const updateComment = (comment) => onChange((current) => current ? { ...current, comment, error: "" } : current);
   const formatSelection = ({ before = "", after = "", placeholder = "text", linePrefix = "" }) => {
     const textarea = textareaRef.current;
     if (!textarea || draft.saving) return;
     const start = textarea.selectionStart;
     const end = textarea.selectionEnd;
-    const selected = draft.notes.slice(start, end) || placeholder;
+    const selected = draft.comment.slice(start, end) || placeholder;
     const formatted = linePrefix
       ? selected.split("\n").map((line) => `${linePrefix}${line}`).join("\n")
       : `${before}${selected}${after}`;
-    const nextNotes = `${draft.notes.slice(0, start)}${formatted}${draft.notes.slice(end)}`.slice(0, MAX_GUEST_NOTE_LENGTH);
-    updateNotes(nextNotes);
+    const nextComment = `${draft.comment.slice(0, start)}${formatted}${draft.comment.slice(end)}`.slice(0, MAX_GUEST_NOTE_LENGTH);
+    updateComment(nextComment);
     window.requestAnimationFrame(() => {
       textarea.focus();
       const selectionStart = start + (linePrefix ? linePrefix.length : before.length);
-      textarea.setSelectionRange(selectionStart, Math.min(start + formatted.length - after.length, nextNotes.length));
+      textarea.setSelectionRange(selectionStart, Math.min(start + formatted.length - after.length, nextComment.length));
     });
   };
 
@@ -4165,80 +4462,175 @@ function GuestNoteDialog({ draft, person, onChange, onClose, onSubmit }) {
           <div className="guest-note-person">
             <Avatar person={person} />
             <div>
-              <p className="eyebrow">Guest notes</p>
+              <p className="eyebrow">Guest comments</p>
               <h2 id="guest-note-dialog-title">{person.name}</h2>
               <p>{person.email}</p>
             </div>
           </div>
-          <button className="icon-button" type="button" disabled={draft.saving} aria-label="Close guest notes" title="Close" onClick={onClose}>
+          <button className="icon-button" type="button" disabled={draft.saving} aria-label="Close guest comments" title="Close" onClick={onClose}>
             <X size={18} aria-hidden="true" />
           </button>
         </div>
 
-        <div className="guest-note-tabs" role="tablist" aria-label="Guest note view">
-          <button className={mode === "write" ? "active" : ""} type="button" role="tab" aria-selected={mode === "write"} onClick={() => setMode("write")}>
-            <Pencil size={15} aria-hidden="true" />
-            Write
-          </button>
-          <button className={mode === "preview" ? "active" : ""} type="button" role="tab" aria-selected={mode === "preview"} onClick={() => setMode("preview")}>
-            <Eye size={15} aria-hidden="true" />
-            Preview
-          </button>
-        </div>
+        <section className="guest-comment-thread" aria-label={`${person.name}'s comment history`}>
+          <div className="guest-comment-thread-head">
+            <span><MessageSquare size={15} aria-hidden="true" /> Thread</span>
+            <strong>{draft.comments.length}</strong>
+          </div>
+          {draft.loading ? (
+            <div className="guest-comment-state"><RefreshCw className="animate-spin" size={18} aria-hidden="true" /> Loading comments…</div>
+          ) : draft.comments.length ? (
+            <div className="guest-comment-list">
+              {draft.comments.map((comment) => (
+                <article className="guest-comment-entry" key={comment.id}>
+                  <header>
+                    <span className="guest-comment-meta">
+                      <strong>{comment.author || "Guestbook"}</strong>
+                      <time dateTime={comment.createdAt}>{formatDateTime(comment.createdAt)}</time>
+                    </span>
+                    <span className="guest-comment-actions">
+                      <button
+                        type="button"
+                        aria-label={`Edit comment from ${formatDateTime(comment.createdAt)}`}
+                        title="Edit comment"
+                        disabled={draft.saving}
+                        onClick={() => {
+                          setEditingCommentId(comment.id);
+                          setEditingComment(comment.body);
+                        }}
+                      >
+                        <Pencil size={14} aria-hidden="true" />
+                      </button>
+                      <button
+                        className="delete"
+                        type="button"
+                        aria-label={`Delete comment from ${formatDateTime(comment.createdAt)}`}
+                        title="Delete comment"
+                        disabled={draft.saving}
+                        onClick={() => onDelete(comment.id)}
+                      >
+                        {draft.saving && draft.operation === "delete" && draft.savingCommentId === comment.id ? <RefreshCw className="animate-spin" size={14} aria-hidden="true" /> : <Trash2 size={14} aria-hidden="true" />}
+                      </button>
+                    </span>
+                  </header>
+                  {editingCommentId === comment.id ? (
+                    <div className="guest-comment-inline-editor">
+                      <textarea
+                        autoFocus
+                        rows={Math.min(8, Math.max(3, editingComment.split("\n").length + 1))}
+                        maxLength={MAX_GUEST_NOTE_LENGTH}
+                        value={editingComment}
+                        disabled={draft.saving}
+                        aria-label={`Edit comment from ${formatDateTime(comment.createdAt)}`}
+                        onChange={(event) => setEditingComment(event.target.value)}
+                        onKeyDown={async (event) => {
+                          if (event.key === "Escape") {
+                            setEditingCommentId("");
+                            setEditingComment("");
+                            return;
+                          }
+                          if (event.key !== "Enter" || (!event.metaKey && !event.ctrlKey) || event.nativeEvent.isComposing) return;
+                          event.preventDefault();
+                          if (editingComment.trim() && await onEdit(comment.id, editingComment)) {
+                            setEditingCommentId("");
+                            setEditingComment("");
+                          }
+                        }}
+                      />
+                      <div>
+                        <span>{editingComment.length.toLocaleString()}/{MAX_GUEST_NOTE_LENGTH.toLocaleString()}</span>
+                        <button
+                          className="button ghost"
+                          type="button"
+                          disabled={draft.saving}
+                          onClick={() => {
+                            setEditingCommentId("");
+                            setEditingComment("");
+                          }}
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          className="button primary"
+                          type="button"
+                          disabled={draft.saving || !editingComment.trim()}
+                          onClick={async () => {
+                            if (await onEdit(comment.id, editingComment)) {
+                              setEditingCommentId("");
+                              setEditingComment("");
+                            }
+                          }}
+                        >
+                          {draft.saving && draft.operation === "edit" && draft.savingCommentId === comment.id ? <RefreshCw className="animate-spin" size={14} aria-hidden="true" /> : null}
+                          {draft.saving && draft.operation === "edit" && draft.savingCommentId === comment.id ? "Saving…" : "Save"}
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="markdown-preview guest-comment-body">
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        skipHtml
+                        components={{
+                          a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noreferrer" />,
+                        }}
+                      >
+                        {comment.body}
+                      </ReactMarkdown>
+                    </div>
+                  )}
+                </article>
+              ))}
+            </div>
+          ) : (
+            <div className="guest-comment-state">
+              <MessageSquare size={20} aria-hidden="true" />
+              <strong>No comments yet</strong>
+              <span>Add context or a follow-up below.</span>
+            </div>
+          )}
+        </section>
 
-        {mode === "write" ? (
-          <div className="guest-note-editor" role="tabpanel" aria-label="Write note">
+        <section className="guest-comment-composer" aria-label="Add a comment">
+          <div className="guest-note-editor">
             <div className="markdown-toolbar" aria-label="Markdown formatting">
               {markdownActions.map(({ label, icon: FormatIcon, format }) => (
-                <button type="button" title={label} aria-label={label} disabled={draft.saving} key={label} onClick={() => formatSelection(format)}>
+                <button type="button" title={label} aria-label={label} disabled={draft.saving || draft.loading} key={label} onClick={() => formatSelection(format)}>
                   <FormatIcon size={15} aria-hidden="true" />
                 </button>
               ))}
-              <span>Markdown</span>
+              <button
+                className="guest-comment-submit"
+                type="submit"
+                disabled={draft.saving || draft.loading || !draft.comment.trim()}
+              >
+                {draft.saving && draft.operation === "add" ? <RefreshCw className="animate-spin" size={15} aria-hidden="true" /> : <Send size={15} aria-hidden="true" />}
+                {draft.saving && draft.operation === "add" ? "Adding…" : "Add comment"}
+              </button>
             </div>
             <textarea
               ref={textareaRef}
               autoFocus
-              rows={14}
+              rows={5}
               maxLength={MAX_GUEST_NOTE_LENGTH}
-              value={draft.notes}
-              disabled={draft.saving}
-              placeholder="Add context, follow-ups, links, or anything useful about this guest..."
-              aria-label={`Notes for ${person.name}`}
-              onChange={(event) => updateNotes(event.target.value)}
+              value={draft.comment}
+              disabled={draft.saving || draft.loading}
+              placeholder="Write a comment… Markdown supported."
+              aria-label={`Add a comment for ${person.name}`}
+              onChange={(event) => updateComment(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key !== "Enter" || (!event.metaKey && !event.ctrlKey) || event.nativeEvent.isComposing) return;
                 event.preventDefault();
-                if (!draft.saving) event.currentTarget.form?.requestSubmit();
+                if (!draft.saving && draft.comment.trim()) event.currentTarget.form?.requestSubmit();
               }}
             />
           </div>
-        ) : (
-          <div className={`markdown-preview ${draft.notes.trim() ? "" : "empty"}`} role="tabpanel" aria-label="Note preview">
-            {draft.notes.trim() ? (
-              <ReactMarkdown
-                remarkPlugins={[remarkGfm]}
-                components={{
-                  a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noreferrer" />,
-                }}
-              >
-                {draft.notes}
-              </ReactMarkdown>
-            ) : <p>No notes yet.</p>}
+          <div className="guest-note-footer">
+            <span>⌘ Enter to add</span>
+            <span>{draft.comment.length.toLocaleString()}/{MAX_GUEST_NOTE_LENGTH.toLocaleString()}</span>
           </div>
-        )}
-
-        <div className="guest-note-footer">
-          <span>{draft.notes.length.toLocaleString()}/{MAX_GUEST_NOTE_LENGTH.toLocaleString()}</span>
-          {draft.updatedAt ? <span>Last saved {formatDateTime(draft.updatedAt)}</span> : <span>Not saved yet</span>}
-        </div>
-        <div className="dialog-actions">
-          <button className="button ghost" type="button" disabled={draft.saving} onClick={onClose}>Cancel</button>
-          <button className="button primary" type="submit" disabled={draft.saving}>
-            {draft.saving ? <RefreshCw className="animate-spin" size={16} aria-hidden="true" /> : <FileText size={16} aria-hidden="true" />}
-            {draft.saving ? "Saving..." : "Save note"}
-          </button>
-        </div>
+          {draft.error ? <p className="session-error" role="alert">{draft.error}</p> : null}
+        </section>
       </form>
     </div>
   );
@@ -4421,8 +4813,8 @@ function GuestAttributeFilter({ hasNotes, attendedGreaterThan, onHasNotesChange,
             <input type="checkbox" checked={hasNotes} onChange={(event) => onHasNotesChange(event.target.checked)} />
             <FileText size={16} aria-hidden="true" />
             <span>
-              <strong>Has notes</strong>
-              <small>Only guests with a saved note</small>
+              <strong>Has comments</strong>
+              <small>Only guests with a comment</small>
             </span>
           </label>
           <label className="attribute-number-filter">
@@ -4496,10 +4888,7 @@ function TagFilter({
       ? sortedTags(unique([...excludedTags, tag]))
       : excludedTags.filter((item) => item !== tag));
   };
-  const cycleTag = (tag) => setTagState(
-    tag,
-    includedSet.has(tag) ? "exclude" : excludedSet.has(tag) ? "off" : "include",
-  );
+  const toggleIncludedTag = (tag) => setTagState(tag, includedSet.has(tag) ? "off" : "include");
   const clear = () => {
     onIncludedChange([]);
     onExcludedChange([]);
@@ -4545,14 +4934,12 @@ function TagFilter({
         <div className="tag-filter-popover">
           <div className="filter-popover-header">
             <div className="tag-filter-head">
-              <strong>Tag rules</strong>
-              {activeCount ? <button type="button" onClick={clear}>Clear</button> : null}
-            </div>
-            <div className="tag-filter-mode" aria-label="Included tag matching mode">
-              <span>Match included tags</span>
-              <div>
-                <button className={mode !== "all" ? "active" : ""} type="button" aria-pressed={mode !== "all"} onClick={() => onModeChange("any")}>Any</button>
-                <button className={mode === "all" ? "active" : ""} type="button" aria-pressed={mode === "all"} onClick={() => onModeChange("all")}>All</button>
+              <span>
+                {activeCount ? <button type="button" onClick={clear}>Clear</button> : null}
+              </span>
+              <div className="tag-filter-mode" aria-label="How many included tags people must have">
+                <button className={mode !== "all" ? "active" : ""} type="button" aria-pressed={mode !== "all"} onClick={() => onModeChange("any")}>At least one</button>
+                <button className={mode === "all" ? "active" : ""} type="button" aria-pressed={mode === "all"} onClick={() => onModeChange("all")}>Every one</button>
               </div>
             </div>
             <label className="filter-popover-search">
@@ -4580,7 +4967,7 @@ function TagFilter({
                     setActiveIndex((current) => filteredTags.length ? (current - 1 + filteredTags.length) % filteredTags.length : 0);
                   } else if (event.key === "Enter" && filteredTags[activeIndex]) {
                     event.preventDefault();
-                    cycleTag(filteredTags[activeIndex]);
+                    toggleIncludedTag(filteredTags[activeIndex]);
                   }
                 }}
               />
@@ -4593,27 +4980,28 @@ function TagFilter({
               id={`tag-filter-option-${index}`}
               role="listitem"
               key={tag}
+              tabIndex={0}
+              aria-label={`${includedSet.has(tag) ? "Remove included tag" : "Include"} ${tagDisplayName(tag)}`}
               onMouseEnter={() => setActiveIndex(index)}
+              onClick={() => toggleIncludedTag(tag)}
+              onKeyDown={(event) => {
+                if (event.target !== event.currentTarget || !["Enter", " "].includes(event.key)) return;
+                event.preventDefault();
+                toggleIncludedTag(tag);
+              }}
             >
               <span className="tag-filter-dot" style={{ backgroundColor: tagDefinitionForName(definitions, tag).color }} aria-hidden="true" />
               <span className="tag-filter-option-name">{tagDisplayName(tag)}</span>
               <span className="tag-filter-option-actions">
                 <button
-                  className={`tag-filter-choice include ${includedSet.has(tag) ? "active" : ""}`}
-                  type="button"
-                  aria-pressed={includedSet.has(tag)}
-                  title={`Include ${tagDisplayName(tag)}`}
-                  onClick={() => setTagState(tag, includedSet.has(tag) ? "off" : "include")}
-                >
-                  <CircleCheck size={14} aria-hidden="true" />
-                  <span>Include</span>
-                </button>
-                <button
                   className={`tag-filter-choice exclude ${excludedSet.has(tag) ? "active" : ""}`}
                   type="button"
                   aria-pressed={excludedSet.has(tag)}
                   title={`Exclude ${tagDisplayName(tag)}`}
-                  onClick={() => setTagState(tag, excludedSet.has(tag) ? "off" : "exclude")}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setTagState(tag, excludedSet.has(tag) ? "off" : "exclude");
+                  }}
                 >
                   <CircleX size={14} aria-hidden="true" />
                   <span>Exclude</span>
@@ -4628,24 +5016,58 @@ function TagFilter({
   );
 }
 
-function StatusFilter({ options, selected, onChange }) {
+function StatusFilter({
+  options,
+  included,
+  excluded,
+  mode,
+  onRulesChange,
+}) {
   const menuRef = useDismissableDetails();
   const searchRef = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
-  const selectedOption = options.find((option) => option.value === selected) || options[0];
+  const statusOptions = options.filter((option) => option.value !== "all");
+  const includedStatuses = Array.isArray(included) ? included : [];
+  const excludedStatuses = Array.isArray(excluded) ? excluded : [];
+  const includedSet = new Set(includedStatuses);
+  const excludedSet = new Set(excludedStatuses);
+  const activeCount = includedStatuses.length + excludedStatuses.length;
   const normalizedQuery = query.trim().toLocaleLowerCase();
-  const filteredOptions = options
+  const filteredOptions = statusOptions
     .map((option, index) => ({ option, index }))
     .filter(({ option }) => option.label.toLocaleLowerCase().includes(normalizedQuery))
-    .sort((left, right) => Number(right.option.value === selectedOption.value) - Number(left.option.value === selectedOption.value) || left.index - right.index)
+    .sort((left, right) => {
+      const priority = (option) => includedSet.has(option.value) ? 0 : excludedSet.has(option.value) ? 1 : 2;
+      return priority(left.option) - priority(right.option) || left.index - right.index;
+    })
     .map(({ option }) => option);
-  const selectOption = (option) => {
-    if (!option) return;
-    onChange(option.value);
-    if (menuRef.current) menuRef.current.open = false;
-    menuRef.current?.querySelector("summary")?.focus();
+  const primaryOption = statusOptions.find((option) => option.value === includedStatuses[0])
+    || statusOptions.find((option) => option.value === excludedStatuses[0]);
+  const primaryLabel = includedStatuses.length
+    ? primaryOption?.label || "Status"
+    : excludedStatuses.length
+      ? `Not ${primaryOption?.label || "status"}`
+      : "All guests";
+  const primaryColor = primaryOption?.color || options[0]?.color;
+  const remainingCount = Math.max(0, activeCount - 1);
+  const setStatusState = (status, nextState: "include" | "exclude" | "off") => {
+    const nextIncluded = nextState === "include"
+      ? unique([...includedStatuses, status])
+      : includedStatuses.filter((item) => item !== status);
+    const nextExcluded = nextState === "exclude"
+      ? unique([...excludedStatuses, status])
+      : excludedStatuses.filter((item) => item !== status);
+    onRulesChange(nextIncluded, nextExcluded, mode);
   };
+  const toggleIncludedStatus = (status) => setStatusState(status, includedSet.has(status) ? "off" : "include");
+  const clear = () => {
+    onRulesChange([], [], mode);
+  };
+  const title = [
+    includedStatuses.length ? `Include (${mode === "all" ? "all" : "any"}): ${includedStatuses.map((value) => statusOptions.find((option) => option.value === value)?.label || value).join(", ")}` : "",
+    excludedStatuses.length ? `Exclude: ${excludedStatuses.map((value) => statusOptions.find((option) => option.value === value)?.label || value).join(", ")}` : "",
+  ].filter(Boolean).join(". ") || "All guests";
 
   useEffect(() => {
     setActiveIndex((current) => Math.min(current, Math.max(0, filteredOptions.length - 1)));
@@ -4655,7 +5077,7 @@ function StatusFilter({ options, selected, onChange }) {
     <div className="status-filter-control">
       <span>Status</span>
       <details
-        className={`status-filter-menu toolbar-filter-menu ${selectedOption.value !== "all" ? "filter-active" : ""}`}
+        className={`status-filter-menu toolbar-filter-menu ${activeCount ? "filter-active" : ""}`}
         ref={menuRef}
         onToggle={(event) => {
           if (!event.currentTarget.open) return;
@@ -4671,16 +5093,27 @@ function StatusFilter({ options, selected, onChange }) {
           event.currentTarget.querySelector("summary")?.focus();
         }}
       >
-        <summary>
+        <summary title={title}>
           <span className="status-filter-current">
-            <span className="status-filter-dot" style={{ "--status-filter-color": selectedOption.color } as CSSProperties} aria-hidden="true" />
-            <span>{selectedOption.label}</span>
+            <span className="status-filter-dot" style={{ "--status-filter-color": primaryColor } as CSSProperties} aria-hidden="true" />
+            <span>{primaryLabel}</span>
+            {activeCount ? (
+              <span className="tag-filter-count">{remainingCount ? `+${remainingCount}` : "1"}</span>
+            ) : null}
           </span>
           <ChevronDown className="status-filter-chevron" size={15} aria-hidden="true" />
         </summary>
-        <div className="status-filter-popover" role="listbox" aria-label="Filter guests by status">
+        <div className="status-filter-popover" aria-label="Filter guests by status">
           <div className="filter-popover-header">
-            <div className="status-filter-head"><strong>Guest status</strong></div>
+            <div className="tag-filter-head">
+              <span>
+                {activeCount ? <button type="button" onClick={clear}>Clear</button> : null}
+              </span>
+              <div className="tag-filter-mode" aria-label="How many included statuses guests must match">
+                <button className={mode !== "all" ? "active" : ""} type="button" aria-pressed={mode !== "all"} onClick={() => onRulesChange(includedStatuses, excludedStatuses, "any")}>At least one</button>
+                <button className={mode === "all" ? "active" : ""} type="button" aria-pressed={mode === "all"} onClick={() => onRulesChange(includedStatuses, excludedStatuses, "all")}>Every one</button>
+              </div>
+            </div>
             <label className="filter-popover-search">
               <Search size={14} aria-hidden="true" />
               <input
@@ -4706,31 +5139,51 @@ function StatusFilter({ options, selected, onChange }) {
                     setActiveIndex((current) => filteredOptions.length ? (current - 1 + filteredOptions.length) % filteredOptions.length : 0);
                   } else if (event.key === "Enter" && filteredOptions[activeIndex]) {
                     event.preventDefault();
-                    selectOption(filteredOptions[activeIndex]);
+                    toggleIncludedStatus(filteredOptions[activeIndex].value);
                   }
                 }}
               />
             </label>
           </div>
-          <div id="status-filter-options">
+          <div id="status-filter-options" role="list" aria-label="Status rules">
           {filteredOptions.map((option, index) => {
-            const active = option.value === selectedOption.value;
+            const isIncluded = includedSet.has(option.value);
+            const isExcluded = excludedSet.has(option.value);
             return (
-              <button
-                className={`status-filter-option ${active ? "active" : ""} ${index === activeIndex ? "keyboard-active" : ""}`}
+              <div
+                className={`status-filter-option ${isIncluded ? "included" : ""} ${isExcluded ? "excluded" : ""} ${index === activeIndex ? "keyboard-active" : ""}`}
                 id={`status-filter-option-${index}`}
-                type="button"
-                role="option"
-                aria-selected={active}
+                role="listitem"
+                tabIndex={0}
+                aria-label={`${isIncluded ? "Remove included status" : "Include"} ${option.label}`}
                 style={{ "--status-filter-color": option.color } as CSSProperties}
                 key={option.value}
                 onMouseEnter={() => setActiveIndex(index)}
-                onClick={() => selectOption(option)}
+                onClick={() => toggleIncludedStatus(option.value)}
+                onKeyDown={(event) => {
+                  if (event.target !== event.currentTarget || !["Enter", " "].includes(event.key)) return;
+                  event.preventDefault();
+                  toggleIncludedStatus(option.value);
+                }}
               >
                 <span className="status-filter-dot" aria-hidden="true" />
-                <span>{option.label}</span>
-                {active ? <CircleCheck size={15} aria-hidden="true" /> : null}
-              </button>
+                <span className="status-filter-option-name">{option.label}</span>
+                <span className="status-filter-option-actions">
+                  <button
+                    className={`tag-filter-choice exclude ${isExcluded ? "active" : ""}`}
+                    type="button"
+                    aria-pressed={isExcluded}
+                    title={`Exclude ${option.label}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setStatusState(option.value, isExcluded ? "off" : "exclude");
+                    }}
+                  >
+                    <CircleX size={14} aria-hidden="true" />
+                    <span>Exclude</span>
+                  </button>
+                </span>
+              </div>
             );
           })}
           {!filteredOptions.length ? <span className="tag-filter-empty">No matching statuses</span> : null}
@@ -5882,8 +6335,8 @@ function AnalyticsTab({ event, analytics, loading = false, uniquePeople = false,
       </section>
     );
   }
-  const invitationOutcomes = analytics.invitationOutcomes || { total: 0, checkedIn: 0, noShow: 0, noResponse: 0, declined: 0, referralTotal: 0, referralCheckedIn: 0, referralNoShow: 0, referralNoResponse: 0, referralDeclined: 0 };
-  const acceptedInvitations = invitationOutcomes.checkedIn + invitationOutcomes.noShow;
+  const invitationOutcomes = analytics.invitationOutcomes || { total: 0, going: 0, checkedIn: 0, noShow: 0, noResponse: 0, declined: 0, referralTotal: 0, referralGoing: 0, referralCheckedIn: 0, referralNoShow: 0, referralNoResponse: 0, referralDeclined: 0 };
+  const acceptedInvitations = invitationOutcomes.going + invitationOutcomes.checkedIn + invitationOutcomes.noShow;
   const invitationOutcomeItems = [
     { id: "no-response", label: "No response", value: invitationOutcomes.noResponse, filter: "invited_no_response", referrals: invitationOutcomes.referralNoResponse, referralFilter: "invited_referral_no_response", segments: null },
     {
@@ -5891,9 +6344,10 @@ function AnalyticsTab({ event, analytics, loading = false, uniquePeople = false,
       label: "Accepted",
       value: acceptedInvitations,
       filter: "invited_accepted",
-      referrals: invitationOutcomes.referralCheckedIn + invitationOutcomes.referralNoShow,
+      referrals: invitationOutcomes.referralGoing + invitationOutcomes.referralCheckedIn + invitationOutcomes.referralNoShow,
       referralFilter: "invited_referral_accepted",
       segments: [
+        { id: "going", label: "Going", value: invitationOutcomes.going, filter: "invited_going" },
         { id: "checked-in", label: "Checked in", value: invitationOutcomes.checkedIn, filter: "invited_checked_in" },
         { id: "no-show", label: "No-show", value: invitationOutcomes.noShow, filter: "invited_no_show" },
       ],
@@ -6208,14 +6662,15 @@ function ProfilePanel({ state, person, trace, lumaCheckInGuestKey, reinvitingGue
 
         {person.crmNotes?.trim() ? (
           <details className="profile-disclosure" open>
-            <summary>✍️ Notes</summary>
+            <summary>💬 Comments</summary>
             <section className="profile-section">
               <article className="profile-note-card">
+                <strong>Latest comment</strong>
                 <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
                   {person.crmNotes}
                 </ReactMarkdown>
                 {person.crmNotesUpdatedAt ? (
-                  <time dateTime={person.crmNotesUpdatedAt}>Updated {formatProfileDateTime(person.crmNotesUpdatedAt)}</time>
+                  <time dateTime={person.crmNotesUpdatedAt}>Added {formatProfileDateTime(person.crmNotesUpdatedAt)}</time>
                 ) : null}
               </article>
             </section>
@@ -6550,7 +7005,7 @@ function PersonButton({ person, onClick, onAvatarClick }) {
 }
 
 function guestNoteSummary(notes) {
-  if (!notes?.trim()) return "Add note";
+  if (!notes?.trim()) return "Add comment";
   const firstLine = notes
     .split("\n")
     .map((line) => line.trim())
@@ -6558,7 +7013,7 @@ function guestNoteSummary(notes) {
     ?.replace(/^#{1,6}\s+/, "")
     .replace(/\[(.*?)\]\([^)]*\)/g, "$1")
     .replace(/[*_~`>[\]]/g, "")
-    .trim() || "Open note";
+    .trim() || "Open comments";
   return firstLine.length > 42 ? `${firstLine.slice(0, 41).trimEnd()}...` : firstLine;
 }
 
@@ -7322,6 +7777,7 @@ function mergePersonRecord(existing, incoming) {
     automaticTags: Array.isArray(incoming.automaticTags) ? incoming.automaticTags : existing?.automaticTags || [],
     crmNotes: incoming.crmNotes ?? existing?.crmNotes ?? "",
     crmNotesUpdatedAt: incoming.crmNotesUpdatedAt ?? existing?.crmNotesUpdatedAt ?? null,
+    crmNoteCount: incoming.crmNoteCount ?? existing?.crmNoteCount,
     notes: existingNote || incoming.notes,
     title: existing?.title && existing.title !== "Luma guest" ? existing.title : incoming.title,
     profileDescription: incoming.profileDescription || existing?.profileDescription || "",
@@ -7349,6 +7805,7 @@ function normalizeState(value) {
     automaticTags: Array.isArray(person.automaticTags) ? person.automaticTags : [],
     crmNotes: typeof person.crmNotes === "string" ? person.crmNotes : "",
     crmNotesUpdatedAt: person.crmNotesUpdatedAt || null,
+    crmNoteCount: Number.isFinite(Number(person.crmNoteCount)) ? Number(person.crmNoteCount) : undefined,
   }));
   next.tags = sortedTags(unique([
     ...(Array.isArray(next.tags) ? next.tags : []),
@@ -7362,6 +7819,17 @@ function normalizeState(value) {
   next.filters.guestExcludedTags = sortedTags(unique(Array.isArray(next.filters.guestExcludedTags) ? next.filters.guestExcludedTags : []))
     .filter((tag) => !next.filters.guestTags.includes(tag));
   next.filters.guestTagMode = next.filters.guestTagMode === "all" ? "all" : "any";
+  const validGuestStatuses = new Set(guestFilterOptions.map((option) => option.value).filter((value) => value !== "all"));
+  const legacyGuestStatus = validGuestStatuses.has(next.filters.guestStatus) ? next.filters.guestStatus : "all";
+  next.filters.guestStatuses = (unique(Array.isArray(next.filters.guestStatuses) ? next.filters.guestStatuses : []) as string[])
+    .filter((status) => validGuestStatuses.has(status));
+  if (!next.filters.guestStatuses.length && legacyGuestStatus !== "all") {
+    next.filters.guestStatuses = [legacyGuestStatus];
+  }
+  next.filters.guestExcludedStatuses = (unique(Array.isArray(next.filters.guestExcludedStatuses) ? next.filters.guestExcludedStatuses : []) as string[])
+    .filter((status) => validGuestStatuses.has(status) && !next.filters.guestStatuses.includes(status));
+  next.filters.guestStatusMode = next.filters.guestStatusMode === "all" ? "all" : "any";
+  next.filters.guestStatus = next.filters.guestStatuses[0] || "all";
   if (!next.events.some((event) => event.id === next.selectedEventId)) {
     next.selectedEventId = preferredEventIdForView(next.events, next.filters.event);
   }
@@ -7555,7 +8023,12 @@ function searchSnippet(text, query) {
   return prefix + text.slice(start, end).trim() + suffix;
 }
 
-function eventGuests(state, event, dateSortDirection: "asc" | "desc" = "desc") {
+function eventGuests(
+  state,
+  event,
+  sortField: "status_date" | "events_attended" | "events_registered" = "status_date",
+  sortDirection: "asc" | "desc" = "desc",
+) {
   if (!event) return [];
   const query = state.filters.guestSearch.trim().toLowerCase();
   const serverManaged = event.source === "luma" && event.guestQuery;
@@ -7570,21 +8043,17 @@ function eventGuests(state, event, dateSortDirection: "asc" | "desc" = "desc") {
     .filter(({ guest, person }) => {
       if (!person) return false;
       if (serverManaged) return true;
-      const selectedStatus = state.filters.guestStatus;
-      const matchesStatus = selectedStatus === "all"
-        || (selectedStatus === "to_decide" && (guest.status === "registered" || (guest.status === "waitlisted" && guest.operatorDecision !== "waitlisted")))
-        || (selectedStatus === "accepted" && acceptedStatuses.includes(guest.status))
-        || (selectedStatus === "registered" && isRegisteredGuest(guest))
-        || (selectedStatus === "invited" && hasInvitationEvidence(guest))
-        || (selectedStatus === "first_registers" && isRegisteredGuest(guest) && isFirstRegistration(guest))
-        || (selectedStatus === "accepted_first_registers" && isFirstRegister(guest))
-        || (selectedStatus === "new_faces" && guest.status === "checked_in" && isFirstRegistration(guest))
-        || (selectedStatus === "new_referrals" && guest.isReferred && guest.isNewReferral && registeredStatuses.includes(guest.status))
-        || (selectedStatus !== "invited" && guest.status === selectedStatus);
+      const includedStatuses = Array.isArray(state.filters.guestStatuses) ? state.filters.guestStatuses : [];
+      const excludedStatuses = Array.isArray(state.filters.guestExcludedStatuses) ? state.filters.guestExcludedStatuses : [];
+      const matchesStatus = (!includedStatuses.length
+        || (state.filters.guestStatusMode === "all"
+          ? includedStatuses.every((status) => guestMatchesFrontendStatus(guest, status))
+          : includedStatuses.some((status) => guestMatchesFrontendStatus(guest, status))))
+        && !excludedStatuses.some((status) => guestMatchesFrontendStatus(guest, status));
       const matchesSearch = !query || searchableGuestText(person, guest).includes(query);
       return matchesStatus && matchesSearch;
     })
-    .sort((left, right) => compareGuestDisplayRowsForFilter(left, right, state.filters.guestStatus, dateSortDirection));
+    .sort((left, right) => compareGuestDisplayRowsForFilter(left, right, guestSortStatusFilter(state), sortField, sortDirection));
 }
 
 function selectedWorkspaceEvents(state) {
@@ -7595,10 +8064,15 @@ function selectedWorkspaceEvents(state) {
   return selectedEvent ? [selectedEvent] : [];
 }
 
-function workspaceEventGuests(state, events, dateSortDirection: "asc" | "desc" = "desc") {
+function workspaceEventGuests(
+  state,
+  events,
+  sortField: "status_date" | "events_attended" | "events_registered" = "status_date",
+  sortDirection: "asc" | "desc" = "desc",
+) {
   const guestsByPerson = new Map();
   events.forEach((event) => {
-    eventGuests(state, event, dateSortDirection).forEach((row) => {
+    eventGuests(state, event, sortField, sortDirection).forEach((row) => {
       const existing = guestsByPerson.get(row.person.id);
       const eventMatches = [...(existing?.eventMatches || []), { event, guest: row.guest }];
       guestsByPerson.set(row.person.id, {
@@ -7609,15 +8083,57 @@ function workspaceEventGuests(state, events, dateSortDirection: "asc" | "desc" =
       });
     });
   });
-  return [...guestsByPerson.values()].sort((left, right) => compareGuestDisplayRowsForFilter(left, right, state.filters.guestStatus, dateSortDirection));
+  return [...guestsByPerson.values()].sort((left, right) => compareGuestDisplayRowsForFilter(left, right, guestSortStatusFilter(state), sortField, sortDirection));
 }
 
-function compareGuestDisplayRowsForFilter(left, right, filter, dateSortDirection: "asc" | "desc" = "desc") {
-  if (filter === "invited") {
+function guestSortStatusFilter(state) {
+  return state.filters.guestStatuses?.length === 1 && !state.filters.guestExcludedStatuses?.length
+    ? state.filters.guestStatuses[0]
+    : "all";
+}
+
+function guestMatchesFrontendStatus(guest, filter) {
+  if (filter === "all") return true;
+  if (filter === "to_decide") {
+    return guest.status === "registered"
+      || (guest.status === "waitlisted" && guest.operatorDecision !== "waitlisted");
+  }
+  if (filter === "accepted") return acceptedStatuses.includes(guest.status);
+  if (filter === "registered") return isRegisteredGuest(guest);
+  if (filter === "invited") return hasInvitationEvidence(guest);
+  if (filter === "invited_no_response") return guest.status === "invited";
+  if (filter === "invited_accepted") return Boolean(guest.checkedInAt) || acceptedStatuses.includes(guest.status);
+  if (filter === "invited_going") return guest.status === "going";
+  if (filter === "invited_checked_in") return Boolean(guest.checkedInAt) || guest.status === "checked_in";
+  if (filter === "invited_no_show") return guest.status === "no_show";
+  if (filter === "invited_declined") return guest.status === "declined";
+  if (filter === "referrals") return Boolean(guest.isReferred) && (Boolean(guest.checkedInAt) || guest.status === "checked_in");
+  if (filter === "invited_referrals") return Boolean(guest.isReferred) && hasInvitationEvidence(guest);
+  if (filter === "invited_referral_no_response") return Boolean(guest.isReferred) && guest.status === "invited";
+  if (filter === "invited_referral_accepted") return Boolean(guest.isReferred) && (Boolean(guest.checkedInAt) || acceptedStatuses.includes(guest.status));
+  if (filter === "invited_referral_declined") return Boolean(guest.isReferred) && guest.status === "declined";
+  if (filter === "first_registers") return isRegisteredGuest(guest) && isFirstRegistration(guest);
+  if (filter === "accepted_first_registers") return isFirstRegister(guest);
+  if (filter === "new_faces") return guest.status === "checked_in" && isFirstRegistration(guest);
+  if (filter === "new_referrals") {
+    return Boolean(guest.isReferred && guest.isNewReferral)
+      && (Boolean(guest.checkedInAt) || guest.status === "checked_in");
+  }
+  return guest.status === filter;
+}
+
+function compareGuestDisplayRowsForFilter(
+  left,
+  right,
+  filter,
+  sortField: "status_date" | "events_attended" | "events_registered" = "status_date",
+  sortDirection: "asc" | "desc" = "desc",
+) {
+  if (filter === "invited" && sortField === "status_date") {
     const cohortOrder = invitationCohortDisplayRank(left) - invitationCohortDisplayRank(right);
     if (cohortOrder) return cohortOrder;
   }
-  return compareGuestDisplayRows(left, right, dateSortDirection);
+  return compareGuestDisplayRows(left, right, sortField, sortDirection);
 }
 
 function invitationCohortDisplayRank(row) {
@@ -7627,15 +8143,27 @@ function invitationCohortDisplayRank(row) {
   return 2;
 }
 
-function compareGuestDisplayRows(left, right, dateSortDirection: "asc" | "desc" = "desc") {
+function compareGuestDisplayRows(
+  left,
+  right,
+  sortField: "status_date" | "events_attended" | "events_registered" = "status_date",
+  sortDirection: "asc" | "desc" = "desc",
+) {
   const leftOrder = left.guest?._displayOrder;
   const rightOrder = right.guest?._displayOrder;
   if (Number.isFinite(leftOrder) && Number.isFinite(rightOrder) && leftOrder !== rightOrder) return leftOrder - rightOrder;
   if (Number.isFinite(leftOrder) !== Number.isFinite(rightOrder)) return Number.isFinite(leftOrder) ? -1 : 1;
-  const dateOrder = dateSortDirection === "asc"
+  const countKey = sortField === "events_attended" ? "attendedCount" : "registeredCount";
+  const countOrder = sortField === "status_date"
+    ? 0
+    : sortDirection === "asc"
+      ? nonnegativeCount(left.history?.[countKey], 0) - nonnegativeCount(right.history?.[countKey], 0)
+      : nonnegativeCount(right.history?.[countKey], 0) - nonnegativeCount(left.history?.[countKey], 0);
+  const dateOrder = sortDirection === "asc" && sortField === "status_date"
     ? left.statusTimestamp - right.statusTimestamp
     : right.statusTimestamp - left.statusTimestamp;
-  return dateOrder
+  return countOrder
+    || dateOrder
     || left.person.name.localeCompare(right.person.name)
     || left.person.id.localeCompare(right.person.id);
 }
@@ -7830,7 +8358,7 @@ function buildEventAnalytics(state, event) {
     referredCheckedIn: 0,
     referredReturning: 0,
     referredFirstRegisters: 0,
-    invitationOutcomes: { total: 0, checkedIn: 0, noShow: 0, noResponse: 0, declined: 0, referralTotal: 0, referralCheckedIn: 0, referralNoShow: 0, referralNoResponse: 0, referralDeclined: 0 },
+    invitationOutcomes: { total: 0, going: 0, checkedIn: 0, noShow: 0, noResponse: 0, declined: 0, referralTotal: 0, referralGoing: 0, referralCheckedIn: 0, referralNoShow: 0, referralNoResponse: 0, referralDeclined: 0 },
     funnel: [
       { id: "registered", label: "Total registrations", value: 0, rate: 0, width: 100 },
       { id: "accepted", label: "Accepted", value: 0, rate: 0, width: 0, overlay: { label: "First Registers", value: 0, width: 0 } },
@@ -7941,6 +8469,7 @@ function eventHeaderStatsReady(event) {
     stats.registered,
     stats.pending,
     stats.declined,
+    stats.invitedGoing,
     stats.invitedNoResponse,
     stats.invited,
     stats.waitlisted,
@@ -7969,11 +8498,13 @@ function buildWorkspaceAnalytics(state, events, uniqueStats = null) {
     ? invitationOutcomeCounts(uniqueStats, [])
     : {
         total: sumInvitationOutcome(analytics, "total"),
+        going: sumInvitationOutcome(analytics, "going"),
         checkedIn: sumInvitationOutcome(analytics, "checkedIn"),
         noShow: sumInvitationOutcome(analytics, "noShow"),
         noResponse: sumInvitationOutcome(analytics, "noResponse"),
         declined: sumInvitationOutcome(analytics, "declined"),
         referralTotal: sumInvitationOutcome(analytics, "referralTotal"),
+        referralGoing: sumInvitationOutcome(analytics, "referralGoing"),
         referralCheckedIn: sumInvitationOutcome(analytics, "referralCheckedIn"),
         referralNoShow: sumInvitationOutcome(analytics, "referralNoShow"),
         referralNoResponse: sumInvitationOutcome(analytics, "referralNoResponse"),
@@ -8217,6 +8748,7 @@ function eventStats(event) {
     waitlisted: 0,
     checkedIn: 0,
     invited: 0,
+    invitedGoing: 0,
     invitedNoResponse: 0,
     toDecide: 0,
     firstRegisters: 0,
@@ -8232,6 +8764,7 @@ function eventStats(event) {
     if (guest.status === "waitlisted") stats.waitlisted += 1;
     if (guest.status === "checked_in") stats.checkedIn += 1;
     if (hasInvitationEvidence(guest)) stats.invited += 1;
+    if (guest.status === "going") stats.invitedGoing += 1;
     if (guest.status === "invited") stats.invitedNoResponse += 1;
     if (isGuestToDecide(guest)) stats.toDecide += 1;
     if (isFirstRegister(guest)) stats.firstRegisters += 1;
@@ -8295,7 +8828,7 @@ function adjustGuestStatusStats(stats, before, after) {
 }
 
 function invitationOutcomeStatKey(guest) {
-  if (!hasInvitationEvidence(guest)) return "";
+  if (guest?.status === "going") return "invitedGoing";
   if (guest?.status === "no_show") return "invitedNoShow";
   if (guest?.status === "declined") return "invitedDeclined";
   if (guest?.status === "invited") return "invitedNoResponse";
@@ -8310,10 +8843,10 @@ function adjustInvitationOutcomeStats(stats, before, after) {
   if (Number.isFinite(Number(stats.invitationTotal))) {
     stats.invitationTotal = Math.max(0, Number(stats.invitationTotal) + Number(afterInvited) - Number(beforeInvited));
   }
-  const beforeReferred = beforeInvited && Boolean(before?.isReferred);
-  const afterReferred = afterInvited && Boolean(after?.isReferred);
+  const beforeInvitedReferral = beforeInvited && Boolean(before?.isReferred);
+  const afterInvitedReferral = afterInvited && Boolean(after?.isReferred);
   if (Number.isFinite(Number(stats.invitedReferralTotal))) {
-    stats.invitedReferralTotal = Math.max(0, Number(stats.invitedReferralTotal) + Number(afterReferred) - Number(beforeReferred));
+    stats.invitedReferralTotal = Math.max(0, Number(stats.invitedReferralTotal) + Number(afterInvitedReferral) - Number(beforeInvitedReferral));
   }
   const beforeKey = invitationOutcomeStatKey(before);
   const afterKey = invitationOutcomeStatKey(after);
@@ -8321,8 +8854,8 @@ function adjustInvitationOutcomeStats(stats, before, after) {
     if (beforeKey && Number.isFinite(Number(stats[beforeKey]))) stats[beforeKey] = Math.max(0, Number(stats[beforeKey]) - 1);
     if (afterKey && Number.isFinite(Number(stats[afterKey]))) stats[afterKey] = Math.max(0, Number(stats[afterKey]) + 1);
   }
-  const beforeReferralKey = beforeReferred && beforeKey ? beforeKey.replace("invited", "invitedReferral") : "";
-  const afterReferralKey = afterReferred && afterKey ? afterKey.replace("invited", "invitedReferral") : "";
+  const beforeReferralKey = before?.isReferred && beforeKey ? beforeKey.replace("invited", "invitedReferral") : "";
+  const afterReferralKey = after?.isReferred && afterKey ? afterKey.replace("invited", "invitedReferral") : "";
   if (beforeReferralKey !== afterReferralKey) {
     if (beforeReferralKey && Number.isFinite(Number(stats[beforeReferralKey]))) stats[beforeReferralKey] = Math.max(0, Number(stats[beforeReferralKey]) - 1);
     if (afterReferralKey && Number.isFinite(Number(stats[afterReferralKey]))) stats[afterReferralKey] = Math.max(0, Number(stats[afterReferralKey]) + 1);
@@ -8344,7 +8877,7 @@ function isGuestToDecide(guest) {
 }
 
 function aggregateEventStats(events) {
-  const keys = ["confirmed", "accepted", "registered", "pending", "declined", "waitlisted", "checkedIn", "invited", "invitedNoResponse", "toDecide", "firstRegisters", "newFaces", "newReferrals"];
+  const keys = ["confirmed", "accepted", "registered", "pending", "declined", "waitlisted", "checkedIn", "invited", "invitedGoing", "invitedNoResponse", "toDecide", "firstRegisters", "newFaces", "newReferrals"];
   return events.reduce((totals, event) => {
     const stats = event.guestStats || eventStats(event);
     keys.forEach((key) => void (totals[key] += Number(stats[key]) || 0));

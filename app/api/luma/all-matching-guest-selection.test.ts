@@ -23,12 +23,27 @@ test("normalizes an explicit all-matching guest query", () => {
   assert.deepEqual(query.excludedTags, ["Flaker"]);
 });
 
+test("normalizes multi-status rules for all-matching updates", () => {
+  const query = parseAllMatchingGuestQuery({
+    guestStatus: "accepted",
+    guestStatuses: ["accepted", "checked_in"],
+    guestStatusMode: "all",
+    guestExcludedStatuses: ["no_show"],
+  });
+  assert.deepEqual(query.filters, ["accepted", "checked_in"]);
+  assert.equal(query.filterMode, "all");
+  assert.deepEqual(query.excludedFilters, ["no_show"]);
+});
+
 test("fails closed when an all-matching query is missing or malformed", () => {
   assert.throws(() => parseAllMatchingGuestQuery({}), /valid guest status/i);
   assert.throws(() => parseAllMatchingGuestQuery({ guestStatus: "everything" }), /valid guest status/i);
   assert.throws(() => parseAllMatchingGuestQuery({ guestStatus: "all", guestTags: "Referred" }), /array/i);
   assert.throws(() => parseAllMatchingGuestQuery({ guestStatus: "all", guestTagMode: "none" }), /any or all/i);
   assert.throws(() => parseAllMatchingGuestQuery({ guestStatus: "all", guestExcludedTags: "Flaker" }), /array/i);
+  assert.throws(() => parseAllMatchingGuestQuery({ guestStatuses: "accepted" }), /array/i);
+  assert.throws(() => parseAllMatchingGuestQuery({ guestStatus: "accepted", guestStatuses: ["accepted"], guestStatusMode: "none" }), /any or all/i);
+  assert.throws(() => parseAllMatchingGuestQuery({ guestStatus: "accepted", guestStatuses: ["accepted"], guestExcludedStatuses: ["everything"] }), /valid/i);
 });
 
 test("normalizes and validates all-matching event ids", () => {

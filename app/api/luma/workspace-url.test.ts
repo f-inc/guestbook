@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { MAX_SELECTED_EVENT_IDS } from "../../event-selection";
 import { buildWorkspaceUrlSearch, parseWorkspaceUrl } from "../../workspace-url";
 
 test("parses workspace navigation state from the URL", () => {
@@ -10,6 +11,9 @@ test("parses workspace navigation state from the URL", () => {
     eventSearch: "",
     tab: "analytics",
     guestStatus: "accepted",
+    guestStatuses: ["accepted"],
+    guestStatusMode: "any",
+    guestExcludedStatuses: [],
     guestSearch: "ada",
     guestTags: ["VIP", "Builder"],
     guestTagMode: "any",
@@ -17,6 +21,18 @@ test("parses workspace navigation state from the URL", () => {
     guestPage: 3,
     profileId: "person-2",
   });
+});
+
+test("round-trips included, excluded, and ALL status rules", () => {
+  const state = parseWorkspaceUrl("?guest_status=accepted&guest_status=checked_in&guest_status_mode=all&guest_status_not=no_show");
+  assert.deepEqual(state.guestStatuses, ["accepted", "checked_in"]);
+  assert.equal(state.guestStatusMode, "all");
+  assert.deepEqual(state.guestExcludedStatuses, ["no_show"]);
+
+  const reparsed = parseWorkspaceUrl(buildWorkspaceUrlSearch("", state));
+  assert.deepEqual(reparsed.guestStatuses, state.guestStatuses);
+  assert.equal(reparsed.guestStatusMode, "all");
+  assert.deepEqual(reparsed.guestExcludedStatuses, ["no_show"]);
 });
 
 test("persists ALL tag matching and excluded tags", () => {
@@ -32,6 +48,16 @@ test("parses ordered multi-event selections and keeps the last event primary", (
   const state = parseWorkspaceUrl("?event=evt-1&event=evt-2&event=evt-3");
   assert.deepEqual(state.eventIds, ["evt-1", "evt-2", "evt-3"]);
   assert.equal(state.eventId, "evt-3");
+});
+
+test("restores stacked event selections up to the shared catalog limit", () => {
+  const params = new URLSearchParams();
+  for (let index = 0; index < MAX_SELECTED_EVENT_IDS + 10; index += 1) {
+    params.append("event", `evt-${index}`);
+  }
+  const state = parseWorkspaceUrl(params.toString());
+  assert.equal(state.eventIds.length, MAX_SELECTED_EVENT_IDS);
+  assert.equal(state.eventId, `evt-${MAX_SELECTED_EVENT_IDS - 1}`);
 });
 
 test("persists guest note and attendance filters", () => {

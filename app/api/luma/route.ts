@@ -286,7 +286,10 @@ export async function GET(request: Request) {
           const diagnostic = createEventSwitchDiagnosticCollector(eventSwitchDiagnosticId, prioritizePage || requiresIndexedPage ? "overview.db" : "snapshot.db");
           const indexedResult = prioritizePage || requiresIndexedPage
             ? await loadIndexedGuestPage(eventId, guestQuery, diagnostic.report, knownEventBoundary)
-            : await loadIndexedGuestPayload(eventId, guestQuery, cacheKey, diagnostic.report, knownEventBoundary);
+            : await loadIndexedGuestPayload(eventId, guestQuery, cacheKey, {
+                diagnosticReporter: diagnostic.report,
+                knownEventBoundary,
+              });
           if (indexedResult) {
             const { payload: indexedPayload, snapshotCached } = indexedResult;
             if (eventSwitchDiagnosticId) {
@@ -384,7 +387,9 @@ export async function GET(request: Request) {
       }
       if (hasLumaDb()) {
         try {
-          const indexedResult = await loadIndexedGuestPayload(eventId, guestQuery, cacheKey);
+          const indexedResult = await loadIndexedGuestPayload(eventId, guestQuery, cacheKey, {
+            includeSummary: true,
+          });
           if (!indexedResult) throw new Error("The refreshed event guest index is empty.");
           const { payload: indexedPayload } = indexedResult;
           if (forceRefresh) {
@@ -1452,8 +1457,15 @@ async function loadIndexedGuestPayload(
   eventId,
   guestQuery,
   cacheKey,
-  diagnosticReporter?: EventSwitchDiagnosticReporter,
-  knownEventBoundary?: { startsAt: Date | null; date: Date | null } | null,
+  {
+    diagnosticReporter,
+    knownEventBoundary,
+    includeSummary = false,
+  }: {
+    diagnosticReporter?: EventSwitchDiagnosticReporter;
+    knownEventBoundary?: { startsAt: Date | null; date: Date | null } | null;
+    includeSummary?: boolean;
+  } = {},
 ) {
   const snapshotLimit = safeInt("LUMA_INDEX_GUEST_CACHE_MAX_ENTRIES", 1000, 25, 5000);
   const snapshotResult = await listIndexedEventGuests(eventId, {
@@ -1462,7 +1474,7 @@ async function loadIndexedGuestPayload(
     tags: [],
     cursor: 0,
     pageSize: snapshotLimit,
-    includeSummary: false,
+    includeSummary,
   }, prefixEventSwitchDiagnosticReporter(diagnosticReporter, "snapshot"), knownEventBoundary);
   const { indexHasGuests, ...snapshot } = snapshotResult;
   if (!indexHasGuests) return null;
@@ -1500,7 +1512,7 @@ async function loadIndexedGuestPage(
   const indexedResult = await listIndexedEventGuests(eventId, {
     ...guestQuery,
     includeSummary: false,
-    includeEventCounts: guestQuery.filter === "new_referrals",
+    includeEventCounts: guestQuery.filter === "new_referrals" || guestQuery.sortBy === "events_attended" || guestQuery.sortBy === "events_registered",
   }, diagnosticReporter, knownEventBoundary);
   const { indexHasGuests: _indexHasGuests, ...payload } = indexedResult;
   return { payload, snapshotCached: false };

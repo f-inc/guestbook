@@ -1,3 +1,5 @@
+import { MAX_SELECTED_EVENT_IDS } from "./event-selection";
+
 export type WorkspaceUrlState = {
   eventId: string;
   eventIds: string[];
@@ -5,6 +7,9 @@ export type WorkspaceUrlState = {
   eventSearch: string;
   tab: "overview" | "invite" | "analytics";
   guestStatus: string;
+  guestStatuses?: string[];
+  guestStatusMode?: "any" | "all";
+  guestExcludedStatuses?: string[];
   guestSearch: string;
   guestTags: string[];
   guestTagMode?: "any" | "all";
@@ -32,6 +37,7 @@ const GUEST_STATUSES = new Set([
   "new_referrals",
   "invited_no_response",
   "invited_accepted",
+  "invited_going",
   "invited_checked_in",
   "invited_no_show",
   "invited_declined",
@@ -48,6 +54,8 @@ const WORKSPACE_PARAMS = [
   "event_search",
   "tab",
   "guest_status",
+  "guest_status_mode",
+  "guest_status_not",
   "guest_search",
   "guest_tag",
   "guest_tag_mode",
@@ -62,9 +70,13 @@ export function parseWorkspaceUrl(search: string): WorkspaceUrlState {
   const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
   const eventView = params.get("event_view") || "upcoming";
   const tab = params.get("tab") || "overview";
-  const guestStatus = params.get("guest_status") || "all";
+  const guestStatuses = unique(params.getAll("guest_status").filter((status) => GUEST_STATUSES.has(status) && status !== "all")).slice(0, 20);
+  const guestExcludedStatuses = unique(params.getAll("guest_status_not").filter((status) => GUEST_STATUSES.has(status) && status !== "all"))
+    .filter((status) => !guestStatuses.includes(status))
+    .slice(0, 20);
   const requestedPage = Number.parseInt(params.get("guest_page") || "1", 10);
-  const eventIds = unique(params.getAll("event").map((eventId) => boundedText(eventId, 160)).filter(Boolean)).slice(0, 20);
+  const eventIds = unique(params.getAll("event").map((eventId) => boundedText(eventId, 160)).filter(Boolean))
+    .slice(0, MAX_SELECTED_EVENT_IDS);
 
   const guestHasNotes = params.get("guest_has_notes") === "1";
   const guestAttendedGreaterThan = boundedOptionalInteger(params.get("guest_attended_gt"), 0, 10_000);
@@ -74,7 +86,10 @@ export function parseWorkspaceUrl(search: string): WorkspaceUrlState {
     eventView: EVENT_VIEWS.has(eventView) ? eventView as WorkspaceUrlState["eventView"] : "upcoming",
     eventSearch: boundedText(params.get("event_search"), 120),
     tab: EVENT_TABS.has(tab) ? tab as WorkspaceUrlState["tab"] : "overview",
-    guestStatus: GUEST_STATUSES.has(guestStatus) ? guestStatus : "all",
+    guestStatus: guestStatuses[0] || "all",
+    guestStatuses,
+    guestStatusMode: params.get("guest_status_mode") === "all" ? "all" : "any",
+    guestExcludedStatuses,
     guestSearch: boundedText(params.get("guest_search"), 120),
     guestTags: unique(params.getAll("guest_tag").map((tag) => boundedText(tag, 40)).filter(Boolean)).slice(0, 20),
     guestTagMode: params.get("guest_tag_mode") === "all" ? "all" : "any",
@@ -95,7 +110,16 @@ export function buildWorkspaceUrlSearch(currentSearch: string, state: WorkspaceU
   if (state.eventView !== "upcoming") params.set("event_view", state.eventView);
   if (state.eventSearch) params.set("event_search", state.eventSearch);
   if (state.tab !== "overview") params.set("tab", state.tab);
-  if (state.guestStatus !== "all") params.set("guest_status", state.guestStatus);
+  const guestStatuses = unique(state.guestStatuses?.length
+    ? state.guestStatuses
+    : state.guestStatus !== "all"
+      ? [state.guestStatus]
+      : []).filter((status) => GUEST_STATUSES.has(status) && status !== "all");
+  guestStatuses.forEach((status) => params.append("guest_status", status));
+  if (state.guestStatusMode === "all") params.set("guest_status_mode", "all");
+  unique(state.guestExcludedStatuses || [])
+    .filter((status) => GUEST_STATUSES.has(status) && status !== "all" && !guestStatuses.includes(status))
+    .forEach((status) => params.append("guest_status_not", status));
   if (state.guestSearch) params.set("guest_search", state.guestSearch);
   unique(state.guestTags).forEach((tag) => params.append("guest_tag", tag));
   if (state.guestTagMode === "all") params.set("guest_tag_mode", "all");

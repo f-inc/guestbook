@@ -30,11 +30,13 @@ type GuestStats = {
   registered?: unknown;
   total?: unknown;
   invitationTotal?: unknown;
+  invitedGoing?: unknown;
   invitedCheckedIn?: unknown;
   invitedNoShow?: unknown;
   invitedNoResponse?: unknown;
   invitedDeclined?: unknown;
   invitedReferralTotal?: unknown;
+  invitedReferralGoing?: unknown;
   invitedReferralCheckedIn?: unknown;
   invitedReferralNoShow?: unknown;
   invitedReferralNoResponse?: unknown;
@@ -59,23 +61,27 @@ export function invitationOutcomeCounts(stats: GuestStats | null | undefined, gu
   const invitedGuests = guests.filter((guest) => Boolean(guest.invitedAt) || guest.status === "invited");
   const fallback = {
     total: invitedGuests.length,
-    checkedIn: invitedGuests.filter((guest) => guest.status === "checked_in" || Boolean(guest.checkedInAt)).length,
-    noShow: invitedGuests.filter((guest) => guest.status === "no_show").length,
+    going: guests.filter((guest) => guest.status === "going").length,
+    checkedIn: guests.filter((guest) => guest.status === "checked_in" || Boolean(guest.checkedInAt)).length,
+    noShow: guests.filter((guest) => guest.status === "no_show").length,
     noResponse: invitedGuests.filter((guest) => guest.status === "invited").length,
-    declined: invitedGuests.filter((guest) => guest.status === "declined").length,
+    declined: guests.filter((guest) => guest.status === "declined").length,
     referralTotal: invitedGuests.filter((guest) => guest.isReferred).length,
-    referralCheckedIn: invitedGuests.filter((guest) => guest.isReferred && (guest.status === "checked_in" || Boolean(guest.checkedInAt))).length,
-    referralNoShow: invitedGuests.filter((guest) => guest.isReferred && guest.status === "no_show").length,
+    referralGoing: guests.filter((guest) => guest.isReferred && guest.status === "going").length,
+    referralCheckedIn: guests.filter((guest) => guest.isReferred && (guest.status === "checked_in" || Boolean(guest.checkedInAt))).length,
+    referralNoShow: guests.filter((guest) => guest.isReferred && guest.status === "no_show").length,
     referralNoResponse: invitedGuests.filter((guest) => guest.isReferred && guest.status === "invited").length,
-    referralDeclined: invitedGuests.filter((guest) => guest.isReferred && guest.status === "declined").length,
+    referralDeclined: guests.filter((guest) => guest.isReferred && guest.status === "declined").length,
   };
   return {
     total: nonnegativeCount(stats?.invitationTotal) ?? fallback.total,
+    going: nonnegativeCount(stats?.invitedGoing) ?? fallback.going,
     checkedIn: nonnegativeCount(stats?.invitedCheckedIn) ?? fallback.checkedIn,
     noShow: nonnegativeCount(stats?.invitedNoShow) ?? fallback.noShow,
     noResponse: nonnegativeCount(stats?.invitedNoResponse) ?? fallback.noResponse,
     declined: nonnegativeCount(stats?.invitedDeclined) ?? fallback.declined,
     referralTotal: nonnegativeCount(stats?.invitedReferralTotal) ?? fallback.referralTotal,
+    referralGoing: nonnegativeCount(stats?.invitedReferralGoing) ?? fallback.referralGoing,
     referralCheckedIn: nonnegativeCount(stats?.invitedReferralCheckedIn) ?? fallback.referralCheckedIn,
     referralNoShow: nonnegativeCount(stats?.invitedReferralNoShow) ?? fallback.referralNoShow,
     referralNoResponse: nonnegativeCount(stats?.invitedReferralNoResponse) ?? fallback.referralNoResponse,

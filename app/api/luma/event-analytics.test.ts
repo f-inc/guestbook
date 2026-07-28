@@ -172,20 +172,24 @@ test("orders founder-stage answers by progression instead of popularity", () => 
   ]);
 });
 
-test("counts invitation outcomes without including organic registrations", () => {
+test("matches Luma's event-wide outcome buckets while keeping the invitation total explicit", () => {
   assert.deepEqual(invitationOutcomeCounts(null, [
+    { status: "going", invitedAt: "2026-07-01", isReferred: true },
     { status: "checked_in", invitedAt: "2026-07-01", checkedInAt: "2026-07-02", isReferred: true },
     { status: "no_show", invitedAt: "2026-07-01" },
     { status: "invited", isReferred: true },
     { status: "declined", invitedAt: "2026-07-01" },
     { status: "checked_in", checkedInAt: "2026-07-02" },
+    { status: "going" },
   ]), {
-    total: 4,
-    checkedIn: 1,
+    total: 5,
+    going: 2,
+    checkedIn: 2,
     noShow: 1,
     noResponse: 1,
     declined: 1,
-    referralTotal: 2,
+    referralTotal: 3,
+    referralGoing: 1,
     referralCheckedIn: 1,
     referralNoShow: 0,
     referralNoResponse: 1,

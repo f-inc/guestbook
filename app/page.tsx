@@ -1,7 +1,7 @@
 "use client";
 
 import type { CSSProperties } from "react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -12,11 +12,13 @@ import {
   BadgeCheck,
   BarChart3,
   Bold,
+  Check,
   ChevronDown,
   CircleCheck,
   CircleX,
   Clock3,
   Code2,
+  Copy,
   Eye,
   ExternalLink,
   FileText,
@@ -32,6 +34,7 @@ import {
   MapPin,
   MessageSquare,
   Pencil,
+  Phone as PhoneIcon,
   Plus,
   Quote,
   RefreshCw,
@@ -55,12 +58,12 @@ import { MAX_INVITE_MESSAGE_LENGTH } from "./invite-message";
 import { MAX_GUEST_STATUS_MESSAGE_LENGTH } from "./guest-status-notification";
 import { lumaEventManageUrl } from "./luma-event-url";
 import { buildRegistrationQuestionAnalytics, eventWideAnalyticsCounts, invitationOutcomeCounts, REFERRED_PERSON_TAG, sortRegistrationQuestionOptions } from "./event-analytics";
+import { changedLiveEventCountKeys, type LiveEventCounts } from "./event-count-reconciliation";
 import {
   EVENT_SWITCH_DIAGNOSTICS_ACTION,
   EVENT_SWITCH_DIAGNOSTICS_PARAM,
 } from "./event-switch-diagnostics";
 import { buildWorkspaceUrlSearch, parseWorkspaceUrl, type WorkspaceUrlState } from "./workspace-url";
-import { changedLiveEventCountKeys, type LiveEventCounts } from "./event-count-reconciliation";
 
 const statusLabels = {
   registered: "Registered",
@@ -100,7 +103,6 @@ const GUEST_SEARCH_DEBOUNCE_MS = 250;
 const QUESTION_RESPONSE_BATCH_SIZE = 10;
 const MAX_GUEST_NOTE_LENGTH = 20_000;
 const EVENT_CATALOG_REFRESH_COOLDOWN_MS = 5 * 60_000;
-const ACTIVE_EVENT_COUNT_POLL_MS = 30_000;
 const guestFilterOptions = [
   { value: "all", label: "All guests", color: "#706f69" },
   { value: "to_decide", label: "To Decide", color: "#9a6418" },
@@ -250,12 +252,17 @@ export default function Home() {
   const [analyticsRespondentDialog, setAnalyticsRespondentDialog] = useState(null);
   const [openTagPersonId, setOpenTagPersonId] = useState("");
   const [savingTagPersonId, setSavingTagPersonId] = useState("");
+  const [savingPhonePersonId, setSavingPhonePersonId] = useState("");
   const [tagSettingsOpen, setTagSettingsOpen] = useState(false);
   const [tagSettingsSaving, setTagSettingsSaving] = useState(false);
   const [superTags, setSuperTags] = useState<any[]>([]);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [universalSearchExpanded, setUniversalSearchExpanded] = useState(false);
   const [universalQuery, setUniversalQuery] = useState("");
+  const [universalPeopleFilters, setUniversalPeopleFilters] = useState(() => emptyPeopleSearchFilters());
   const [universalPeopleSearch, setUniversalPeopleSearch] = useState({ query: "", status: "idle", results: [], error: "" });
+  const universalPeopleFiltersKey = peopleSearchFiltersKey(universalPeopleFilters);
+  const hasUniversalPeopleFilters = peopleSearchFiltersActive(universalPeopleFilters);
   const universalSearchInputRef = useRef(null);
   const guestRequestsRef = useRef(new Set());
   const latestGuestRequestRef = useRef(new Map());
@@ -487,11 +494,20 @@ export default function Home() {
     setSessionStatus("ready");
   };
 
+  const openUniversalSearch = () => {
+    setUniversalQuery("");
+    setUniversalPeopleFilters(emptyPeopleSearchFilters());
+    setUniversalPeopleSearch({ query: "", status: "idle", results: [], error: "" });
+    setUniversalSearchExpanded(false);
+    setOpenTagPersonId("");
+    setSearchOpen(true);
+  };
+
   useEffect(() => {
     const handleKeyDown = (event) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
-        setSearchOpen(true);
+        openUniversalSearch();
       }
       if (event.key === "Escape") {
         const openToolbarFilter = document.querySelector<HTMLDetailsElement>(".toolbar-filter-menu[open]");
@@ -525,16 +541,23 @@ export default function Home() {
 
   useEffect(() => {
     const query = universalQuery.trim().toLocaleLowerCase();
-    if (!searchOpen || !query) {
+    const requestKey = `${query}\u0000${universalPeopleFiltersKey}`;
+    if (!searchOpen || (!query && !hasUniversalPeopleFilters)) {
       setUniversalPeopleSearch({ query: "", status: "idle", results: [], error: "" });
+      setUniversalSearchExpanded(false);
       return;
     }
 
     const controller = new AbortController();
-    setUniversalPeopleSearch({ query, status: "loading", results: [], error: "" });
+    setUniversalPeopleSearch({ query: requestKey, status: "loading", results: [], error: "" });
     const timeout = window.setTimeout(async () => {
+      setUniversalSearchExpanded(true);
       try {
-        const params = new URLSearchParams({ q: universalQuery.trim(), limit: "8" });
+        const params = new URLSearchParams({ q: universalQuery.trim(), limit: "20" });
+        universalPeopleFilters.includedTags.forEach((tag) => params.append("tag", tag));
+        universalPeopleFilters.excludedTags.forEach((tag) => params.append("exclude_tag", tag));
+        params.set("tag_mode", universalPeopleFilters.tagMode);
+        params.set("comments", universalPeopleFilters.comments);
         const response = await apiFetch(`/api/search/people?${params.toString()}`, {
           cache: "no-store",
           signal: controller.signal,
@@ -542,11 +565,13 @@ export default function Home() {
         const data: any = await response.json();
         if (!response.ok) throw new Error(data.error || "Unable to search people.");
         if (!controller.signal.aborted) {
-          setUniversalPeopleSearch({ query, status: "ready", results: Array.isArray(data.people) ? data.people : [], error: "" });
+          const results = Array.isArray(data.people) ? data.people : [];
+          mergeIndexedPeople(results);
+          setUniversalPeopleSearch({ query: requestKey, status: "ready", results, error: "" });
         }
       } catch (error) {
         if (controller.signal.aborted) return;
-        setUniversalPeopleSearch({ query, status: "error", results: [], error: error.message || "Unable to search people." });
+        setUniversalPeopleSearch({ query: requestKey, status: "error", results: [], error: error.message || "Unable to search people." });
       }
     }, UNIVERSAL_PEOPLE_SEARCH_DEBOUNCE_MS);
 
@@ -554,7 +579,7 @@ export default function Home() {
       window.clearTimeout(timeout);
       controller.abort();
     };
-  }, [searchOpen, universalQuery, sessionKey]);
+  }, [searchOpen, universalQuery, universalPeopleFiltersKey, sessionKey]);
 
   useEffect(() => {
     if (!apiState.message) return;
@@ -672,6 +697,9 @@ export default function Home() {
   const selectedEvent = getEvent(state, state.selectedEventId);
   const selectedEvents = selectedWorkspaceEvents(state);
   const selectedEventIdsKey = selectedEvents.map((event) => event.id).join("\u0000");
+  const selectedEventCountReadinessKey = selectedEvents
+    .map((event) => `${event.id}:${eventHeaderStatsReady(event) ? "ready" : "pending"}`)
+    .join("\u0000");
   const multiEventStatsKey = [...selectedEvents].map((event) => event.id).sort().join("\u0000");
   const multiEventMode = selectedEvents.length > 1;
   const uniqueWorkspaceStats = multiEventMode ? multiEventStatsByKey[multiEventStatsKey] || null : null;
@@ -699,17 +727,23 @@ export default function Home() {
   const guestStatusFilterKey = `${state.filters.guestStatusMode}:${state.filters.guestStatuses.join("\u0000")}:${state.filters.guestExcludedStatuses.join("\u0000")}`;
   const multiEventGuestQueryKey = `${multiEventStatsKey}:${guestStatusFilterKey}:${debouncedGuestSearch}:${guestTagFilterKey}:${state.filters.guestHasNotes ? 1 : 0}:${state.filters.guestAttendedGreaterThan}:${guestSortField}:${guestDateSortDirection}`;
   const normalizedUniversalQuery = universalQuery.trim().toLocaleLowerCase();
-  const activeUniversalPeopleSearch = universalPeopleSearch.query === normalizedUniversalQuery ? universalPeopleSearch : null;
+  const universalPeopleRequestKey = `${normalizedUniversalQuery}\u0000${universalPeopleFiltersKey}`;
+  const activeUniversalPeopleSearch = universalPeopleSearch.query === universalPeopleRequestKey ? universalPeopleSearch : null;
+  const activeUniversalIndexedPeople = activeUniversalPeopleSearch?.status === "ready"
+    ? activeUniversalPeopleSearch.results
+    : activeUniversalPeopleSearch
+      ? []
+      : null;
   const universalResults = useMemo(
-    () => universalSearchResults(state, universalQuery, activeUniversalPeopleSearch?.status === "ready" ? activeUniversalPeopleSearch.results : null),
-    [state, universalQuery, activeUniversalPeopleSearch],
+    () => universalSearchResults(state, universalQuery, activeUniversalIndexedPeople),
+    [state, universalQuery, activeUniversalIndexedPeople],
   );
   const universalResultCount = universalResults.events.length + universalResults.people.length + universalResults.groups.length;
   const showGuestGroups = visibleGuests.some(({ person }) => person.groups.length > 0);
   const hasSelectedProfile = hasProfileContent(state, selectedPerson);
   const showProfilePanel = profilePanelOpen && hasSelectedProfile;
   const showGuestReferrer = !showProfilePanel;
-  const guestTableColumnCount = 9 + Number(showGuestGroups) + Number(showGuestReferrer);
+  const guestTableColumnCount = 10 + Number(showGuestGroups) + Number(showGuestReferrer);
   const hasActiveGuestFilters = state.filters.guestStatuses.length > 0
     || state.filters.guestExcludedStatuses.length > 0
     || state.filters.guestTags.length > 0
@@ -1402,6 +1436,7 @@ export default function Home() {
       const response = await apiFetch(`/api/luma?${params.toString()}`, { cache: "no-store" });
       const data: any = await response.json();
       if (!response.ok) throw new Error(withRequestId(data.error || "Unable to check live event counts.", data.requestId));
+      if (document.visibilityState !== "visible") return;
       const liveCounts = new Map<string, LiveEventCounts>(
         (Array.isArray(data.counts) ? data.counts : []).map((counts: LiveEventCounts) => [counts.eventId, counts]),
       );
@@ -1410,6 +1445,7 @@ export default function Home() {
         return counts && changedLiveEventCountKeys(event.guestStats, counts).length > 0;
       });
       for (const event of changedEvents) {
+        if (document.visibilityState !== "visible") return;
         await loadEventGuests(event.id, { force: true, priority: true, background: true });
       }
     } catch {
@@ -1423,19 +1459,17 @@ export default function Home() {
 
   useEffect(() => {
     if (sessionStatus !== "ready" || !sessionKey || !selectedEventIdsKey) return;
-    const checkIfVisible = () => {
+    const checkWhenActive = () => {
       if (document.visibilityState === "visible") reconcileActiveEventCountsRef.current();
     };
-    checkIfVisible();
-    const interval = window.setInterval(checkIfVisible, ACTIVE_EVENT_COUNT_POLL_MS);
-    document.addEventListener("visibilitychange", checkIfVisible);
-    window.addEventListener("focus", checkIfVisible);
+    checkWhenActive();
+    document.addEventListener("visibilitychange", checkWhenActive);
+    window.addEventListener("focus", checkWhenActive);
     return () => {
-      window.clearInterval(interval);
-      document.removeEventListener("visibilitychange", checkIfVisible);
-      window.removeEventListener("focus", checkIfVisible);
+      document.removeEventListener("visibilitychange", checkWhenActive);
+      window.removeEventListener("focus", checkWhenActive);
     };
-  }, [sessionStatus, sessionKey, selectedEventIdsKey]);
+  }, [sessionStatus, sessionKey, selectedEventIdsKey, selectedEventCountReadinessKey]);
 
   const performSelectedEventSync = async (eventIds: string[], token = "") => {
     const requestedEventIds = [...new Set(eventIds.filter(Boolean))];
@@ -2092,6 +2126,42 @@ export default function Home() {
     }
   };
 
+  const savePersonPhone = async (personId, phoneNumber) => {
+    if (savingPhonePersonId) return false;
+    setSavingPhonePersonId(personId);
+    try {
+      const response = await apiFetch("/api/people/phone", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ personId, phoneNumber }),
+      });
+      const data: any = await response.json();
+      if (!response.ok) throw new Error(data.error || "Unable to update the phone number.");
+      const savedPhoneNumber = data.phoneNumber || "";
+      setState((current) => ({
+        ...current,
+        people: current.people.map((person) => person.id === personId ? { ...person, phoneNumber: savedPhoneNumber } : person),
+        events: current.events.map((event) => ({
+          ...event,
+          guests: event.guests.map((guest) => guest.personId === personId ? { ...guest, phoneNumber: savedPhoneNumber } : guest),
+        })),
+      }));
+      setUniversalPeopleSearch((current) => ({
+        ...current,
+        results: current.results.map((entry) => entry?.person?.id === personId
+          ? { ...entry, person: { ...entry.person, phoneNumber: savedPhoneNumber } }
+          : entry),
+      }));
+      setApiState({ status: "live", message: `Updated phone number for ${getPerson(state, personId)?.name || "guest"}.` });
+      return true;
+    } catch (error) {
+      setApiState({ status: "error", message: error.message || "Unable to update the phone number." });
+      return false;
+    } finally {
+      setSavingPhonePersonId("");
+    }
+  };
+
   const savePersonTags = async (personId, tags, { lockAlreadyHeld = false, eventId = "", tagId = "", removed = false } = {}) => {
     if (savingTagPersonId && !lockAlreadyHeld) return false;
     if (!lockAlreadyHeld) setSavingTagPersonId(personId);
@@ -2134,7 +2204,7 @@ export default function Home() {
       }));
       const mutatedDefinition = state.tagDefinitions.find((definition) => definition.id === tagId);
       if (mutatedDefinition?.semanticKey === "referral" || mutatedDefinition?.name?.toLocaleLowerCase() === REFERRED_PERSON_TAG.toLocaleLowerCase()) {
-        void loadEventAnalytics(eventId);
+        if (eventId) void loadEventAnalytics(eventId);
         if (multiEventMode && multiEventStatsKey) {
           setMultiEventStatsByKey((current) => {
             const next = { ...current };
@@ -3234,7 +3304,7 @@ export default function Home() {
           <img className="brand-mark size-11 shrink-0 object-contain mix-blend-multiply" src="/guestbook-logo.png" alt="" width="44" height="44" />
           <h1 className="text-2xl font-bold tracking-normal">Guestbook</h1>
         </div>
-        <button className="command-button" type="button" onClick={() => setSearchOpen(true)}>
+        <button className="command-button" type="button" onClick={openUniversalSearch}>
           <span className="command-label">
             <Search size={17} aria-hidden="true" />
             <span>Search people, events, groups</span>
@@ -3639,6 +3709,7 @@ export default function Home() {
                               : null}
                           </button>
                         </th>
+                        <th className="phone-cell">Phone</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -3761,6 +3832,20 @@ export default function Home() {
                                 <span className="whitespace-nowrap text-xs text-muted">-</span>
                               )}
                             </td>
+                            <td className="phone-cell" onClick={(event) => event.stopPropagation()}>
+                              {guest.phoneNumber ? (
+                                <a
+                                  className="phone-link"
+                                  href={phoneHref(guest.phoneNumber)}
+                                  title={`Call ${person.name}`}
+                                >
+                                  <PhoneIcon size={14} aria-hidden="true" />
+                                  <span>{guest.phoneNumber}</span>
+                                </a>
+                              ) : (
+                                <span className="phone-empty">-</span>
+                              )}
+                            </td>
                           </tr>
                           );
                         })
@@ -3879,14 +3964,28 @@ export default function Home() {
       {searchOpen ? (
         <UniversalSearchModal
           query={universalQuery}
+          expanded={universalSearchExpanded}
           results={universalResults}
           resultCount={universalResultCount}
-          peopleSearchStatus={activeUniversalPeopleSearch?.status || (normalizedUniversalQuery ? "loading" : "idle")}
+          tagDefinitions={state.tagDefinitions}
+          peopleFilters={universalPeopleFilters}
+          peopleSearchStatus={activeUniversalPeopleSearch?.status || (normalizedUniversalQuery || hasUniversalPeopleFilters ? "loading" : "idle")}
           peopleSearchError={activeUniversalPeopleSearch?.error || ""}
+          openTagPersonId={openTagPersonId}
+          savingTagPersonId={savingTagPersonId}
+          savingPhonePersonId={savingPhonePersonId}
           inputRef={universalSearchInputRef}
           onQueryChange={setUniversalQuery}
+          onPeopleFiltersChange={setUniversalPeopleFilters}
           onClose={() => setSearchOpen(false)}
           onSelect={selectUniversalResult}
+          onAvatarClick={setAvatarPreview}
+          onOpenComments={openGuestNote}
+          onOpenTags={setOpenTagPersonId}
+          onCloseTags={() => setOpenTagPersonId("")}
+          onChangeTags={(person, tags, mutation) => savePersonTags(person.id, tags, { ...mutation, eventId: "" })}
+          onCreateTag={(person, name, tags) => createAndAssignTag(person.id, name, tags, "")}
+          onSavePhone={savePersonPhone}
         />
       ) : null}
 
@@ -4857,6 +4956,7 @@ function TagFilter({
 }) {
   const menuRef = useDismissableDetails();
   const searchRef = useRef<HTMLInputElement>(null);
+  const optionListId = useId();
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const tags = definitions.map((tag) => tag.name);
@@ -4950,8 +5050,8 @@ function TagFilter({
                 role="combobox"
                 aria-label="Search tag filters"
                 aria-expanded="true"
-                aria-controls="tag-filter-options"
-                aria-activedescendant={filteredTags[activeIndex] ? `tag-filter-option-${activeIndex}` : undefined}
+                aria-controls={optionListId}
+                aria-activedescendant={filteredTags[activeIndex] ? `${optionListId}-option-${activeIndex}` : undefined}
                 placeholder="Search tags…"
                 value={query}
                 onChange={(event) => {
@@ -4973,11 +5073,11 @@ function TagFilter({
               />
             </label>
           </div>
-          <div id="tag-filter-options" className="tag-filter-options" role="list" aria-label="Tag rules">
+          <div id={optionListId} className="tag-filter-options" role="list" aria-label="Tag rules">
           {filteredTags.length ? filteredTags.map((tag, index) => (
             <div
               className={`tag-filter-option ${includedSet.has(tag) ? "included" : ""} ${excludedSet.has(tag) ? "excluded" : ""} ${index === activeIndex ? "keyboard-active" : ""}`}
-              id={`tag-filter-option-${index}`}
+              id={`${optionListId}-option-${index}`}
               role="listitem"
               key={tag}
               tabIndex={0}
@@ -5206,11 +5306,37 @@ function useDismissableDetails() {
   return menuRef;
 }
 
-function UniversalSearchModal({ query, results, resultCount, peopleSearchStatus, peopleSearchError, inputRef, onQueryChange, onClose, onSelect }) {
+function UniversalSearchModal({
+  query,
+  expanded,
+  results,
+  resultCount,
+  tagDefinitions,
+  peopleFilters,
+  peopleSearchStatus,
+  peopleSearchError,
+  openTagPersonId,
+  savingTagPersonId,
+  savingPhonePersonId,
+  inputRef,
+  onQueryChange,
+  onPeopleFiltersChange,
+  onClose,
+  onSelect,
+  onAvatarClick,
+  onOpenComments,
+  onOpenTags,
+  onCloseTags,
+  onChangeTags,
+  onCreateTag,
+  onSavePhone,
+}) {
   const hasQuery = query.trim().length > 0;
+  const hasPeopleFilters = peopleSearchFiltersActive(peopleFilters);
+  const hasCriteria = hasQuery || hasPeopleFilters;
   return (
     <div className="search-scrim" role="presentation" onMouseDown={onClose}>
-      <section className="search-dialog" role="dialog" aria-modal="true" aria-label="Universal search" onMouseDown={(event) => event.stopPropagation()}>
+      <section className={`search-dialog ${expanded ? "expanded" : "compact"}`} role="dialog" aria-modal="true" aria-label="Universal search" onMouseDown={(event) => event.stopPropagation()}>
         <div className="search-input-wrap">
           <input
             ref={inputRef}
@@ -5223,18 +5349,287 @@ function UniversalSearchModal({ query, results, resultCount, peopleSearchStatus,
             x
           </button>
         </div>
-        {!hasQuery ? (
-          <div className="search-empty">Type a name, email, bio term, event, or group.</div>
-        ) : resultCount || peopleSearchStatus === "loading" ? (
-          <div className="search-results">
-            <SearchSection title="People" results={results.people} loading={peopleSearchStatus === "loading"} error={peopleSearchError} onSelect={onSelect} />
-            <SearchSection title="Events" results={results.events} onSelect={onSelect} />
-            <SearchSection title="Groups" results={results.groups} onSelect={onSelect} />
-          </div>
-        ) : (
-          <div className="search-empty">No results for "{query}".</div>
-        )}
+        {expanded ? (
+          <>
+            <UniversalPeopleFilters
+              definitions={tagDefinitions}
+              filters={peopleFilters}
+              onChange={onPeopleFiltersChange}
+            />
+            {!hasCriteria ? null : resultCount || peopleSearchStatus === "loading" || peopleSearchError ? (
+              <div className="search-results">
+                <PeopleSearchTable
+                  results={results.people}
+                  definitions={tagDefinitions}
+                  loading={peopleSearchStatus === "loading"}
+                  error={peopleSearchError}
+                  openTagPersonId={openTagPersonId}
+                  savingTagPersonId={savingTagPersonId}
+                  savingPhonePersonId={savingPhonePersonId}
+                  onSelect={onSelect}
+                  onAvatarClick={onAvatarClick}
+                  onOpenComments={onOpenComments}
+                  onOpenTags={onOpenTags}
+                  onCloseTags={onCloseTags}
+                  onChangeTags={onChangeTags}
+                  onCreateTag={onCreateTag}
+                  onSavePhone={onSavePhone}
+                />
+                <SearchSection title="Events" results={results.events} onSelect={onSelect} />
+                <SearchSection title="Groups" results={results.groups} onSelect={onSelect} />
+              </div>
+            ) : (
+              <div className="search-empty">
+                {hasQuery ? `No results for "${query}".` : "No people match these filters."}
+              </div>
+            )}
+          </>
+        ) : null}
       </section>
+    </div>
+  );
+}
+
+function UniversalPeopleFilters({ definitions, filters, onChange }) {
+  const active = peopleSearchFiltersActive(filters);
+  return (
+    <div className="search-filter-bar" aria-label="People search filters">
+      {active ? (
+        <button
+          className="button ghost search-filter-clear"
+          type="button"
+          onClick={() => onChange({
+            includedTags: [],
+            excludedTags: [],
+            tagMode: "any",
+            comments: "any",
+          })}
+        >
+          <X size={14} aria-hidden="true" />
+          Clear filters
+        </button>
+      ) : null}
+      <TagFilter
+        definitions={definitions}
+        included={filters.includedTags}
+        excluded={filters.excludedTags}
+        mode={filters.tagMode}
+        onIncludedChange={(includedTags) => onChange((current) => ({ ...current, includedTags }))}
+        onExcludedChange={(excludedTags) => onChange((current) => ({ ...current, excludedTags }))}
+        onModeChange={(tagMode) => onChange((current) => ({ ...current, tagMode }))}
+      />
+      <SearchCommentsFilter
+        value={filters.comments}
+        onChange={(comments) => onChange((current) => ({ ...current, comments }))}
+      />
+    </div>
+  );
+}
+
+function SearchCommentsFilter({ value, onChange }) {
+  const menuRef = useDismissableDetails();
+  const options = [
+    { value: "any", label: "Any comments", detail: "Include everyone" },
+    { value: "with", label: "Has comments", detail: "At least one comment" },
+    { value: "without", label: "No comments", detail: "No comment history" },
+  ];
+  const selected = options.find((option) => option.value === value) || options[0];
+  return (
+    <div className="search-comments-filter">
+      <span>Comments</span>
+      <details className={`search-comments-menu toolbar-filter-menu ${value !== "any" ? "filter-active" : ""}`} ref={menuRef}>
+        <summary>
+          <MessageSquare size={14} aria-hidden="true" />
+          <span>{selected.label}</span>
+          <ChevronDown className="status-filter-chevron" size={15} aria-hidden="true" />
+        </summary>
+        <div className="search-comments-popover">
+          {options.map((option) => (
+            <button
+              className={option.value === value ? "active" : ""}
+              type="button"
+              aria-pressed={option.value === value}
+              key={option.value}
+              onClick={() => {
+                onChange(option.value);
+                if (menuRef.current) menuRef.current.open = false;
+              }}
+            >
+              <span>
+                <strong>{option.label}</strong>
+                <small>{option.detail}</small>
+              </span>
+              {option.value === value ? <Check size={15} aria-hidden="true" /> : null}
+            </button>
+          ))}
+        </div>
+      </details>
+    </div>
+  );
+}
+
+function PeopleSearchTable({
+  results,
+  definitions,
+  loading,
+  error,
+  openTagPersonId,
+  savingTagPersonId,
+  savingPhonePersonId,
+  onSelect,
+  onAvatarClick,
+  onOpenComments,
+  onOpenTags,
+  onCloseTags,
+  onChangeTags,
+  onCreateTag,
+  onSavePhone,
+}) {
+  if (!results.length && !loading && !error) return null;
+  return (
+    <section className="search-section search-people-section">
+      <div className="search-section-heading">
+        <p className="eyebrow">People</p>
+        {results.length ? <span>{results.length}</span> : null}
+      </div>
+      {results.length ? (
+        <div className="table-wrap search-people-table-wrap">
+          <table className="guest-table search-people-table">
+            <thead>
+              <tr>
+                <th className="guest-identity-column">Guest</th>
+                <th className="tag-cell">Tags</th>
+                <th className="event-count-heading"><abbr className="table-header-abbr" data-tooltip="Events attended">EA</abbr></th>
+                <th className="event-count-heading"><abbr className="table-header-abbr" data-tooltip="Events registered">ER</abbr></th>
+                <th className="note-cell">Comments</th>
+                <th className="phone-cell">Phone</th>
+              </tr>
+            </thead>
+            <tbody>
+              {results.map((result) => {
+                const person = result.person;
+                const eventCounts = person.eventCounts || {};
+                return (
+                  <tr key={result.id}>
+                    <td className="guest-identity-column">
+                      <PersonButton person={person} onClick={() => onSelect(result)} onAvatarClick={onAvatarClick} />
+                    </td>
+                    <td className="tag-cell">
+                      <PersonTags
+                        person={person}
+                        definitions={definitions}
+                        open={openTagPersonId === person.id}
+                        saving={savingTagPersonId === person.id}
+                        onOpen={() => onOpenTags(openTagPersonId === person.id ? "" : person.id)}
+                        onClose={onCloseTags}
+                        onChange={(tags, mutation) => onChangeTags(person, tags, mutation)}
+                        onCreate={(name, tags) => onCreateTag(person, name, tags)}
+                      />
+                    </td>
+                    <td className="event-count-cell">{Number(eventCounts.attended) || 0}</td>
+                    <td className="event-count-cell">{Number(eventCounts.registered) || 0}</td>
+                    <td className="note-cell">
+                      <button
+                        className={`guest-note-trigger ${person.crmNotes ? "has-note" : ""}`}
+                        type="button"
+                        aria-label={`Open comments for ${person.name}`}
+                        onClick={() => onOpenComments(person)}
+                      >
+                        <MessageSquare size={15} aria-hidden="true" />
+                        <span className="guest-note-trigger-copy">
+                          <strong>{guestNoteSummary(person.crmNotes)}</strong>
+                          <small>{person.crmNotes ? "Latest comment" : "No comments yet"}</small>
+                        </span>
+                        {Number(person.crmNoteCount) > 1 ? <span className="guest-comment-count">{person.crmNoteCount}</span> : null}
+                      </button>
+                    </td>
+                    <td className="phone-cell">
+                      <PersonPhoneEditor
+                        person={person}
+                        saving={savingPhonePersonId === person.id}
+                        onSave={(phoneNumber) => onSavePhone(person.id, phoneNumber)}
+                      />
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+      {loading ? <div className="search-result-state">Searching every indexed person...</div> : null}
+      {error ? <div className="search-result-state search-result-error">{error}</div> : null}
+    </section>
+  );
+}
+
+function PersonPhoneEditor({ person, saving, onSave }) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(person.phoneNumber || "");
+
+  useEffect(() => {
+    if (!editing) setValue(person.phoneNumber || "");
+  }, [editing, person.id, person.phoneNumber]);
+
+  const save = async () => {
+    if (saving) return;
+    const saved = await onSave(value);
+    if (saved) setEditing(false);
+  };
+
+  if (editing) {
+    return (
+      <div className="search-phone-editor">
+        <input
+          autoFocus
+          type="tel"
+          aria-label={`Phone number for ${person.name}`}
+          value={value}
+          disabled={saving}
+          onChange={(event) => setValue(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              void save();
+            } else if (event.key === "Escape") {
+              setValue(person.phoneNumber || "");
+              setEditing(false);
+            }
+          }}
+        />
+        <button className="icon-button" type="button" aria-label="Save phone number" title="Save" disabled={saving} onClick={() => void save()}>
+          {saving ? <RefreshCw className="animate-spin" size={14} aria-hidden="true" /> : <Check size={14} aria-hidden="true" />}
+        </button>
+        <button
+          className="icon-button"
+          type="button"
+          aria-label="Cancel phone edit"
+          title="Cancel"
+          disabled={saving}
+          onClick={() => {
+            setValue(person.phoneNumber || "");
+            setEditing(false);
+          }}
+        >
+          <X size={14} aria-hidden="true" />
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="search-phone-value">
+      {person.phoneNumber ? (
+        <a className="phone-link" href={phoneHref(person.phoneNumber)} onClick={(event) => event.stopPropagation()}>
+          <PhoneIcon size={14} aria-hidden="true" />
+          <span>{person.phoneNumber}</span>
+        </a>
+      ) : (
+        <span className="phone-empty">No phone</span>
+      )}
+      <button className="icon-button" type="button" aria-label={`Edit phone number for ${person.name}`} title="Edit phone" onClick={() => setEditing(true)}>
+        <Pencil size={13} aria-hidden="true" />
+      </button>
     </div>
   );
 }
@@ -6634,7 +7029,7 @@ function ProfilePanel({ state, person, trace, lumaCheckInGuestKey, reinvitingGue
           <Avatar person={person} large onPreview={onAvatarClick} />
           <div className="profile-identity">
             <h2>{person.name}</h2>
-            <p className="person-email">{person.email}</p>
+            <CopyableEmail email={person.email} />
           </div>
           <div className="profile-head-actions">
             {currentStatus ? <StatusPill status={currentStatus} /> : null}
@@ -6993,15 +7388,112 @@ function TraceTimeline({ records, traced, onSelectEvent }) {
 }
 
 function PersonButton({ person, onClick, onAvatarClick }) {
+  const openPerson = (event) => {
+    event.stopPropagation();
+    if (hasSelectedTextWithin(event.currentTarget.parentElement)) return;
+    onClick?.(event);
+  };
+
   return (
     <div className="person-cell">
       <Avatar person={person} onPreview={onAvatarClick} />
-      <button className="plain person-details" type="button" onClick={onClick}>
-        <span className="person-name">{person.name}</span>
-        <span className="person-email">{person.email}</span>
-      </button>
+      <div className="person-details">
+        <span
+          className="person-name person-name-trigger"
+          role="button"
+          tabIndex={0}
+          onClick={openPerson}
+          onKeyDown={(event) => {
+            if (!["Enter", " "].includes(event.key)) return;
+            event.preventDefault();
+            event.stopPropagation();
+            onClick?.(event);
+          }}
+        >
+          {person.name}
+        </span>
+        <CopyableEmail email={person.email} />
+      </div>
     </div>
   );
+}
+
+function CopyableEmail({ email }) {
+  const [copied, setCopied] = useState(false);
+  const copiedTimeoutRef = useRef<number | null>(null);
+
+  useEffect(() => () => {
+    if (copiedTimeoutRef.current) window.clearTimeout(copiedTimeoutRef.current);
+  }, []);
+
+  if (!email) return null;
+
+  const copyEmail = async (event) => {
+    event.stopPropagation();
+    if (event.type === "click" && hasSelectedTextWithin(event.currentTarget)) return;
+    const copiedSuccessfully = await copyTextToClipboard(email);
+    if (!copiedSuccessfully) return;
+    setCopied(true);
+    if (copiedTimeoutRef.current) window.clearTimeout(copiedTimeoutRef.current);
+    copiedTimeoutRef.current = window.setTimeout(() => setCopied(false), 1400);
+  };
+
+  return (
+    <span
+      className={`person-email copyable-email ${copied ? "copied" : ""}`}
+      role="button"
+      tabIndex={0}
+      aria-label={`Copy ${email}`}
+      title={copied ? "Copied" : "Click to copy email"}
+      onClick={copyEmail}
+      onKeyDown={(event) => {
+        if (!["Enter", " "].includes(event.key)) return;
+        event.preventDefault();
+        void copyEmail(event);
+      }}
+    >
+      <span className="copyable-email-value">{email}</span>
+      {copied
+        ? <Check className="copyable-email-icon copyable-email-icon-confirmed" size={12} aria-hidden="true" />
+        : <Copy className="copyable-email-icon" size={12} aria-hidden="true" />}
+      <small className="copyable-email-feedback" aria-live="polite">{copied ? "Copied to clipboard" : ""}</small>
+    </span>
+  );
+}
+
+function hasSelectedTextWithin(element) {
+  if (!element || typeof window === "undefined") return false;
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || !selection.toString()) return false;
+  try {
+    return Array.from({ length: selection.rangeCount }, (_, index) => selection.getRangeAt(index))
+      .some((range) => range.intersectsNode(element));
+  } catch {
+    return false;
+  }
+}
+
+async function copyTextToClipboard(value) {
+  try {
+    await navigator.clipboard.writeText(value);
+    return true;
+  } catch {
+    let textarea;
+    try {
+      textarea = document.createElement("textarea");
+      textarea.value = value;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      return document.execCommand("copy");
+    } catch {
+      return false;
+    } finally {
+      textarea?.remove();
+    }
+  }
 }
 
 function guestNoteSummary(notes) {
@@ -7023,7 +7515,7 @@ function Avatar({ person, large = false, onPreview = null }) {
       orderAvatarCandidates(
         ...(person?.avatarCandidates || []),
         person?.avatarUrl,
-        large && person?.id ? `/api/luma/avatar?person_id=${encodeURIComponent(person.id)}` : "",
+        person?.id ? `/api/luma/avatar?person_id=${encodeURIComponent(person.id)}` : "",
       ),
     [large, person?.id, person?.avatarUrl, person?.avatarCandidates],
   );
@@ -7788,6 +8280,8 @@ function mergePersonRecord(existing, incoming) {
     lumaUserId: incoming.lumaUserId || existing?.lumaUserId || "",
     socialLinks: mergeProfileSocialLinks(existing?.socialLinks || [], incoming.socialLinks || []),
     referrer: incoming.referrer || existing?.referrer || null,
+    phoneNumber: incoming.phoneNumber ?? existing?.phoneNumber ?? "",
+    eventCounts: incoming.eventCounts ?? existing?.eventCounts ?? null,
   };
 }
 
@@ -7905,9 +8399,35 @@ function centerEventListItem(list, item, axis) {
   }
 }
 
+function peopleSearchFiltersActive(filters) {
+  return Boolean(
+    filters.includedTags.length
+    || filters.excludedTags.length
+    || filters.comments !== "any",
+  );
+}
+
+function emptyPeopleSearchFilters() {
+  return {
+    includedTags: [] as string[],
+    excludedTags: [] as string[],
+    tagMode: "any" as "any" | "all",
+    comments: "any" as "any" | "with" | "without",
+  };
+}
+
+function peopleSearchFiltersKey(filters) {
+  return [
+    filters.tagMode,
+    filters.includedTags.join("\u0000"),
+    filters.excludedTags.join("\u0000"),
+    filters.comments,
+  ].join("\u0001");
+}
+
 function universalSearchResults(state, query, indexedPeople = null) {
   const normalized = query.trim().toLowerCase();
-  if (!normalized) return { people: [], events: [], groups: [] };
+  if (!normalized && indexedPeople === null) return { people: [], events: [], groups: [] };
 
   return {
     people: (indexedPeople === null
@@ -7915,7 +8435,10 @@ function universalSearchResults(state, query, indexedPeople = null) {
           .map((person) => ({ person, text: personSearchText(state, person), eventId: mostRecentPersonEventId(state, person.id) }))
           .filter(({ text }) => text.includes(normalized))
           .slice(0, 8)
-      : indexedPeople.map(({ person, eventId }) => ({ person, eventId, text: personSearchText(state, person) })))
+      : indexedPeople.map(({ person, eventId }) => {
+          const currentPerson = getPerson(state, person.id) || person;
+          return { person: currentPerson, eventId, text: personSearchText(state, currentPerson) };
+        }))
       .map(({ person, eventId, text }) => ({
         type: "person",
         kind: "Person",
@@ -7925,9 +8448,9 @@ function universalSearchResults(state, query, indexedPeople = null) {
         title: person.name,
         subtitle: person.email || "No email",
         tags: orderedPersonTags(person).map((tag) => tagDefinitionForName(state.tagDefinitions, tag)),
-        detail: searchSnippet(text, normalized) || personGroupsLabel(state, person),
+        detail: (normalized ? searchSnippet(text, normalized) : "") || personGroupsLabel(state, person),
       })),
-    events: sortEvents(state.events)
+    events: normalized ? sortEvents(state.events)
       .filter((event) => eventSearchText(event).includes(normalized))
       .slice(0, 6)
       .map((event) => ({
@@ -7937,8 +8460,8 @@ function universalSearchResults(state, query, indexedPeople = null) {
         title: event.title,
         subtitle: formatDate(event.date) + " - " + event.location,
         detail: event.category,
-      })),
-    groups: state.groups
+      })) : [],
+    groups: normalized ? state.groups
       .filter((group) => groupSearchText(state, group).includes(normalized))
       .slice(0, 6)
       .map((group) => ({
@@ -7948,7 +8471,7 @@ function universalSearchResults(state, query, indexedPeople = null) {
         title: group.name,
         subtitle: groupMemberCount(state, group.id) + " people",
         detail: groupSearchDetail(state, group),
-      })),
+      })) : [],
   };
 }
 
@@ -8102,16 +8625,16 @@ function guestMatchesFrontendStatus(guest, filter) {
   if (filter === "registered") return isRegisteredGuest(guest);
   if (filter === "invited") return hasInvitationEvidence(guest);
   if (filter === "invited_no_response") return guest.status === "invited";
-  if (filter === "invited_accepted") return Boolean(guest.checkedInAt) || acceptedStatuses.includes(guest.status);
-  if (filter === "invited_going") return guest.status === "going";
-  if (filter === "invited_checked_in") return Boolean(guest.checkedInAt) || guest.status === "checked_in";
-  if (filter === "invited_no_show") return guest.status === "no_show";
-  if (filter === "invited_declined") return guest.status === "declined";
+  if (filter === "invited_accepted") return hasInvitationEvidence(guest) && (Boolean(guest.checkedInAt) || acceptedStatuses.includes(guest.status));
+  if (filter === "invited_going") return hasInvitationEvidence(guest) && guest.status === "going";
+  if (filter === "invited_checked_in") return hasInvitationEvidence(guest) && (Boolean(guest.checkedInAt) || guest.status === "checked_in");
+  if (filter === "invited_no_show") return hasInvitationEvidence(guest) && guest.status === "no_show";
+  if (filter === "invited_declined") return hasInvitationEvidence(guest) && guest.status === "declined";
   if (filter === "referrals") return Boolean(guest.isReferred) && (Boolean(guest.checkedInAt) || guest.status === "checked_in");
   if (filter === "invited_referrals") return Boolean(guest.isReferred) && hasInvitationEvidence(guest);
   if (filter === "invited_referral_no_response") return Boolean(guest.isReferred) && guest.status === "invited";
-  if (filter === "invited_referral_accepted") return Boolean(guest.isReferred) && (Boolean(guest.checkedInAt) || acceptedStatuses.includes(guest.status));
-  if (filter === "invited_referral_declined") return Boolean(guest.isReferred) && guest.status === "declined";
+  if (filter === "invited_referral_accepted") return Boolean(guest.isReferred) && hasInvitationEvidence(guest) && (Boolean(guest.checkedInAt) || acceptedStatuses.includes(guest.status));
+  if (filter === "invited_referral_declined") return Boolean(guest.isReferred) && hasInvitationEvidence(guest) && guest.status === "declined";
   if (filter === "first_registers") return isRegisteredGuest(guest) && isFirstRegistration(guest);
   if (filter === "accepted_first_registers") return isFirstRegister(guest);
   if (filter === "new_faces") return guest.status === "checked_in" && isFirstRegistration(guest);
@@ -8764,7 +9287,7 @@ function eventStats(event) {
     if (guest.status === "waitlisted") stats.waitlisted += 1;
     if (guest.status === "checked_in") stats.checkedIn += 1;
     if (hasInvitationEvidence(guest)) stats.invited += 1;
-    if (guest.status === "going") stats.invitedGoing += 1;
+    if (hasInvitationEvidence(guest) && guest.status === "going") stats.invitedGoing += 1;
     if (guest.status === "invited") stats.invitedNoResponse += 1;
     if (isGuestToDecide(guest)) stats.toDecide += 1;
     if (isFirstRegister(guest)) stats.firstRegisters += 1;
@@ -8776,6 +9299,11 @@ function eventStats(event) {
 
 function hasInvitationEvidence(guest) {
   return Boolean(guest?.invitedAt) || guest?.status === "invited";
+}
+
+function phoneHref(value) {
+  const dialable = String(value || "").trim().replace(/[^\d+*#,;]/g, "");
+  return dialable ? `tel:${dialable}` : undefined;
 }
 
 function isRegisteredGuest(guest) {

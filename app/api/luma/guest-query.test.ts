@@ -461,15 +461,15 @@ test("filters exact invitation and referral funnel cohorts", () => {
 
   assert.deepEqual(matchingIds("invited"), ["going", "checked", "no-show", "pending", "declined"]);
   assert.deepEqual(matchingIds("invited_no_response"), ["pending"]);
-  assert.deepEqual(matchingIds("invited_accepted"), ["going", "checked", "no-show", "organic-going", "organic"]);
-  assert.deepEqual(matchingIds("invited_going"), ["going", "organic-going"]);
-  assert.deepEqual(matchingIds("invited_checked_in"), ["checked", "organic"]);
+  assert.deepEqual(matchingIds("invited_accepted"), ["going", "checked", "no-show"]);
+  assert.deepEqual(matchingIds("invited_going"), ["going"]);
+  assert.deepEqual(matchingIds("invited_checked_in"), ["checked"]);
   assert.deepEqual(matchingIds("invited_no_show"), ["no-show"]);
   assert.deepEqual(matchingIds("invited_declined"), ["declined"]);
   assert.deepEqual(matchingIds("referrals"), ["checked", "organic"]);
   assert.deepEqual(matchingIds("invited_referrals"), ["going", "checked", "pending", "declined"]);
   assert.deepEqual(matchingIds("invited_referral_no_response"), ["pending"]);
-  assert.deepEqual(matchingIds("invited_referral_accepted"), ["going", "checked", "organic"]);
+  assert.deepEqual(matchingIds("invited_referral_accepted"), ["going", "checked"]);
   assert.deepEqual(matchingIds("invited_referral_declined"), ["declined"]);
 });
 

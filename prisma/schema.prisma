@@ -172,6 +172,7 @@ model LumaEventGuest {
   lumaUserIdLower     String?   @map("luma_user_id_lower")
   email               String?
   emailLower          String?   @map("email_lower")
+  phoneNumber         String?   @map("phone_number")
   status              String?
   lumaApprovalStatus  String?   @map("luma_approval_status")
   operatorDecision    String?   @map("operator_decision")

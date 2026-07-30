@@ -25,6 +25,7 @@ import { parseAnalyticsRespondentQuery } from "./analytics-respondents";
 import { parseAllMatchingGuestQuery } from "./all-matching-guest-selection";
 import { liveEventCountsFromLumaEvent } from "../../event-count-reconciliation";
 import { rateLimitBackoffMs } from "./rate-limit-retry";
+import { extractGuestPhoneNumber } from "./guest-phone";
 
 export const runtime = "nodejs";
 
@@ -1880,10 +1881,11 @@ function normalizeGuest(event, guest) {
   const socialLinks = mergeSocialLinks(extractSocialLinks(guest), extractSocialLinksFromAnswers(registrationAnswers));
   const registrationSearchText = extractRegistrationAnswerText(registrationAnswers);
   const referrer = extractReferrer(guest);
+  const phoneNumber = extractGuestPhoneNumber(guest, registrationAnswers);
   const avatarCandidates = extractAvatarCandidates(guest);
   const avatarUrl = avatarCandidates[0] || "";
   const profileUrl = extractProfileUrl(guest);
-  const searchText = [profileDescription, registrationSearchText, socialLinks.map((link) => link.display).join(" "), referrerText(referrer)].filter(Boolean).join(" ");
+  const searchText = [profileDescription, registrationSearchText, phoneNumber, socialLinks.map((link) => link.display).join(" "), referrerText(referrer)].filter(Boolean).join(" ");
   const status =
     checkedIn ? "checked_in" : isPast && guest.approval_status === "approved" ? "no_show" : approvalToStatus[guest.approval_status] || "registered";
   const title = extractGuestTitle(guest, registrationAnswers);
@@ -1910,6 +1912,7 @@ function normalizeGuest(event, guest) {
     personId,
     lumaGuestId,
     lumaApprovalStatus: guest.approval_status,
+    phoneNumber,
     profileDescription,
     avatarUrl,
     avatarCandidates,

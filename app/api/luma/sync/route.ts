@@ -9,6 +9,7 @@ import { requestedEventIds, shouldRefreshEventGuests } from "../sync-policy";
 import { orderAvatarCandidates } from "../../../avatar-order";
 import { requireSessionKey } from "../../session-auth";
 import { extractLumaReferrer } from "../referrer";
+import { extractGuestPhoneNumber } from "../guest-phone";
 
 export const runtime = "nodejs";
 
@@ -483,6 +484,7 @@ function normalizeEvent(event) {
 
 function normalizeGuest(event, guest) {
   const registrationAnswers = normalizeRegistrationAnswers(guest.registration_answers);
+  const phoneNumber = extractGuestPhoneNumber(guest, registrationAnswers);
   const lumaUserId = firstString(guest.user_id, guest.user_api_id, guest.user?.id, guest.user?.user_id, guest.user?.api_id);
   const lumaGuestId = firstString(guest.id, guest.api_id, guest.guest_id, guest.guest_api_id);
   const personId = lumaUserId || firstString(guest.user_email, guest.email, guest.user?.email, lumaGuestId) || "guest-" + Math.random().toString(36).slice(2, 10);
@@ -493,7 +495,7 @@ function normalizeGuest(event, guest) {
   const socialLinks = mergeSocialLinks(extractSocialLinks(guest), extractSocialLinksFromAnswers(registrationAnswers));
   const referrer = extractReferrer(guest);
   const avatarCandidates = extractAvatarCandidates(guest);
-  const searchText = [profileDescription, extractRegistrationAnswerText(registrationAnswers), socialLinks.map((link) => link.display).join(" "), referrerText(referrer)].filter(Boolean).join(" ");
+  const searchText = [profileDescription, extractRegistrationAnswerText(registrationAnswers), phoneNumber, socialLinks.map((link) => link.display).join(" "), referrerText(referrer)].filter(Boolean).join(" ");
   const status = checkedIn ? "checked_in" : isPast && guest.approval_status === "approved" ? "no_show" : approvalToStatus[guest.approval_status] || "registered";
   const registeredAt = firstString(guest.registered_at, guest.joined_at, status === "invited" ? "" : guest.created_at);
 
@@ -518,6 +520,7 @@ function normalizeGuest(event, guest) {
     personId,
     lumaGuestId,
     lumaApprovalStatus: guest.approval_status,
+    phoneNumber,
     profileDescription,
     avatarUrl: avatarCandidates[0] || "",
     avatarCandidates,

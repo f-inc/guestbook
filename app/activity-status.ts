@@ -1,8 +1,10 @@
 type ActivityRecord = {
+  approvedAt?: unknown;
   checkedInAt?: unknown;
   eventDate?: unknown;
   eventStartsAt?: unknown;
   invitedAt?: unknown;
+  lumaApprovalStatus?: unknown;
   registeredAt?: unknown;
   status?: string;
 };
@@ -11,7 +13,12 @@ export function activityRecordStatus(record: ActivityRecord, now = new Date()): 
   if (record.checkedInAt || record.status === "checked_in") return "checked_in";
 
   const isRegistered = Boolean(record.registeredAt || ["registered", "going", "no_show"].includes(record.status));
-  if (isRegistered) return eventHasStarted(record, now) ? "no_show" : "registered";
+  if (isRegistered) {
+    const approved = record.lumaApprovalStatus === "approved"
+      || Boolean(record.approvedAt)
+      || ["going", "no_show"].includes(record.status);
+    return approved && eventHasStarted(record, now) ? "no_show" : "registered";
+  }
 
   if (record.status === "invited" || record.invitedAt) return "invited";
   return record.status;

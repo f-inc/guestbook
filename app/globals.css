@@ -187,7 +187,7 @@
 
   .workspace {
     @apply grid min-h-0 min-w-0 flex-1 items-stretch overflow-hidden;
-    grid-template-columns: 270px minmax(0, 1fr) 390px;
+    grid-template-columns: 270px minmax(0, 1fr) clamp(420px, 27vw, 470px);
     transition: grid-template-columns var(--motion-slow) var(--motion-ease);
   }
 
@@ -1150,6 +1150,23 @@
     width: 18rem;
   }
 
+  .phone-cell {
+    @apply min-w-40 whitespace-nowrap;
+    width: 10rem;
+  }
+
+  .phone-link {
+    @apply inline-flex items-center gap-1.5 text-xs font-semibold text-brand no-underline hover:underline;
+  }
+
+  .phone-link svg {
+    @apply shrink-0 text-muted;
+  }
+
+  .phone-empty {
+    @apply text-xs text-muted;
+  }
+
   .event-count-heading,
   .event-count-cell {
     @apply min-w-14;
@@ -1319,15 +1336,50 @@
   }
 
   .person-details {
-    @apply grid min-w-0 flex-1 cursor-pointer;
+    @apply grid min-w-0 flex-1;
   }
 
   .person-name {
-    @apply block truncate text-sm font-bold;
+    @apply block select-text text-sm font-bold;
   }
 
   .person-email {
-    @apply block truncate text-xs leading-snug text-muted;
+    @apply block select-text text-xs leading-snug text-muted;
+  }
+
+  .person-name-trigger {
+    @apply w-fit max-w-full cursor-text rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-brand/25;
+  }
+
+  .copyable-email {
+    @apply inline-flex w-fit max-w-full cursor-copy items-center gap-1 outline-none transition-colors hover:text-ink hover:underline focus-visible:underline;
+    text-underline-offset: 2px;
+  }
+
+  .copyable-email-value {
+    @apply min-w-0 select-text;
+  }
+
+  .copyable-email-icon {
+    @apply shrink-0 opacity-0 transition-opacity;
+  }
+
+  .copyable-email:hover .copyable-email-icon,
+  .copyable-email:focus-visible .copyable-email-icon,
+  .copyable-email.copied .copyable-email-icon {
+    @apply opacity-100;
+  }
+
+  .copyable-email.copied {
+    @apply text-brand no-underline;
+  }
+
+  .copyable-email-icon-confirmed {
+    @apply text-brand;
+  }
+
+  .copyable-email-feedback {
+    @apply sr-only;
   }
 
   .guest-identity-column .person-details {
@@ -2866,7 +2918,16 @@
   }
 
   .profile-head h2 {
-    @apply truncate text-xl font-bold leading-tight tracking-normal;
+    @apply select-text break-words text-xl font-bold leading-tight tracking-normal;
+  }
+
+  .profile-identity .copyable-email {
+    @apply mt-1;
+  }
+
+  .profile-identity .copyable-email-value {
+    overflow-wrap: anywhere;
+    white-space: normal;
   }
 
   .profile-head-actions {
@@ -3855,7 +3916,23 @@
   }
 
   .search-dialog {
-    @apply max-w-3xl p-0;
+    @apply max-w-none overflow-visible p-0;
+    isolation: isolate;
+    width: min(640px, calc(100vw - 2rem));
+    max-width: min(640px, calc(100vw - 2rem));
+    overflow: visible;
+    transition:
+      width var(--motion-base) var(--motion-ease),
+      max-width var(--motion-base) var(--motion-ease);
+  }
+
+  .search-dialog.expanded {
+    width: min(1200px, calc(100vw - 2rem));
+    max-width: min(1200px, calc(100vw - 2rem));
+  }
+
+  .search-dialog.compact .search-input-wrap {
+    @apply border-b-0;
   }
 
   .search-input-wrap {
@@ -3866,12 +3943,154 @@
     @apply h-12 border-0 text-base shadow-none ring-0;
   }
 
+  .search-filter-bar {
+    @apply flex flex-wrap items-end gap-2 border-b border-border bg-canvas/35 px-3 py-2;
+  }
+
+  .search-filter-clear {
+    @apply h-10 min-h-10 whitespace-nowrap text-muted hover:bg-danger-soft hover:text-danger;
+  }
+
+  .search-filter-bar .tag-filter-control,
+  .search-comments-filter {
+    @apply relative grid min-w-48 gap-1 text-[11px] font-semibold text-muted;
+  }
+
+  .search-filter-bar .tag-filter-popover {
+    @apply left-0 right-auto;
+  }
+
+  .search-comments-menu {
+    @apply relative;
+  }
+
+  .search-comments-menu > summary {
+    @apply flex h-10 list-none items-center gap-2 rounded-lg border border-border bg-surface px-3 text-sm font-normal text-ink transition hover:border-border-strong;
+  }
+
+  .search-comments-menu > summary > span {
+    @apply min-w-0 flex-1 truncate;
+  }
+
+  .search-comments-menu > summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .search-comments-menu[open] > summary {
+    @apply border-brand ring-2 ring-brand/10;
+  }
+
+  .search-comments-menu[open] .status-filter-chevron {
+    @apply rotate-180;
+  }
+
+  .search-comments-popover {
+    @apply absolute left-0 top-[calc(100%+6px)] z-30 grid w-64 max-w-[calc(100vw-2rem)] gap-1 rounded-lg border border-border bg-surface p-2 shadow-xl;
+  }
+
+  .search-comments-popover > button {
+    @apply flex w-full items-center justify-between gap-3 rounded-md border-0 bg-transparent px-2.5 py-2 text-left text-ink transition hover:bg-subtle;
+  }
+
+  .search-comments-popover > button.active {
+    @apply bg-brand-soft text-brand;
+  }
+
+  .search-comments-popover > button > span {
+    @apply grid min-w-0 gap-0.5;
+  }
+
+  .search-comments-popover strong {
+    @apply text-xs;
+  }
+
+  .search-comments-popover small {
+    @apply text-[10px] font-normal text-muted;
+  }
+
   .search-results {
     @apply max-h-[65vh] overflow-y-auto p-3;
   }
 
   .search-section {
     @apply mb-4;
+  }
+
+  .search-section-heading {
+    @apply mb-2 flex items-center justify-between gap-3;
+  }
+
+  .search-section-heading > span {
+    @apply text-[10px] font-semibold tabular-nums text-muted;
+  }
+
+  .search-people-table-wrap {
+    @apply max-h-[46vh];
+  }
+
+  .search-people-table-wrap th {
+    @apply sticky top-0 z-10;
+  }
+
+  .search-people-table {
+    min-width: 940px;
+  }
+
+  .search-people-table tbody tr {
+    @apply transition-colors hover:bg-subtle;
+  }
+
+  .search-people-table .guest-identity-column {
+    min-width: 16rem;
+    width: 16rem;
+  }
+
+  .search-people-table .tag-cell {
+    min-width: 11rem;
+  }
+
+  .search-people-table .note-cell {
+    min-width: 13rem;
+    width: 13rem;
+  }
+
+  .search-people-table .phone-cell {
+    min-width: 14rem;
+    width: 14rem;
+  }
+
+  .search-phone-value {
+    @apply flex min-w-0 items-center gap-1;
+  }
+
+  .search-phone-value .phone-link {
+    @apply min-w-0 flex-1;
+  }
+
+  .search-phone-value .phone-link span {
+    @apply truncate;
+  }
+
+  .search-phone-value .icon-button,
+  .search-phone-editor .icon-button {
+    @apply size-7 min-h-7 min-w-7 shrink-0 rounded-md;
+  }
+
+  .search-phone-value .icon-button {
+    @apply opacity-0 transition-opacity;
+  }
+
+  .search-people-table tr:hover .search-phone-value .icon-button,
+  .search-phone-value .icon-button:focus-visible {
+    @apply opacity-100;
+  }
+
+  .search-phone-editor {
+    @apply flex min-w-[12rem] items-center gap-1;
+  }
+
+  .search-phone-editor input {
+    @apply h-8 min-w-0 flex-1 rounded-md px-2 text-xs;
   }
 
   .search-result-list {
@@ -4280,7 +4499,7 @@
 
 @media (max-width: 1650px) {
   .workspace {
-    grid-template-columns: 240px minmax(0, 1fr) 350px;
+    grid-template-columns: 240px minmax(0, 1fr) 420px;
   }
 
   .workspace.workspace-no-profile {
@@ -4338,7 +4557,7 @@
   }
 
   .profile-panel {
-    @apply fixed bottom-4 right-4 top-20 z-50 h-auto w-[min(390px,calc(100vw-32px))] max-h-none shadow-2xl;
+    @apply fixed bottom-4 right-4 top-20 z-50 h-auto w-[min(460px,calc(100vw-32px))] max-h-none shadow-2xl;
     margin-left: 0;
   }
 

@@ -35,7 +35,7 @@ export const MAX_ALL_MATCHING_TAG_MUTATIONS = 50_000;
 export type ManualTagMutation = {
   personId: string;
   tagId: string;
-  eventId: string;
+  eventId: string | null;
   removed: boolean;
 };
 
@@ -54,7 +54,7 @@ export type BulkManualTagMutation = {
 export function parseManualTagMutation(input: ManualTagMutationInput = {}): ManualTagMutation {
   const personId = identifier(input.personId, "A person id is required.");
   const tagId = identifier(input.tagId, "A tag id is required.");
-  const eventId = identifier(input.eventId, "An event id is required.");
+  const eventId = optionalIdentifier(input.eventId, "Event id is invalid.");
   if (typeof input.removed !== "boolean") throw badRequest("Removed must be a boolean.");
   return { personId, tagId, eventId, removed: input.removed };
 }
@@ -109,6 +109,11 @@ function identifier(value: unknown, message: string) {
   const normalized = typeof value === "string" ? value.trim() : "";
   if (!normalized || normalized.length > 200 || !/^[a-z0-9@._:-]+$/i.test(normalized)) throw badRequest(message);
   return normalized;
+}
+
+function optionalIdentifier(value: unknown, message: string) {
+  if (value === null || value === undefined || value === "") return null;
+  return identifier(value, message);
 }
 
 function badRequest(message: string) {

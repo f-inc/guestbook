@@ -183,8 +183,8 @@ test("matches Luma's event-wide outcome buckets while keeping the invitation tot
     { status: "going" },
   ]), {
     total: 5,
-    going: 2,
-    checkedIn: 2,
+    going: 1,
+    checkedIn: 1,
     noShow: 1,
     noResponse: 1,
     declined: 1,

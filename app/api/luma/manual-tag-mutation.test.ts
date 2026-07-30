@@ -26,8 +26,8 @@ test("accepts removal mutations", () => {
   assert.equal(parseManualTagMutation({ personId: "person-1", tagId: "tag-1", eventId: "evt-1", removed: true }).removed, true);
 });
 
-test("requires ids and an explicit boolean mutation", () => {
-  assert.throws(() => parseManualTagMutation({ personId: "person-1", tagId: "tag-1", removed: false }), /event id/i);
+test("supports global manual tags and requires an explicit boolean mutation", () => {
+  assert.equal(parseManualTagMutation({ personId: "person-1", tagId: "tag-1", removed: false }).eventId, null);
   assert.throws(() => parseManualTagMutation({ personId: "person-1", tagId: "tag-1", eventId: "evt-1", removed: "false" }), /boolean/i);
 });
 

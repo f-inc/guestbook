@@ -183,23 +183,36 @@ export function guestStatusWhere(
   if (filter === "invited_no_response") return { status: "invited" };
   if (filter === "invited_accepted") {
     return {
-      OR: [{ checkedInAt: { not: null } }, { status: { in: GUEST_ACCEPTED_STATUSES } }],
+      AND: [
+        invitationEvidenceWhere(),
+        { OR: [{ checkedInAt: { not: null } }, { status: { in: GUEST_ACCEPTED_STATUSES } }] },
+      ],
     };
   }
-  if (filter === "invited_going") return { status: "going" };
+  if (filter === "invited_going") return { AND: [invitationEvidenceWhere(), { status: "going" }] };
   if (filter === "invited_checked_in") {
-    return { OR: [{ checkedInAt: { not: null } }, { status: "checked_in" }] };
+    return {
+      AND: [
+        invitationEvidenceWhere(),
+        { OR: [{ checkedInAt: { not: null } }, { status: "checked_in" }] },
+      ],
+    };
   }
-  if (filter === "invited_no_show") return { status: "no_show" };
-  if (filter === "invited_declined") return { status: "declined" };
+  if (filter === "invited_no_show") return { AND: [invitationEvidenceWhere(), { status: "no_show" }] };
+  if (filter === "invited_declined") return { AND: [invitationEvidenceWhere(), { status: "declined" }] };
   if (filter === "referrals" || filter.startsWith("invited_referral_")) {
     const cohort = filter === "referrals"
       ? { OR: [{ checkedInAt: { not: null } }, { status: "checked_in" }] }
       : filter === "invited_referral_no_response"
         ? { status: "invited" }
         : filter === "invited_referral_accepted"
-          ? { OR: [{ checkedInAt: { not: null } }, { status: { in: GUEST_ACCEPTED_STATUSES } }] }
-          : { status: "declined" };
+          ? {
+              AND: [
+                invitationEvidenceWhere(),
+                { OR: [{ checkedInAt: { not: null } }, { status: { in: GUEST_ACCEPTED_STATUSES } }] },
+              ],
+            }
+          : { AND: [invitationEvidenceWhere(), { status: "declined" }] };
     return { AND: [cohort, activeReferralWhere()] };
   }
   if (filter === "invited_referrals") return { AND: [invitationEvidenceWhere(), activeReferralWhere()] };
@@ -376,16 +389,16 @@ function guestMatchesFilter(guest: any, filter: GuestFilter): boolean {
   if (filter === "registered") return isRegisteredGuest(guest);
   if (filter === "invited") return hasInvitationEvidence(guest);
   if (filter === "invited_no_response") return guest.status === "invited";
-  if (filter === "invited_accepted") return Boolean(guest.checkedInAt) || GUEST_ACCEPTED_STATUSES.includes(guest.status);
-  if (filter === "invited_going") return guest.status === "going";
-  if (filter === "invited_checked_in") return Boolean(guest.checkedInAt) || guest.status === "checked_in";
-  if (filter === "invited_no_show") return guest.status === "no_show";
-  if (filter === "invited_declined") return guest.status === "declined";
+  if (filter === "invited_accepted") return hasInvitationEvidence(guest) && (Boolean(guest.checkedInAt) || GUEST_ACCEPTED_STATUSES.includes(guest.status));
+  if (filter === "invited_going") return hasInvitationEvidence(guest) && guest.status === "going";
+  if (filter === "invited_checked_in") return hasInvitationEvidence(guest) && (Boolean(guest.checkedInAt) || guest.status === "checked_in");
+  if (filter === "invited_no_show") return hasInvitationEvidence(guest) && guest.status === "no_show";
+  if (filter === "invited_declined") return hasInvitationEvidence(guest) && guest.status === "declined";
   if (filter === "referrals") return Boolean(guest.isReferred) && (Boolean(guest.checkedInAt) || guest.status === "checked_in");
   if (filter === "invited_referrals") return Boolean(guest.isReferred) && hasInvitationEvidence(guest);
   if (filter === "invited_referral_no_response") return Boolean(guest.isReferred) && guest.status === "invited";
-  if (filter === "invited_referral_accepted") return Boolean(guest.isReferred) && (Boolean(guest.checkedInAt) || GUEST_ACCEPTED_STATUSES.includes(guest.status));
-  if (filter === "invited_referral_declined") return Boolean(guest.isReferred) && guest.status === "declined";
+  if (filter === "invited_referral_accepted") return Boolean(guest.isReferred) && hasInvitationEvidence(guest) && (Boolean(guest.checkedInAt) || GUEST_ACCEPTED_STATUSES.includes(guest.status));
+  if (filter === "invited_referral_declined") return Boolean(guest.isReferred) && hasInvitationEvidence(guest) && guest.status === "declined";
   if (filter === "first_registers") return isRegisteredGuest(guest) && isFirstRegistration(guest);
   if (filter === "accepted_first_registers") return isFirstRegister(guest);
   if (filter === "new_faces") return guest.status === "checked_in" && isFirstRegistration(guest);

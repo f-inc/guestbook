@@ -110,6 +110,7 @@ const INDEXED_GUEST_SELECT = {
   personId: true,
   lumaGuestId: true,
   email: true,
+  phoneNumber: true,
   status: true,
   lumaApprovalStatus: true,
   operatorDecision: true,
@@ -134,6 +135,7 @@ type IndexedGuestPageRow = {
   personId: string;
   lumaGuestId: string | null;
   email: string | null;
+  phoneNumber: string | null;
   status: string | null;
   lumaApprovalStatus: string | null;
   operatorDecision: string | null;
@@ -193,6 +195,14 @@ function indexedRegisteredGuestPredicateSql() {
   )`;
 }
 
+function indexedGuestPhoneNumberSql() {
+  return Prisma.sql`guest.phone_number`;
+}
+
+function indexedInvitationEvidencePredicateSql() {
+  return Prisma.sql`(guest.invited_at IS NOT NULL OR guest.status = 'invited')`;
+}
+
 export function hasLumaDb() {
   return Boolean(process.env.DB_URL);
 }
@@ -213,9 +223,29 @@ export async function listIndexedEvents({ limit = 100 } = {}) {
   };
 }
 
-export async function searchIndexedPeople(search: string, { limit = 8 } = {}) {
+type IndexedPeopleSearchOptions = {
+  limit?: number;
+  includedTags?: string[];
+  excludedTags?: string[];
+  tagMode?: "any" | "all";
+  comments?: "any" | "with" | "without";
+};
+
+export async function searchIndexedPeople(search: string, {
+  limit = 8,
+  includedTags = [],
+  excludedTags = [],
+  tagMode = "any",
+  comments = "any",
+}: IndexedPeopleSearchOptions = {}) {
   const query = search.trim().slice(0, 120);
-  if (!query) return { people: [] };
+  const normalizedIncludedTags = [...new Set(includedTags.map((tag) => tag.trim()).filter(Boolean))].slice(0, 20);
+  const normalizedExcludedTags = [...new Set(excludedTags.map((tag) => tag.trim()).filter(Boolean))].slice(0, 20);
+  const normalizedComments = comments === "with" || comments === "without" ? comments : "any";
+  const hasFilters = normalizedIncludedTags.length > 0
+    || normalizedExcludedTags.length > 0
+    || normalizedComments !== "any";
+  if (!query && !hasFilters) return { people: [] };
 
   const db = prisma();
   const escapedQuery = query.replace(/[\\%_]/g, "\\$&");
@@ -224,7 +254,50 @@ export async function searchIndexedPeople(search: string, { limit = 8 } = {}) {
   const resultLimit = Math.max(1, Math.min(20, Math.trunc(limit) || 8));
   const personCandidateLimit = resultLimit * 10;
   const guestCandidateLimit = resultLimit * 20;
-  const matches = await db.$queryRaw<Array<{ personId: string; eventId: string | null }>>(Prisma.sql`
+  const personFilterConditions: Prisma.Sql[] = [];
+  if (normalizedIncludedTags.length) {
+    personFilterConditions.push(tagMode === "all"
+      ? Prisma.sql`(
+          SELECT COUNT(DISTINCT matched_tag.value)
+          FROM JSONB_ARRAY_ELEMENTS_TEXT(person.tags) AS matched_tag(value)
+          WHERE matched_tag.value IN (${Prisma.join(normalizedIncludedTags)})
+        ) = ${normalizedIncludedTags.length}`
+      : Prisma.sql`EXISTS (
+          SELECT 1
+          FROM JSONB_ARRAY_ELEMENTS_TEXT(person.tags) AS matched_tag(value)
+          WHERE matched_tag.value IN (${Prisma.join(normalizedIncludedTags)})
+        )`);
+  }
+  if (normalizedExcludedTags.length) {
+    personFilterConditions.push(Prisma.sql`NOT EXISTS (
+      SELECT 1
+      FROM JSONB_ARRAY_ELEMENTS_TEXT(person.tags) AS excluded_tag(value)
+      WHERE excluded_tag.value IN (${Prisma.join(normalizedExcludedTags)})
+    )`);
+  }
+  if (normalizedComments === "with") {
+    personFilterConditions.push(Prisma.sql`EXISTS (
+      SELECT 1
+      FROM guest_comments AS filtered_comment
+      WHERE filtered_comment.person_id = person.person_id
+    )`);
+  } else if (normalizedComments === "without") {
+    personFilterConditions.push(Prisma.sql`NOT EXISTS (
+      SELECT 1
+      FROM guest_comments AS filtered_comment
+      WHERE filtered_comment.person_id = person.person_id
+    )`);
+  }
+  const personFilterSql = personFilterConditions.length
+    ? Prisma.sql`AND ${Prisma.join(personFilterConditions, " AND ")}`
+    : Prisma.empty;
+  const matches = await db.$queryRaw<Array<{
+    personId: string;
+    eventId: string | null;
+    phoneNumber: string | null;
+    eventsAttended: number;
+    eventsRegistered: number;
+  }>>(Prisma.sql`
     WITH person_candidates AS MATERIALIZED (
         SELECT
           person.person_id,
@@ -237,30 +310,35 @@ export async function searchIndexedPeople(search: string, { limit = 8 } = {}) {
           END AS rank
         FROM luma_people AS person
         WHERE (
-          LOWER(
-            COALESCE(person.name, '') || ' ' ||
-            COALESCE(person.email, '') || ' ' ||
-            COALESCE(person.title, '') || ' ' ||
-            COALESCE(person.bio, '')
-          ) LIKE LOWER(${containsQuery}) ESCAPE '\\'
-          OR EXISTS (
-            SELECT 1
-            FROM guest_comments AS comment
-            WHERE comment.person_id = person.person_id
-              AND LOWER(comment.body) LIKE LOWER(${containsQuery}) ESCAPE '\\'
+          ${!query}
+          OR (
+            LOWER(
+              COALESCE(person.name, '') || ' ' ||
+              COALESCE(person.email, '') || ' ' ||
+              COALESCE(person.title, '') || ' ' ||
+              COALESCE(person.bio, '')
+            ) LIKE LOWER(${containsQuery}) ESCAPE '\\'
+            OR EXISTS (
+              SELECT 1
+              FROM guest_comments AS comment
+              WHERE comment.person_id = person.person_id
+                AND LOWER(comment.body) LIKE LOWER(${containsQuery}) ESCAPE '\\'
+            )
           )
         )
+        ${personFilterSql}
         ORDER BY rank, person.last_seen_at DESC, person.name ASC
         LIMIT ${personCandidateLimit}
     ),
     guest_candidates AS MATERIALIZED (
         SELECT guest.person_id, 5 AS rank
         FROM luma_event_guests AS guest
-        WHERE LOWER(
-          COALESCE(guest.email, '') || ' ' ||
-          COALESCE(guest.profile_description, '') || ' ' ||
-          COALESCE(guest.search_text, '')
-        ) LIKE LOWER(${containsQuery}) ESCAPE '\\'
+        WHERE ${Boolean(query)}
+          AND LOWER(
+            COALESCE(guest.email, '') || ' ' ||
+            COALESCE(guest.profile_description, '') || ' ' ||
+            COALESCE(guest.search_text, '')
+          ) LIKE LOWER(${containsQuery}) ESCAPE '\\'
         LIMIT ${guestCandidateLimit}
     ),
     tag_candidates AS MATERIALIZED (
@@ -268,7 +346,8 @@ export async function searchIndexedPeople(search: string, { limit = 8 } = {}) {
         FROM guest_tags AS definition
         JOIN luma_people AS person
           ON person.tags @> JSONB_BUILD_ARRAY(definition.name)
-        WHERE LOWER(definition.name) LIKE LOWER(${containsQuery}) ESCAPE '\\'
+        WHERE ${Boolean(query)}
+          AND LOWER(definition.name) LIKE LOWER(${containsQuery}) ESCAPE '\\'
         LIMIT ${personCandidateLimit}
     ),
     candidate_matches AS MATERIALIZED (
@@ -290,21 +369,45 @@ export async function searchIndexedPeople(search: string, { limit = 8 } = {}) {
       SELECT candidate.person_id, candidate.rank
       FROM candidate_matches AS candidate
       JOIN luma_people AS person ON person.person_id = candidate.person_id
+      WHERE TRUE
+      ${personFilterSql}
       ORDER BY candidate.rank, person.last_seen_at DESC, person.name ASC
       LIMIT ${resultLimit}
     )
     SELECT
       person.person_id AS "personId",
-      (
-        SELECT guest.event_id
-        FROM luma_event_guests AS guest
-        LEFT JOIN luma_events AS event ON event.event_id = guest.event_id
-        WHERE guest.person_id = person.person_id
-        ORDER BY event.starts_at DESC NULLS LAST, event.date DESC NULLS LAST, guest.last_seen_at DESC
-        LIMIT 1
-      ) AS "eventId"
+      latest_event.event_id AS "eventId",
+      latest_phone.phone_number AS "phoneNumber",
+      COALESCE(activity.events_attended, 0)::integer AS "eventsAttended",
+      COALESCE(activity.events_registered, 0)::integer AS "eventsRegistered"
     FROM ranked_people AS ranked
     JOIN luma_people AS person ON person.person_id = ranked.person_id
+    LEFT JOIN LATERAL (
+      SELECT guest.event_id
+      FROM luma_event_guests AS guest
+      LEFT JOIN luma_events AS event ON event.event_id = guest.event_id
+      WHERE guest.person_id = person.person_id
+      ORDER BY event.starts_at DESC NULLS LAST, event.date DESC NULLS LAST, guest.last_seen_at DESC
+      LIMIT 1
+    ) AS latest_event ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT guest.phone_number
+      FROM luma_event_guests AS guest
+      LEFT JOIN luma_events AS event ON event.event_id = guest.event_id
+      WHERE guest.person_id = person.person_id
+        AND NULLIF(BTRIM(guest.phone_number), '') IS NOT NULL
+      ORDER BY event.starts_at DESC NULLS LAST, event.date DESC NULLS LAST, guest.last_seen_at DESC
+      LIMIT 1
+    ) AS latest_phone ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT
+        COUNT(DISTINCT guest.event_id)
+          FILTER (WHERE guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')::integer AS events_attended,
+        COUNT(DISTINCT guest.event_id)
+          FILTER (WHERE ${indexedRegisteredGuestPredicateSql()})::integer AS events_registered
+        FROM luma_event_guests AS guest
+        WHERE guest.person_id = person.person_id
+    ) AS activity ON TRUE
     ORDER BY ranked.rank, person.last_seen_at DESC, person.name ASC
   `);
 
@@ -318,7 +421,16 @@ export async function searchIndexedPeople(search: string, { limit = 8 } = {}) {
   return {
     people: matches.flatMap((match) => {
       const person = peopleById.get(match.personId);
-      return person ? [{ person: indexedPersonToApiPerson(person), eventId: match.eventId || "" }] : [];
+      return person ? [{
+        person: {
+          ...indexedPersonToApiPerson(person, { phoneNumber: match.phoneNumber }),
+          eventCounts: {
+            attended: Number(match.eventsAttended) || 0,
+            registered: Number(match.eventsRegistered) || 0,
+          },
+        },
+        eventId: match.eventId || "",
+      }] : [];
     }),
   };
 }
@@ -1124,6 +1236,7 @@ export async function listIndexedEventGuests(
       guest.person_id AS "personId",
       guest.luma_guest_id AS "lumaGuestId",
       guest.email,
+      ${indexedGuestPhoneNumberSql()} AS "phoneNumber",
       guest.status,
       guest.luma_approval_status AS "lumaApprovalStatus",
       guest.operator_decision AS "operatorDecision",
@@ -1352,6 +1465,7 @@ export async function listIndexedMultiEventGuests(
       guest.person_id AS "personId",
       guest.luma_guest_id AS "lumaGuestId",
       guest.email,
+      ${indexedGuestPhoneNumberSql()} AS "phoneNumber",
       guest.status,
       guest.luma_approval_status AS "lumaApprovalStatus",
       guest.operator_decision AS "operatorDecision",
@@ -1808,26 +1922,39 @@ function isIndexedReferralFilter(filter: GuestListQuery["filter"]) {
 function indexedInvitationOutcomeFilterPredicateSql(filter: GuestListQuery["filter"]) {
   if (filter === "invited_no_response") return Prisma.sql`guest.status = 'invited'`;
   if (filter === "invited_accepted") {
-    return Prisma.sql`(guest.checked_in_at IS NOT NULL OR guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)}))`;
+    return Prisma.sql`(
+      ${indexedInvitationEvidencePredicateSql()}
+      AND (guest.checked_in_at IS NOT NULL OR guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)}))
+    )`;
   }
-  if (filter === "invited_going") return Prisma.sql`guest.status = 'going'`;
+  if (filter === "invited_going") {
+    return Prisma.sql`(${indexedInvitationEvidencePredicateSql()} AND guest.status = 'going')`;
+  }
   if (filter === "invited_checked_in") {
-    return Prisma.sql`(guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')`;
+    return Prisma.sql`(
+      ${indexedInvitationEvidencePredicateSql()}
+      AND (guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')
+    )`;
   }
-  if (filter === "invited_no_show") return Prisma.sql`guest.status = 'no_show'`;
-  return Prisma.sql`guest.status = 'declined'`;
+  if (filter === "invited_no_show") {
+    return Prisma.sql`(${indexedInvitationEvidencePredicateSql()} AND guest.status = 'no_show')`;
+  }
+  return Prisma.sql`(${indexedInvitationEvidencePredicateSql()} AND guest.status = 'declined')`;
 }
 
 function indexedReferralFilterPredicateSql(filter: GuestListQuery["filter"]) {
   const cohortPredicate = filter === "referrals" || filter === "new_referrals"
     ? Prisma.sql`(guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')`
     : filter === "invited_referrals"
-      ? Prisma.sql`(guest.invited_at IS NOT NULL OR guest.status = 'invited')`
+      ? indexedInvitationEvidencePredicateSql()
       : filter === "invited_referral_no_response"
         ? Prisma.sql`guest.status = 'invited'`
         : filter === "invited_referral_accepted"
-          ? Prisma.sql`(guest.checked_in_at IS NOT NULL OR guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)}))`
-          : Prisma.sql`guest.status = 'declined'`;
+          ? Prisma.sql`(
+              ${indexedInvitationEvidencePredicateSql()}
+              AND (guest.checked_in_at IS NOT NULL OR guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)}))
+            )`
+          : Prisma.sql`(${indexedInvitationEvidencePredicateSql()} AND guest.status = 'declined')`;
   return Prisma.sql`
     ${cohortPredicate}
     AND EXISTS (
@@ -1853,6 +1980,7 @@ function indexedGuestPageRowToRecord(row: IndexedGuestPageRow) {
     personId: row.personId,
     lumaGuestId: row.lumaGuestId,
     email: row.email,
+    phoneNumber: row.phoneNumber,
     status: row.status,
     lumaApprovalStatus: row.lumaApprovalStatus,
     operatorDecision: row.operatorDecision,
@@ -2068,33 +2196,46 @@ export async function getIndexedMultiEventStats(eventIds: string[]) {
       COUNT(DISTINCT guest.person_id) FILTER (WHERE guest.status = 'registered')::integer AS pending,
       COUNT(DISTINCT guest.person_id) FILTER (WHERE guest.status = 'declined')::integer AS declined,
       COUNT(DISTINCT guest.person_id) FILTER (WHERE guest.invited_at IS NOT NULL OR guest.status = 'invited')::integer AS invited,
-      COUNT(*) FILTER (WHERE guest.invited_at IS NOT NULL OR guest.status = 'invited')::integer AS "invitationTotal",
-      COUNT(*) FILTER (WHERE guest.status = 'going')::integer AS "invitedGoing",
+      COUNT(*) FILTER (WHERE ${indexedInvitationEvidencePredicateSql()})::integer AS "invitationTotal",
       COUNT(*) FILTER (
-        WHERE guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in'
+        WHERE ${indexedInvitationEvidencePredicateSql()} AND guest.status = 'going'
+      )::integer AS "invitedGoing",
+      COUNT(*) FILTER (
+        WHERE ${indexedInvitationEvidencePredicateSql()}
+          AND (guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')
       )::integer AS "invitedCheckedIn",
-      COUNT(*) FILTER (WHERE guest.status = 'no_show')::integer AS "invitedNoShow",
+      COUNT(*) FILTER (
+        WHERE ${indexedInvitationEvidencePredicateSql()} AND guest.status = 'no_show'
+      )::integer AS "invitedNoShow",
       COUNT(*) FILTER (WHERE guest.status = 'invited')::integer AS "invitedNoResponse",
-      COUNT(*) FILTER (WHERE guest.status = 'declined')::integer AS "invitedDeclined",
+      COUNT(*) FILTER (
+        WHERE ${indexedInvitationEvidencePredicateSql()} AND guest.status = 'declined'
+      )::integer AS "invitedDeclined",
       COUNT(*) FILTER (
         WHERE guest.is_referred AND (guest.invited_at IS NOT NULL OR guest.status = 'invited')
       )::integer AS "invitedReferralTotal",
       COUNT(*) FILTER (
         WHERE guest.is_referred
+          AND ${indexedInvitationEvidencePredicateSql()}
           AND guest.status = 'going'
       )::integer AS "invitedReferralGoing",
       COUNT(*) FILTER (
         WHERE guest.is_referred
+          AND ${indexedInvitationEvidencePredicateSql()}
           AND (guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')
       )::integer AS "invitedReferralCheckedIn",
       COUNT(*) FILTER (
-        WHERE guest.is_referred AND guest.status = 'no_show'
+        WHERE guest.is_referred
+          AND ${indexedInvitationEvidencePredicateSql()}
+          AND guest.status = 'no_show'
       )::integer AS "invitedReferralNoShow",
       COUNT(*) FILTER (
         WHERE guest.is_referred AND guest.status = 'invited'
       )::integer AS "invitedReferralNoResponse",
       COUNT(*) FILTER (
-        WHERE guest.is_referred AND guest.status = 'declined'
+        WHERE guest.is_referred
+          AND ${indexedInvitationEvidencePredicateSql()}
+          AND guest.status = 'declined'
       )::integer AS "invitedReferralDeclined",
       COUNT(DISTINCT guest.person_id) FILTER (WHERE guest.status = 'waitlisted')::integer AS waitlisted,
       COUNT(DISTINCT guest.person_id) FILTER (
@@ -2372,33 +2513,46 @@ async function indexedEventAnalytics(
         COUNT(*) FILTER (WHERE guest.status = 'registered')::integer AS pending,
         COUNT(*) FILTER (WHERE guest.status = 'declined')::integer AS declined,
         COUNT(*) FILTER (WHERE guest.invited_at IS NOT NULL OR guest.status = 'invited')::integer AS invited,
-        COUNT(*) FILTER (WHERE guest.invited_at IS NOT NULL OR guest.status = 'invited')::integer AS "invitationTotal",
-        COUNT(*) FILTER (WHERE guest.status = 'going')::integer AS "invitedGoing",
+        COUNT(*) FILTER (WHERE ${indexedInvitationEvidencePredicateSql()})::integer AS "invitationTotal",
         COUNT(*) FILTER (
-          WHERE guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in'
+          WHERE ${indexedInvitationEvidencePredicateSql()} AND guest.status = 'going'
+        )::integer AS "invitedGoing",
+        COUNT(*) FILTER (
+          WHERE ${indexedInvitationEvidencePredicateSql()}
+            AND (guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')
         )::integer AS "invitedCheckedIn",
-        COUNT(*) FILTER (WHERE guest.status = 'no_show')::integer AS "invitedNoShow",
+        COUNT(*) FILTER (
+          WHERE ${indexedInvitationEvidencePredicateSql()} AND guest.status = 'no_show'
+        )::integer AS "invitedNoShow",
         COUNT(*) FILTER (WHERE guest.status = 'invited')::integer AS "invitedNoResponse",
-        COUNT(*) FILTER (WHERE guest.status = 'declined')::integer AS "invitedDeclined",
+        COUNT(*) FILTER (
+          WHERE ${indexedInvitationEvidencePredicateSql()} AND guest.status = 'declined'
+        )::integer AS "invitedDeclined",
         COUNT(*) FILTER (
           WHERE guest.is_referred AND (guest.invited_at IS NOT NULL OR guest.status = 'invited')
         )::integer AS "invitedReferralTotal",
         COUNT(*) FILTER (
           WHERE guest.is_referred
+            AND ${indexedInvitationEvidencePredicateSql()}
             AND guest.status = 'going'
         )::integer AS "invitedReferralGoing",
         COUNT(*) FILTER (
           WHERE guest.is_referred
+            AND ${indexedInvitationEvidencePredicateSql()}
             AND (guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')
         )::integer AS "invitedReferralCheckedIn",
         COUNT(*) FILTER (
-          WHERE guest.is_referred AND guest.status = 'no_show'
+          WHERE guest.is_referred
+            AND ${indexedInvitationEvidencePredicateSql()}
+            AND guest.status = 'no_show'
         )::integer AS "invitedReferralNoShow",
         COUNT(*) FILTER (
           WHERE guest.is_referred AND guest.status = 'invited'
         )::integer AS "invitedReferralNoResponse",
         COUNT(*) FILTER (
-          WHERE guest.is_referred AND guest.status = 'declined'
+          WHERE guest.is_referred
+            AND ${indexedInvitationEvidencePredicateSql()}
+            AND guest.status = 'declined'
         )::integer AS "invitedReferralDeclined",
         COUNT(*) FILTER (WHERE guest.status = 'waitlisted')::integer AS waitlisted,
         COUNT(*) FILTER (
@@ -2726,13 +2880,13 @@ export async function mutateIndexedPeopleTags({
   tagIds,
   removed,
 }: {
-  people: Array<{ personId: string; eventId: string }>;
+  people: Array<{ personId: string; eventId: string | null }>;
   tagIds: string[];
   removed: boolean;
 }) {
   const result = await prisma().$transaction(async (db: Prisma.TransactionClient) => {
     const personIds = people.map((person) => person.personId);
-    const eventIds = [...new Set(people.map((person) => person.eventId))];
+    const eventIds = [...new Set(people.map((person) => person.eventId).filter((eventId): eventId is string => Boolean(eventId)))];
     const [storedPeople, definitions, eventCount] = await Promise.all([
       db.lumaPerson.findMany({
         where: { personId: { in: personIds } },
@@ -2869,7 +3023,7 @@ export async function mutateIndexedPeopleTags({
   return result;
 }
 
-export async function mutateIndexedPersonTag({ personId, tagId, eventId, removed }: { personId: string; tagId: string; eventId: string; removed: boolean }) {
+export async function mutateIndexedPersonTag({ personId, tagId, eventId, removed }: { personId: string; tagId: string; eventId: string | null; removed: boolean }) {
   const [person] = await mutateIndexedPeopleTags({
     people: [{ personId, eventId }],
     tagIds: [tagId],
@@ -3750,6 +3904,15 @@ export async function updateIndexedGuestCheckIn({ eventId, lumaGuestId, checkedI
   return { updatedCount: result.count };
 }
 
+export async function updateIndexedPersonPhoneNumber(personId: string, phoneNumber: string | null) {
+  if (!personId) return { updatedCount: 0 };
+  const result = await prisma().lumaEventGuest.updateMany({
+    where: { personId },
+    data: { phoneNumber },
+  });
+  return { updatedCount: result.count };
+}
+
 export async function listIndexedGuestReferrerTargets(eventId: string, limit = 100) {
   if (!eventId) return [];
   const boundedLimit = Math.max(1, Math.min(Number.isFinite(limit) ? Math.floor(limit) : 100, 500));
@@ -4163,6 +4326,7 @@ function normalizeGuestRows(event, guest, rawGuest = {}, now = new Date()) {
       lumaUserIdLower,
       email,
       emailLower,
+      phoneNumber: guest.phoneNumber || null,
       status: guest.status || null,
       lumaApprovalStatus: guest.lumaApprovalStatus || null,
       registeredAt: parseDateTime(guest.registeredAt),
@@ -4259,6 +4423,7 @@ async function bulkUpsertEventGuests(tx, rows) {
       luma_user_id_lower,
       email,
       email_lower,
+      phone_number,
       status,
       luma_approval_status,
       registered_at,
@@ -4286,6 +4451,7 @@ async function bulkUpsertEventGuests(tx, rows) {
           ${row.lumaUserIdLower},
           ${row.email},
           ${row.emailLower},
+          ${row.phoneNumber},
           ${row.status},
           ${row.lumaApprovalStatus},
           ${row.registeredAt},
@@ -4311,6 +4477,7 @@ async function bulkUpsertEventGuests(tx, rows) {
       luma_user_id_lower = COALESCE(EXCLUDED.luma_user_id_lower, luma_event_guests.luma_user_id_lower),
       email = COALESCE(EXCLUDED.email, luma_event_guests.email),
       email_lower = COALESCE(EXCLUDED.email_lower, luma_event_guests.email_lower),
+      phone_number = COALESCE(EXCLUDED.phone_number, luma_event_guests.phone_number),
       status = EXCLUDED.status,
       luma_approval_status = EXCLUDED.luma_approval_status,
       operator_decision = CASE
@@ -4406,6 +4573,7 @@ async function upsertGuest(tx, event, guest, rawGuest = {}) {
       lumaUserIdLower,
       email,
       emailLower,
+      phoneNumber: guest.phoneNumber || null,
       status: guest.status || null,
       lumaApprovalStatus: guest.lumaApprovalStatus || null,
       registeredAt: parseDateTime(guest.registeredAt),
@@ -4429,6 +4597,7 @@ async function upsertGuest(tx, event, guest, rawGuest = {}) {
       lumaUserIdLower: lumaUserIdLower || undefined,
       email: email || undefined,
       emailLower: emailLower || undefined,
+      phoneNumber: guest.phoneNumber || undefined,
       status: guest.status || null,
       lumaApprovalStatus: guest.lumaApprovalStatus || null,
       registeredAt: parseDateTime(guest.registeredAt) || (guest.status === "invited" ? null : undefined),
@@ -4495,6 +4664,7 @@ function indexedPersonToApiPerson(row: any, guestRow: any = {}) {
     tags: row.tags || [],
     manualTags: row.manualTags || [],
     automaticTags: row.automaticTags || [],
+    phoneNumber: guestRow.phoneNumber || "",
     crmNotes,
     crmNotesUpdatedAt: isoOrNull(crmNotesUpdatedAt),
     crmNoteCount,
@@ -4513,6 +4683,7 @@ function indexedGuestToApiGuest(row, eventCounts = null) {
     lumaGuestId: row.lumaGuestId,
     lumaApprovalStatus: row.lumaApprovalStatus,
     operatorDecision: row.operatorDecision,
+    phoneNumber: row.phoneNumber || "",
     profileDescription: row.profileDescription || "",
     avatarUrl: avatarCandidates[0] || "",
     avatarCandidates,

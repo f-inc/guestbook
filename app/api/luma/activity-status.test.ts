@@ -16,14 +16,37 @@ test("keeps a future registration registered", () => {
   assert.equal(activityRecordStatus(record, now), "registered");
 });
 
-test("marks an unchecked registration as no-show after the event starts", () => {
+test("marks an approved unchecked registration as no-show after the event starts", () => {
   const record = {
     status: "registered",
+    lumaApprovalStatus: "approved",
     registeredAt: "2026-07-10T09:00:00-07:00",
     eventStartsAt: "2026-07-12T18:00:00-07:00",
   };
 
   assert.equal(activityRecordStatus(record, now), "no_show");
+});
+
+test("keeps unapproved past registrations registered", () => {
+  const record = {
+    status: "registered",
+    lumaApprovalStatus: "pending_approval",
+    registeredAt: "2026-07-10T09:00:00-07:00",
+    eventStartsAt: "2026-07-12T18:00:00-07:00",
+  };
+
+  assert.equal(activityRecordStatus(record, now), "registered");
+});
+
+test("keeps declined applications with registration evidence registered in activity", () => {
+  const record = {
+    status: "declined",
+    lumaApprovalStatus: "declined",
+    registeredAt: "2026-07-10T09:00:00-07:00",
+    eventStartsAt: "2026-07-12T18:00:00-07:00",
+  };
+
+  assert.equal(activityRecordStatus(record, now), "registered");
 });
 
 test("keeps checked-in and invitation-only states", () => {

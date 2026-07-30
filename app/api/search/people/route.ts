@@ -12,9 +12,26 @@ export async function GET(request: Request) {
     if (!hasLumaDb()) {
       return Response.json({ error: "People search requires DB_URL to be configured." }, { status: 503 });
     }
-    const { query, limit, scope } = parsePeopleSearchQuery(new URL(request.url).searchParams);
-    if (!query) return Response.json({ people: [] });
-    return Response.json(await (scope === "name" ? searchIndexedPeopleByName(query, { limit }) : searchIndexedPeople(query, { limit })));
+    const {
+      query,
+      limit,
+      scope,
+      includedTags,
+      excludedTags,
+      tagMode,
+      comments,
+      hasFilters,
+    } = parsePeopleSearchQuery(new URL(request.url).searchParams);
+    if (!query && (scope === "name" || !hasFilters)) return Response.json({ people: [] });
+    return Response.json(await (scope === "name"
+      ? searchIndexedPeopleByName(query, { limit })
+      : searchIndexedPeople(query, {
+          limit,
+          includedTags,
+          excludedTags,
+          tagMode,
+          comments,
+        })));
   } catch (error) {
     const httpError = error as HttpError;
     return Response.json(

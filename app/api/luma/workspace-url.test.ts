@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { MAX_SELECTED_EVENT_IDS } from "../../event-selection";
-import { buildWorkspaceUrlSearch, parseWorkspaceUrl } from "../../workspace-url";
+import { buildWorkspaceUrlSearch, isEventDirectoryPath, parseWorkspaceUrl, workspacePathname } from "../../workspace-url";
+
+test("uses a dedicated path for the event directory", () => {
+  assert.equal(workspacePathname(true), "/events");
+  assert.equal(workspacePathname(false), "/");
+  assert.equal(isEventDirectoryPath("/events"), true);
+  assert.equal(isEventDirectoryPath("/events/"), true);
+  assert.equal(isEventDirectoryPath("/"), false);
+});
 
 test("parses workspace navigation state from the URL", () => {
   assert.deepEqual(parseWorkspaceUrl("?event=evt-1&event_view=past&tab=analytics&guest_status=accepted&guest_search=ada&guest_tag=VIP&guest_tag=Builder&guest_page=3&profile=person-2"), {

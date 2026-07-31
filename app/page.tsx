@@ -65,7 +65,7 @@ import {
   EVENT_SWITCH_DIAGNOSTICS_PARAM,
 } from "./event-switch-diagnostics";
 import { aggregateEventFeedback } from "./api/luma/event-feedback";
-import { buildWorkspaceUrlSearch, parseWorkspaceUrl, type WorkspaceUrlState } from "./workspace-url";
+import { buildWorkspaceUrlSearch, isEventDirectoryPath, parseWorkspaceUrl, workspacePathname, type WorkspaceUrlState } from "./workspace-url";
 
 const statusLabels = {
   registered: "Registered",
@@ -370,8 +370,12 @@ export default function Home() {
 
   useLayoutEffect(() => {
     applyWorkspaceUrlState(parseWorkspaceUrl(window.location.search));
+    setEventDirectoryOpen(isEventDirectoryPath(window.location.pathname));
     setWorkspaceUrlReady(true);
-    const handlePopState = () => applyWorkspaceUrlState(parseWorkspaceUrl(window.location.search));
+    const handlePopState = () => {
+      applyWorkspaceUrlState(parseWorkspaceUrl(window.location.search));
+      setEventDirectoryOpen(isEventDirectoryPath(window.location.pathname));
+    };
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
   }, []);
@@ -438,10 +442,21 @@ export default function Home() {
   };
 
   const openEventDirectory = () => {
+    if (!eventDirectoryOpen) workspaceUrlModeRef.current = "push";
     setEventDirectoryOpen(true);
     setProfilePanelOpen(false);
     void loadEventDirectory();
   };
+
+  useEffect(() => {
+    if (
+      !workspaceUrlReady
+      || sessionStatus !== "ready"
+      || !eventDirectoryOpen
+      || eventDirectoryState.status !== "idle"
+    ) return;
+    void loadEventDirectory();
+  }, [workspaceUrlReady, sessionStatus, eventDirectoryOpen, eventDirectoryState.status]);
 
   const updateInviteMetadata = (updater) => {
     setInviteMetadata((current) => {
@@ -870,10 +885,12 @@ export default function Home() {
       profileId,
     });
     const currentSearch = window.location.search.replace(/^\?/, "");
+    const nextPathname = workspacePathname(eventDirectoryOpen);
     const mode = workspaceUrlModeRef.current;
     workspaceUrlModeRef.current = "replace";
-    if (nextSearch === currentSearch) return;
+    if (nextSearch === currentSearch && nextPathname === window.location.pathname) return;
     const nextUrl = new URL(window.location.href);
+    nextUrl.pathname = nextPathname;
     nextUrl.search = nextSearch;
     window.history[mode === "push" ? "pushState" : "replaceState"]({}, "", nextUrl);
   }, [
@@ -881,6 +898,7 @@ export default function Home() {
     state.events.length,
     selectedEvent?.id,
     selectedEventIdsKey,
+    eventDirectoryOpen,
     activeEventTab,
     profilePanelOpen,
     selectedPerson?.id,
@@ -1245,6 +1263,7 @@ export default function Home() {
       preserveProfile = false,
     }: { additive?: boolean; range?: boolean; preserveProfile?: boolean } = {},
   ) => {
+    if (eventDirectoryOpen) workspaceUrlModeRef.current = "push";
     setEventDirectoryOpen(false);
     const selection = nextEventSelection({
       currentIds: selectedWorkspaceEvents(state).map((event) => event.id),

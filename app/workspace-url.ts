@@ -1,5 +1,15 @@
 import { MAX_SELECTED_EVENT_IDS } from "./event-selection";
 
+export const EVENT_DIRECTORY_PATH = "/events";
+
+export function isEventDirectoryPath(pathname: string) {
+  return pathname === EVENT_DIRECTORY_PATH || pathname === `${EVENT_DIRECTORY_PATH}/`;
+}
+
+export function workspacePathname(eventDirectoryOpen: boolean) {
+  return eventDirectoryOpen ? EVENT_DIRECTORY_PATH : "/";
+}
+
 export type WorkspaceUrlState = {
   eventId: string;
   eventIds: string[];

@@ -223,6 +223,289 @@ export async function listIndexedEvents({ limit = 100 } = {}) {
   };
 }
 
+export async function listIndexedEventDirectory({ limit = 5000 } = {}) {
+  const resultLimit = Math.max(1, Math.min(5000, Math.trunc(limit) || 5000));
+  const rows = await prisma().lumaEvent.findMany({
+    where: { catalogActive: true },
+    take: resultLimit,
+    orderBy: [{ startsAt: "desc" }, { date: "desc" }, { title: "asc" }],
+    select: {
+      eventId: true,
+      title: true,
+      date: true,
+      startsAt: true,
+      syncedAt: true,
+      raw: true,
+      overviewStats: true,
+      overviewStatsUpdatedAt: true,
+      feedbackAverageRating: true,
+      feedbackRatingCount: true,
+      feedbackStatsUpdatedAt: true,
+      syncState: { select: { updatedAt: true } },
+    },
+  });
+
+  return {
+    source: "luma-index",
+    events: rows.map((row) => {
+      const stats = normalizedEventOverviewStats(row.overviewStats);
+      const modifiedAt = latestDate(
+        row.feedbackStatsUpdatedAt,
+        row.overviewStatsUpdatedAt,
+        row.syncState?.updatedAt,
+        row.syncedAt,
+      );
+      return {
+        id: row.eventId,
+        title: row.title || "Untitled event",
+        date: isoOrNull(row.date || row.startsAt || modifiedAt)?.slice(0, 10),
+        startsAt: isoOrNull(row.startsAt),
+        imageUrl: indexedEventImageUrl(row.raw as AnyRecord),
+        modifiedAt: isoOrNull(modifiedAt),
+        newFaces: stats?.newFaces || 0,
+        newReferrals: stats?.newReferrals || 0,
+        checkedIn: stats?.checkedIn || 0,
+        firstRegisters: stats?.firstRegisters || 0,
+        accepted: stats?.accepted || 0,
+        registered: stats?.registered || 0,
+        invited: stats?.invited || 0,
+        waitlisted: stats?.waitlisted || 0,
+        averageRating: row.feedbackAverageRating,
+        ratingCount: row.feedbackRatingCount,
+        feedbackStatsUpdatedAt: isoOrNull(row.feedbackStatsUpdatedAt),
+        statsReady: Boolean(stats),
+      };
+    }),
+    loadedAt: new Date().toISOString(),
+  };
+}
+
+export async function recordIndexedEventFeedbackStats(feedbackByEventId: Record<string, AnyRecord>) {
+  if (!hasLumaDb()) return { skipped: true, updatedEventCount: 0 };
+  const updatedAt = new Date();
+  const summaries = Object.entries(feedbackByEventId)
+    .filter(([eventId, feedback]) => eventId && feedback && typeof feedback === "object")
+    .slice(0, 50)
+    .map(([eventId, feedback]) => {
+      const ratingCounts = feedback.ratingCounts && typeof feedback.ratingCounts === "object"
+        ? feedback.ratingCounts
+        : {};
+      const ratingCount = [1, 2, 3, 4, 5]
+        .reduce((sum, rating) => sum + Math.max(0, Number(ratingCounts[rating]) || 0), 0);
+      const averageRating = Number(feedback.averageRating);
+      return {
+        eventId,
+        averageRating: ratingCount && Number.isFinite(averageRating) ? averageRating : null,
+        ratingCount,
+      };
+    });
+  if (!summaries.length) return { skipped: false, updatedEventCount: 0 };
+
+  const updates = await prisma().$transaction(summaries.map((summary) => prisma().lumaEvent.updateMany({
+    where: { eventId: summary.eventId },
+    data: {
+      feedbackAverageRating: summary.averageRating,
+      feedbackRatingCount: summary.ratingCount,
+      feedbackStatsUpdatedAt: updatedAt,
+    },
+  })));
+  return {
+    skipped: false,
+    updatedEventCount: updates.reduce((sum, update) => sum + update.count, 0),
+  };
+}
+
+export async function refreshIndexedEventOverviewStats(eventIds: string[]) {
+  const boundedEventIds = [...new Set(eventIds.map((eventId) => eventId.trim()).filter(Boolean))].slice(0, 5000);
+  if (!boundedEventIds.length) return { updatedEventCount: 0, eventIds: [] };
+  const rows = await prisma().$queryRaw<Array<{ eventId: string; overviewStats: Prisma.JsonValue; overviewStatsUpdatedAt: Date }>>(Prisma.sql`
+    WITH target_events AS MATERIALIZED (
+      SELECT event_id
+      FROM luma_events
+      WHERE event_id IN (${Prisma.join(boundedEventIds)})
+    ),
+    latest_manual_tag_mutations AS MATERIALIZED (
+      SELECT DISTINCT ON (mutation.person_id, mutation.tag_id)
+        mutation.person_id,
+        mutation.tag_id,
+        mutation.removed
+      FROM manual_tag_mutations AS mutation
+      JOIN guest_tags AS definition ON definition.id = mutation.tag_id
+      WHERE definition.semantic_key = 'referral'
+      ORDER BY mutation.person_id, mutation.tag_id, mutation.assigned_at DESC NULLS LAST, mutation.id DESC
+    ),
+    first_referral_attributions AS MATERIALIZED (
+      SELECT DISTINCT ON (mutation.person_id, mutation.tag_id)
+        mutation.person_id,
+        mutation.tag_id,
+        mutation.assigned_event_id
+      FROM manual_tag_mutations AS mutation
+      JOIN guest_tags AS definition ON definition.id = mutation.tag_id
+      WHERE definition.semantic_key = 'referral'
+        AND mutation.removed = FALSE
+        AND mutation.assigned_event_id IS NOT NULL
+      ORDER BY mutation.person_id, mutation.tag_id, mutation.assigned_at ASC NULLS LAST, mutation.id ASC
+    ),
+    active_referrals AS MATERIALIZED (
+      SELECT DISTINCT mutation.person_id
+      FROM latest_manual_tag_mutations AS mutation
+      WHERE mutation.removed = FALSE
+    ),
+    guest_history AS MATERIALIZED (
+      SELECT
+        guest.event_id,
+        guest.person_id,
+        referral.person_id IS NOT NULL AS is_referred,
+        first_referral.person_id IS NOT NULL AS is_new_referral,
+        COALESCE(
+          current_event.starts_at,
+          current_event.date::timestamp AT TIME ZONE 'UTC'
+        ) AS event_order,
+        MIN(COALESCE(
+          current_event.starts_at,
+          current_event.date::timestamp AT TIME ZONE 'UTC'
+        )) OVER (PARTITION BY guest.person_id) AS first_event_order
+      FROM luma_event_guests AS guest
+      JOIN luma_events AS current_event ON current_event.event_id = guest.event_id
+      LEFT JOIN active_referrals AS referral ON referral.person_id = guest.person_id
+      LEFT JOIN first_referral_attributions AS first_referral
+        ON first_referral.person_id = guest.person_id
+        AND first_referral.assigned_event_id = guest.event_id
+    ),
+    derived_guests AS MATERIALIZED (
+      SELECT
+        history.event_id,
+        history.person_id,
+        history.is_referred,
+        history.is_new_referral,
+        COALESCE(history.first_event_order < history.event_order, FALSE) AS has_prior_event
+      FROM guest_history AS history
+      JOIN target_events AS target ON target.event_id = history.event_id
+    ),
+    updated_guests AS (
+      UPDATE luma_event_guests AS guest
+      SET
+        is_referred = derived.is_referred,
+        is_new_referral = derived.is_new_referral,
+        has_prior_event = derived.has_prior_event,
+        metrics_derived_at = NOW()
+      FROM derived_guests AS derived
+      WHERE guest.event_id = derived.event_id
+        AND guest.person_id = derived.person_id
+        AND (
+          guest.is_referred IS DISTINCT FROM derived.is_referred
+          OR guest.is_new_referral IS DISTINCT FROM derived.is_new_referral
+          OR guest.has_prior_event IS DISTINCT FROM derived.has_prior_event
+        )
+      RETURNING guest.event_id, guest.person_id
+    ),
+    event_aggregates AS MATERIALIZED (
+      SELECT
+        target.event_id,
+        JSONB_BUILD_OBJECT(
+          'version', 1,
+          'total', COUNT(guest.person_id)::integer,
+          'checkedIn', COUNT(guest.person_id) FILTER (WHERE guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')::integer,
+          'accepted', COUNT(guest.person_id) FILTER (WHERE guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)}))::integer,
+          'registered', COUNT(guest.person_id) FILTER (WHERE ${indexedRegisteredGuestPredicateSql()})::integer,
+          'pending', COUNT(guest.person_id) FILTER (WHERE guest.status = 'registered')::integer,
+          'declined', COUNT(guest.person_id) FILTER (WHERE guest.status = 'declined')::integer,
+          'invited', COUNT(guest.person_id) FILTER (WHERE guest.invited_at IS NOT NULL OR guest.status = 'invited')::integer,
+          'waitlisted', COUNT(guest.person_id) FILTER (WHERE guest.status = 'waitlisted')::integer,
+          'toDecide', COUNT(guest.person_id) FILTER (
+            WHERE guest.status = 'registered'
+              OR (guest.status = 'waitlisted' AND guest.operator_decision IS DISTINCT FROM 'waitlisted')
+          )::integer,
+          'firstRegisters', COUNT(guest.person_id) FILTER (
+            WHERE guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)}) AND NOT derived.has_prior_event
+          )::integer,
+          'newRegistrations', COUNT(guest.person_id) FILTER (
+            WHERE ${indexedRegisteredGuestPredicateSql()} AND NOT derived.has_prior_event
+          )::integer,
+          'newFaces', COUNT(guest.person_id) FILTER (
+            WHERE guest.status = 'checked_in' AND NOT derived.has_prior_event
+          )::integer,
+          'referredRegistrations', COUNT(guest.person_id) FILTER (
+            WHERE derived.is_referred AND ${indexedRegisteredGuestPredicateSql()}
+          )::integer,
+          'newReferrals', COUNT(guest.person_id) FILTER (
+            WHERE derived.is_referred
+              AND derived.is_new_referral
+              AND (guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')
+          )::integer,
+          'referredAccepted', COUNT(guest.person_id) FILTER (
+            WHERE derived.is_referred AND guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)})
+          )::integer,
+          'referredCheckedIn', COUNT(guest.person_id) FILTER (
+            WHERE derived.is_referred AND (guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')
+          )::integer,
+          'referredFirstRegisters', COUNT(guest.person_id) FILTER (
+            WHERE derived.is_referred
+              AND guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)})
+              AND NOT derived.has_prior_event
+          )::integer,
+          'referredReturning', COUNT(guest.person_id) FILTER (
+            WHERE derived.is_referred
+              AND guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)})
+              AND derived.has_prior_event
+          )::integer,
+          'invitationTotal', COUNT(guest.person_id) FILTER (WHERE ${indexedInvitationEvidencePredicateSql()})::integer,
+          'invitedGoing', COUNT(guest.person_id) FILTER (
+            WHERE ${indexedInvitationEvidencePredicateSql()} AND guest.status = 'going'
+          )::integer,
+          'invitedCheckedIn', COUNT(guest.person_id) FILTER (
+            WHERE ${indexedInvitationEvidencePredicateSql()}
+              AND (guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')
+          )::integer,
+          'invitedNoShow', COUNT(guest.person_id) FILTER (
+            WHERE ${indexedInvitationEvidencePredicateSql()} AND guest.status = 'no_show'
+          )::integer,
+          'invitedNoResponse', COUNT(guest.person_id) FILTER (WHERE guest.status = 'invited')::integer,
+          'invitedDeclined', COUNT(guest.person_id) FILTER (
+            WHERE ${indexedInvitationEvidencePredicateSql()} AND guest.status = 'declined'
+          )::integer,
+          'invitedReferralTotal', COUNT(guest.person_id) FILTER (
+            WHERE derived.is_referred AND ${indexedInvitationEvidencePredicateSql()}
+          )::integer,
+          'invitedReferralGoing', COUNT(guest.person_id) FILTER (
+            WHERE derived.is_referred AND ${indexedInvitationEvidencePredicateSql()} AND guest.status = 'going'
+          )::integer,
+          'invitedReferralCheckedIn', COUNT(guest.person_id) FILTER (
+            WHERE derived.is_referred
+              AND ${indexedInvitationEvidencePredicateSql()}
+              AND (guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')
+          )::integer,
+          'invitedReferralNoShow', COUNT(guest.person_id) FILTER (
+            WHERE derived.is_referred AND ${indexedInvitationEvidencePredicateSql()} AND guest.status = 'no_show'
+          )::integer,
+          'invitedReferralNoResponse', COUNT(guest.person_id) FILTER (
+            WHERE derived.is_referred AND guest.status = 'invited'
+          )::integer,
+          'invitedReferralDeclined', COUNT(guest.person_id) FILTER (
+            WHERE derived.is_referred AND ${indexedInvitationEvidencePredicateSql()} AND guest.status = 'declined'
+          )::integer
+        ) AS overview_stats
+      FROM target_events AS target
+      LEFT JOIN luma_event_guests AS guest ON guest.event_id = target.event_id
+      LEFT JOIN derived_guests AS derived
+        ON derived.event_id = guest.event_id
+        AND derived.person_id = guest.person_id
+      GROUP BY target.event_id
+    )
+    UPDATE luma_events AS event
+    SET
+      overview_stats = aggregate.overview_stats,
+      overview_stats_updated_at = NOW()
+    FROM event_aggregates AS aggregate
+    WHERE event.event_id = aggregate.event_id
+    RETURNING
+      event.event_id AS "eventId",
+      event.overview_stats AS "overviewStats",
+      event.overview_stats_updated_at AS "overviewStatsUpdatedAt"
+  `);
+  return { updatedEventCount: rows.length, eventIds: rows.map((row) => row.eventId) };
+}
+
 type IndexedPeopleSearchOptions = {
   limit?: number;
   includedTags?: string[];
@@ -2090,6 +2373,16 @@ export async function getIndexedEventAnalytics(
 export async function getIndexedMultiEventStats(eventIds: string[]) {
   const boundedEventIds = [...new Set(eventIds.filter(Boolean))].slice(0, MAX_SELECTED_EVENT_IDS);
   if (!boundedEventIds.length) return null;
+  const uncachedEvents = await prisma().lumaEvent.findMany({
+    where: {
+      eventId: { in: boundedEventIds },
+      overviewStatsUpdatedAt: null,
+    },
+    select: { eventId: true },
+  });
+  if (uncachedEvents.length) {
+    await refreshIndexedEventOverviewStats(uncachedEvents.map((event) => event.eventId));
+  }
   const rows = await prisma().$queryRaw<Array<{
     eventCount: number;
     total: number;
@@ -2128,62 +2421,8 @@ export async function getIndexedMultiEventStats(eventIds: string[]) {
       FROM luma_events
       WHERE event_id IN (${Prisma.join(boundedEventIds)})
     ),
-    latest_manual_tag_mutations AS MATERIALIZED (
-      SELECT DISTINCT ON (mutation.person_id, mutation.tag_id)
-        mutation.person_id,
-        mutation.tag_id,
-        mutation.assigned_event_id,
-        mutation.removed
-      FROM manual_tag_mutations AS mutation
-      JOIN guest_tags AS definition ON definition.id = mutation.tag_id
-      WHERE definition.semantic_key = 'referral'
-      ORDER BY mutation.person_id, mutation.tag_id, mutation.assigned_at DESC NULLS LAST, mutation.id DESC
-    ),
-    first_referral_attributions AS MATERIALIZED (
-      SELECT DISTINCT ON (mutation.person_id, mutation.tag_id)
-        mutation.person_id,
-        mutation.tag_id,
-        mutation.assigned_event_id
-      FROM manual_tag_mutations AS mutation
-      JOIN guest_tags AS definition ON definition.id = mutation.tag_id
-      WHERE definition.semantic_key = 'referral'
-        AND mutation.removed = FALSE
-        AND mutation.assigned_event_id IS NOT NULL
-      ORDER BY mutation.person_id, mutation.tag_id, mutation.assigned_at ASC NULLS LAST, mutation.id ASC
-    ),
-    active_referrals AS MATERIALIZED (
-      SELECT DISTINCT mutation.person_id
-      FROM latest_manual_tag_mutations AS mutation
-      WHERE mutation.removed = FALSE
-    ),
     guest_cohort AS MATERIALIZED (
-      SELECT
-        guest.*,
-        EXISTS (
-          SELECT 1
-          FROM active_referrals AS referral
-          WHERE referral.person_id = guest.person_id
-        ) AS is_referred,
-        EXISTS (
-          SELECT 1
-          FROM first_referral_attributions AS referral
-          WHERE referral.person_id = guest.person_id
-            AND referral.assigned_event_id = guest.event_id
-        ) AS is_new_referral,
-        EXISTS (
-          SELECT 1
-          FROM luma_event_guests AS previous_guest
-          LEFT JOIN luma_events AS previous_event ON previous_event.event_id = previous_guest.event_id
-          WHERE previous_guest.person_id = guest.person_id
-            AND previous_guest.event_id <> guest.event_id
-            AND (
-              (selected_event.starts_at IS NOT NULL AND (
-                previous_event.starts_at < selected_event.starts_at
-                OR (previous_event.starts_at IS NULL AND selected_event.date IS NOT NULL AND previous_event.date < selected_event.date)
-              ))
-              OR (selected_event.starts_at IS NULL AND selected_event.date IS NOT NULL AND previous_event.date < selected_event.date)
-            )
-        ) AS has_prior_event
+      SELECT guest.*
       FROM luma_event_guests AS guest
       JOIN selected_events AS selected_event ON selected_event.event_id = guest.event_id
     )
@@ -2448,60 +2687,11 @@ async function indexedEventAnalytics(
   firstRegisterWhere: Record<string, any> | null,
   diagnosticReporter?: EventSwitchDiagnosticReporter,
 ) {
-  const priorRegistrationBoundary = previousEventBoundarySql(eventBoundary);
   const diagnosticStartedAt = Date.now();
   const [summaryRows, analyticsQuestionRows] = await db.$transaction([
     db.$queryRaw<Array<{ total: number; checkedIn: number; accepted: number; registered: number; pending: number; declined: number; invited: number; waitlisted: number; toDecide: number; firstRegisters: number; newRegistrations: number; newFaces: number; referredRegistrations: number; newReferrals: number; referredAccepted: number; referredCheckedIn: number; referredFirstRegisters: number; referredReturning: number; invitationTotal: number; invitedGoing: number; invitedCheckedIn: number; invitedNoShow: number; invitedNoResponse: number; invitedDeclined: number; invitedReferralTotal: number; invitedReferralGoing: number; invitedReferralCheckedIn: number; invitedReferralNoShow: number; invitedReferralNoResponse: number; invitedReferralDeclined: number }>>(Prisma.sql`
-      WITH latest_manual_tag_mutations AS MATERIALIZED (
-        SELECT DISTINCT ON (mutation.person_id, mutation.tag_id)
-          mutation.person_id,
-          mutation.tag_id,
-          mutation.assigned_event_id,
-          mutation.removed
-        FROM manual_tag_mutations AS mutation
-        JOIN guest_tags AS definition ON definition.id = mutation.tag_id
-        WHERE definition.semantic_key = 'referral'
-        ORDER BY mutation.person_id, mutation.tag_id, mutation.assigned_at DESC NULLS LAST, mutation.id DESC
-      ),
-      first_referral_attributions AS MATERIALIZED (
-        SELECT DISTINCT ON (mutation.person_id, mutation.tag_id)
-          mutation.person_id,
-          mutation.tag_id,
-          mutation.assigned_event_id
-        FROM manual_tag_mutations AS mutation
-        JOIN guest_tags AS definition ON definition.id = mutation.tag_id
-        WHERE definition.semantic_key = 'referral'
-          AND mutation.removed = FALSE
-          AND mutation.assigned_event_id IS NOT NULL
-        ORDER BY mutation.person_id, mutation.tag_id, mutation.assigned_at ASC NULLS LAST, mutation.id ASC
-      ),
-      active_referrals AS MATERIALIZED (
-        SELECT DISTINCT mutation.person_id
-        FROM latest_manual_tag_mutations AS mutation
-        WHERE mutation.removed = FALSE
-      ),
-      guest_cohort AS MATERIALIZED (
-        SELECT
-          guest.*,
-          EXISTS (
-            SELECT 1
-            FROM active_referrals AS referral
-            WHERE referral.person_id = guest.person_id
-          ) AS is_referred,
-          EXISTS (
-            SELECT 1
-            FROM first_referral_attributions AS referral
-            WHERE referral.person_id = guest.person_id
-              AND referral.assigned_event_id = guest.event_id
-          ) AS is_new_referral,
-          EXISTS (
-            SELECT 1
-            FROM luma_event_guests AS previous_guest
-            LEFT JOIN luma_events AS previous_event ON previous_event.event_id = previous_guest.event_id
-            WHERE previous_guest.person_id = guest.person_id
-              AND previous_guest.event_id <> ${eventId}
-              ${priorRegistrationBoundary}
-          ) AS has_prior_event
+      WITH guest_cohort AS MATERIALIZED (
+        SELECT guest.*
         FROM luma_event_guests AS guest
         WHERE guest.event_id = ${eventId}
       )
@@ -3020,6 +3210,17 @@ export async function mutateIndexedPeopleTags({
     `);
   });
   invalidateAudienceTagGroupCache();
+  const changesReferralMembership = await prisma().guestTag.count({
+    where: { id: { in: tagIds }, semanticKey: "referral" },
+  });
+  if (changesReferralMembership) {
+    const affectedEvents = await prisma().lumaEventGuest.findMany({
+      where: { personId: { in: people.map((person) => person.personId) } },
+      distinct: ["eventId"],
+      select: { eventId: true },
+    });
+    await refreshIndexedEventOverviewStats(affectedEvents.map((event) => event.eventId));
+  }
   return result;
 }
 
@@ -3884,6 +4085,7 @@ export async function updateIndexedGuestStatus({ eventId, lumaGuestId, status, l
       syncedAt: now,
     },
   });
+  if (result.count) await refreshIndexedEventOverviewStats([eventId]);
   return { updatedCount: result.count };
 }
 
@@ -3901,6 +4103,7 @@ export async function updateIndexedGuestCheckIn({ eventId, lumaGuestId, checkedI
       syncedAt: now,
     },
   });
+  if (result.count) await refreshIndexedEventOverviewStats([eventId]);
   return { updatedCount: result.count };
 }
 
@@ -4619,6 +4822,9 @@ async function upsertGuest(tx, event, guest, rawGuest = {}) {
 }
 
 function indexedEventToApiEvent(row) {
+  const guestStats = row.overviewStatsUpdatedAt
+    ? normalizedEventOverviewStats(row.overviewStats)
+    : null;
   return {
     id: row.eventId,
     title: row.title || "Untitled event",
@@ -4638,7 +4844,54 @@ function indexedEventToApiEvent(row) {
     dataSource: "luma-index",
     indexed: true,
     indexedAt: isoOrNull(row.syncedAt),
+    ...(guestStats ? {
+      guestStats,
+      guestStatsUpdatedAt: isoOrNull(row.overviewStatsUpdatedAt),
+    } : {}),
   };
+}
+
+const EVENT_OVERVIEW_STAT_KEYS = [
+  "total",
+  "checkedIn",
+  "accepted",
+  "registered",
+  "pending",
+  "declined",
+  "invited",
+  "waitlisted",
+  "toDecide",
+  "firstRegisters",
+  "newRegistrations",
+  "newFaces",
+  "referredRegistrations",
+  "newReferrals",
+  "referredAccepted",
+  "referredCheckedIn",
+  "referredFirstRegisters",
+  "referredReturning",
+  "invitationTotal",
+  "invitedGoing",
+  "invitedCheckedIn",
+  "invitedNoShow",
+  "invitedNoResponse",
+  "invitedDeclined",
+  "invitedReferralTotal",
+  "invitedReferralGoing",
+  "invitedReferralCheckedIn",
+  "invitedReferralNoShow",
+  "invitedReferralNoResponse",
+  "invitedReferralDeclined",
+] as const;
+
+function normalizedEventOverviewStats(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  if (Number(source.version) !== 1) return null;
+  return Object.fromEntries(EVENT_OVERVIEW_STAT_KEYS.map((key) => [
+    key,
+    Math.max(0, Number(source[key]) || 0),
+  ]));
 }
 
 function indexedPersonToApiPerson(row: any, guestRow: any = {}) {
@@ -4758,6 +5011,13 @@ function isoOrNull(value) {
   if (!value) return null;
   if (value instanceof Date) return value.toISOString();
   return String(value);
+}
+
+function latestDate(...values) {
+  const dates = values
+    .map(parseDateTime)
+    .filter((value): value is Date => Boolean(value));
+  return dates.length ? new Date(Math.max(...dates.map((value) => value.getTime()))) : null;
 }
 
 function indexedEventImageUrl(raw: AnyRecord = {}) {

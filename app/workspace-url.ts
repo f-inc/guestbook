@@ -5,7 +5,7 @@ export type WorkspaceUrlState = {
   eventIds: string[];
   eventView: "upcoming" | "past" | "all";
   eventSearch: string;
-  tab: "overview" | "invite" | "analytics";
+  tab: "overview" | "invite" | "analytics" | "feedback";
   guestStatus: string;
   guestStatuses?: string[];
   guestStatusMode?: "any" | "all";
@@ -21,7 +21,7 @@ export type WorkspaceUrlState = {
 };
 
 const EVENT_VIEWS = new Set(["upcoming", "past", "all"]);
-const EVENT_TABS = new Set(["overview", "invite", "analytics"]);
+const EVENT_TABS = new Set(["overview", "invite", "analytics", "feedback"]);
 const GUEST_STATUSES = new Set([
   "all",
   "to_decide",

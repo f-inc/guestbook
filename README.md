@@ -45,6 +45,7 @@ npm run db:generate
 npm run db:push
 npx prisma db execute --file prisma/manual-migrations/20260721_add_automatic_archetype_tags.sql --schema prisma/schema.prisma
 npx prisma db execute --file prisma/manual-migrations/20260723_add_event_catalog_state.sql --schema prisma/schema.prisma
+npx prisma db execute --file prisma/manual-migrations/20260731_add_event_feedback_stats.sql --schema prisma/schema.prisma
 npm run dev
 ```
 
@@ -86,6 +87,8 @@ Only successfully synced, non-truncated events are eligible. Public-event streak
 Guestbook keeps Luma credentials server-side, avoids contacts/list endpoints, and writes redacted endpoint logs to `.debug/luma-api.log`. Local env files, logs, build output, and dependencies are ignored by Git.
 
 Automatic tags write only to Guestbook's PostgreSQL database. They never update Luma guest records.
+
+Event feedback is read from Luma only when a saved manager session token is available or the Feedback tab is opened. Multi-event feedback uses one Guestbook request with bounded upstream concurrency. The defaults allow up to 50 selected events, three concurrent Luma reads, and 1,000 responses per event; configure `LUMA_FEEDBACK_MAX_EVENTS`, `LUMA_FEEDBACK_CONCURRENCY`, and `LUMA_FEEDBACK_MAX_RESPONSES` to lower those limits.
 
 Run the test suite with:
 

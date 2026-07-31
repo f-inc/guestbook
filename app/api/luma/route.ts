@@ -4,7 +4,7 @@ import { after } from "next/server";
 type AnyRecord = Record<string, any>;
 type HttpError = Error & { status?: number; code?: string };
 import nodePath from "node:path";
-import { archiveIndexedEventsMissingFromCatalog, getIndexedEventAnalytics, getIndexedLifetimeEventCounts, getIndexedMultiEventStats, getIndexedTrace, hasLumaDb, listIndexedAnalyticsRespondents, listIndexedAudienceInviteRecipients, listIndexedEventGuestMutationTargets, listIndexedEventGuests, listIndexedEvents, listIndexedGuestReferrerTargets, listIndexedMultiEventGuests, normalizeIndexedAudienceCriteria, recordEventSyncState, removeIndexedEventGuestsMissingFromSnapshot, removeIndexedTraceRecordsMissingFromEvents, runAutomaticTagClassifier, updateIndexedGuestCheckIn, updateIndexedGuestReferrers, updateIndexedGuestStatus, upsertNormalizedLumaEvents, upsertNormalizedLumaGuestActivity, upsertNormalizedLumaSnapshot } from "./db";
+import { archiveIndexedEventsMissingFromCatalog, getIndexedEventAnalytics, getIndexedLifetimeEventCounts, getIndexedMultiEventStats, getIndexedTrace, hasLumaDb, listIndexedAnalyticsRespondents, listIndexedAudienceInviteRecipients, listIndexedEventGuestMutationTargets, listIndexedEventGuests, listIndexedEvents, listIndexedGuestReferrerTargets, listIndexedMultiEventGuests, normalizeIndexedAudienceCriteria, recordEventSyncState, recordIndexedEventFeedbackStats, refreshIndexedEventOverviewStats, removeIndexedEventGuestsMissingFromSnapshot, removeIndexedTraceRecordsMissingFromEvents, runAutomaticTagClassifier, updateIndexedGuestCheckIn, updateIndexedGuestReferrers, updateIndexedGuestStatus, upsertNormalizedLumaEvents, upsertNormalizedLumaGuestActivity, upsertNormalizedLumaSnapshot } from "./db";
 import { lumaEventDate } from "./event-date";
 import { filterGuestPayload, guestQueryRequiresIndex, parseGuestListQuery } from "./guest-query";
 import { orderAvatarCandidates } from "../../avatar-order";
@@ -26,6 +26,7 @@ import { parseAllMatchingGuestQuery } from "./all-matching-guest-selection";
 import { liveEventCountsFromLumaEvent } from "../../event-count-reconciliation";
 import { rateLimitBackoffMs } from "./rate-limit-retry";
 import { extractGuestPhoneNumber } from "./guest-phone";
+import { normalizeEventFeedback, normalizeEventFeedbackIds } from "./event-feedback";
 
 export const runtime = "nodejs";
 
@@ -384,6 +385,7 @@ export async function GET(request: Request) {
             eventId,
             personIds: [...eventGuests.map((guest) => guest.personId), ...reconciliation.personIds],
           });
+          await refreshIndexedEventOverviewStats([eventId]);
         }
       }
       if (hasLumaDb()) {
@@ -643,6 +645,82 @@ export async function POST(request: Request) {
         updated: indexed.updatedCount,
         failed: failedCount,
         truncated: targets.length >= maxGuests,
+        requestId,
+      });
+    }
+
+    if (body.action === "getEventFeedback") {
+      const lumaSessionToken = normalizeLumaSessionToken(body.lumaSessionToken);
+      const maximumResponses = safeInt("LUMA_FEEDBACK_MAX_RESPONSES", 1000, 1, 5000);
+      const maximumEvents = safeInt("LUMA_FEEDBACK_MAX_EVENTS", 50, 1, 50);
+      const concurrency = safeInt("LUMA_FEEDBACK_CONCURRENCY", 3, 1, 8);
+      const requestedValues = Array.isArray(body.eventIds) ? body.eventIds : [body.eventId];
+      const eventIds = normalizeEventFeedbackIds(requestedValues, maximumEvents + 1);
+      if (!eventIds.length) {
+        const error = new Error("At least one valid eventId is required.") as HttpError;
+        error.status = 400;
+        throw error;
+      }
+      if (eventIds.length > maximumEvents) {
+        const error = new Error(`Feedback can be loaded for up to ${maximumEvents} events at a time.`) as HttpError;
+        error.status = 400;
+        throw error;
+      }
+      await debugLog(requestId, "private event feedback start", {
+        eventCount: eventIds.length,
+        maximumResponses,
+        concurrency,
+      });
+      const feedbackByEventId = {};
+      const failures: Array<{ eventId: string; error: HttpError }> = [];
+
+      for (let index = 0; index < eventIds.length; index += concurrency) {
+        const batch = eventIds.slice(index, index + concurrency);
+        const results = await Promise.all(batch.map(async (eventId) => {
+          try {
+            const upstream = await lumaPrivateGet({
+              requestId,
+              lumaSessionToken,
+              path: "/event/analytics/survey-responses",
+              params: { event_api_id: eventId },
+              operation: "event feedback",
+            });
+            return { eventId, feedback: normalizeEventFeedback(upstream, maximumResponses), error: null };
+          } catch (error) {
+            if (error.code === "LUMA_SESSION_INVALID") throw error;
+            return { eventId, feedback: null, error: error as HttpError };
+          }
+        }));
+        results.forEach((result) => {
+          if (result.feedback) feedbackByEventId[result.eventId] = result.feedback;
+          else if (result.error) failures.push({ eventId: result.eventId, error: result.error });
+        });
+      }
+
+      if (!Object.keys(feedbackByEventId).length && failures.length === 1) throw failures[0].error;
+      const persisted = await recordIndexedEventFeedbackStats(feedbackByEventId);
+      await debugLog(requestId, "private event feedback success", {
+        eventCount: eventIds.length,
+        loadedEventCount: Object.keys(feedbackByEventId).length,
+        persistedEventCount: persisted.updatedEventCount,
+        failedEventCount: failures.length,
+        responseCount: Object.values(feedbackByEventId)
+          .reduce((sum: number, feedback: any) => sum + feedback.responses.length, 0),
+        totalResponses: Object.values(feedbackByEventId)
+          .reduce((sum: number, feedback: any) => sum + feedback.totalResponses, 0),
+        truncatedEventCount: Object.values(feedbackByEventId)
+          .filter((feedback: any) => feedback.truncated).length,
+        durationMs: Date.now() - startedAt,
+      });
+      return Response.json({
+        ok: true,
+        eventIds,
+        feedback: eventIds.length === 1 ? feedbackByEventId[eventIds[0]] || null : null,
+        feedbackByEventId,
+        errors: failures.map(({ eventId, error }) => ({
+          eventId,
+          error: error.message || "Unable to load feedback for this event.",
+        })),
         requestId,
       });
     }
@@ -1556,6 +1634,7 @@ async function refreshManagedData({ requestId, rawEvents }: AnyRecord) {
   let failedEventCount = 0;
   let truncatedGuestEventCount = 0;
   let deletedStaleGuestCount = 0;
+  const overviewStatsEventIds: string[] = [];
 
   await debugLog(requestId, "foreground refresh start", { eventCount: rawEvents.length, limits });
   for (let index = 0; index < rawEvents.length; index += 1) {
@@ -1580,6 +1659,7 @@ async function refreshManagedData({ requestId, rawEvents }: AnyRecord) {
       if (result && !rawGuests.truncated && hasLumaDb()) {
         const reconciliation = await removeIndexedEventGuestsMissingFromSnapshot({ eventId: event.id, personIds: guests.map((guest) => guest.personId) });
         deletedStaleGuestCount += reconciliation.deletedCount;
+        overviewStatsEventIds.push(event.id);
       }
       clearEventGuestCache(event.id);
       guestCount += guests.length;
@@ -1593,6 +1673,7 @@ async function refreshManagedData({ requestId, rawEvents }: AnyRecord) {
     }
   }
 
+  if (overviewStatsEventIds.length) await refreshIndexedEventOverviewStats(overviewStatsEventIds);
   clearCachePrefix("trace-person:");
   return { refreshedEventCount, failedEventCount, guestCount, personCount, truncatedGuestEventCount, deletedStaleGuestCount, limits };
 }

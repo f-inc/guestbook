@@ -23,6 +23,12 @@ test("parses workspace navigation state from the URL", () => {
   });
 });
 
+test("preserves the feedback event tab in workspace URLs", () => {
+  const state = parseWorkspaceUrl("?event=evt-1&tab=feedback");
+  assert.equal(state.tab, "feedback");
+  assert.match(buildWorkspaceUrlSearch("", state), /tab=feedback/);
+});
+
 test("round-trips included, excluded, and ALL status rules", () => {
   const state = parseWorkspaceUrl("?guest_status=accepted&guest_status=checked_in&guest_status_mode=all&guest_status_not=no_show");
   assert.deepEqual(state.guestStatuses, ["accepted", "checked_in"]);

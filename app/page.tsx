@@ -6,6 +6,7 @@ import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
+  ArrowLeft,
   ArrowRight,
   ArrowDown,
   ArrowUp,
@@ -63,6 +64,7 @@ import {
   EVENT_SWITCH_DIAGNOSTICS_ACTION,
   EVENT_SWITCH_DIAGNOSTICS_PARAM,
 } from "./event-switch-diagnostics";
+import { aggregateEventFeedback } from "./api/luma/event-feedback";
 import { buildWorkspaceUrlSearch, parseWorkspaceUrl, type WorkspaceUrlState } from "./workspace-url";
 
 const statusLabels = {
@@ -101,6 +103,7 @@ const EVENT_SCROLL_THRESHOLD = 96;
 const GUEST_PAGE_SIZE = 25;
 const GUEST_SEARCH_DEBOUNCE_MS = 250;
 const QUESTION_RESPONSE_BATCH_SIZE = 10;
+const EVENT_FEEDBACK_REQUEST_BATCH_SIZE = 50;
 const MAX_GUEST_NOTE_LENGTH = 20_000;
 const EVENT_CATALOG_REFRESH_COOLDOWN_MS = 5 * 60_000;
 const guestFilterOptions = [
@@ -132,6 +135,14 @@ const eventTabs = [
   { id: "overview", label: "Overview", icon: Users },
   { id: "invite", label: "Invite", icon: Send },
   { id: "analytics", label: "Analytics", icon: BarChart3 },
+  { id: "feedback", label: "Feedback", icon: MessageSquare },
+];
+const feedbackRatingOptions = [
+  { rating: 5, emoji: "🤩", label: "Great" },
+  { rating: 4, emoji: "🙂", label: "Good" },
+  { rating: 3, emoji: "😐", label: "Meh" },
+  { rating: 2, emoji: "😞", label: "Bad" },
+  { rating: 1, emoji: "😡", label: "Terrible" },
 ];
 const inviteMessageTemplates = [
   { id: "past-attendee", label: "Past attendee", message: (event) => `We'd love to have you back for ${event?.title || "our next event"}. Hope you can join us.` },
@@ -267,6 +278,8 @@ export default function Home() {
   const guestRequestsRef = useRef(new Set());
   const latestGuestRequestRef = useRef(new Map());
   const analyticsRequestsRef = useRef(new Set());
+  const feedbackRequestsRef = useRef(new Set());
+  const directoryFeedbackBackfillKeyRef = useRef("");
   const multiEventStatsRequestsRef = useRef(new Set());
   const multiEventGuestAbortRef = useRef<AbortController | null>(null);
   const multiEventGuestRequestKeyRef = useRef("");
@@ -302,6 +315,13 @@ export default function Home() {
   const [bulkSubmitting, setBulkSubmitting] = useState(false);
   const [lifecycleNow, setLifecycleNow] = useState(() => Date.now());
   const [multiEventStatsByKey, setMultiEventStatsByKey] = useState<Record<string, any>>({});
+  const [eventFeedbackById, setEventFeedbackById] = useState<Record<string, any>>({});
+  const [eventDirectoryOpen, setEventDirectoryOpen] = useState(false);
+  const [eventDirectoryState, setEventDirectoryState] = useState<{ status: "idle" | "loading" | "ready" | "error"; events: any[]; error: string }>({
+    status: "idle",
+    events: [],
+    error: "",
+  });
   const [multiEventGuestState, setMultiEventGuestState] = useState<{ key: string; loading: boolean; pageInfo: any }>({ key: "", loading: false, pageInfo: null });
   const [sessionStatus, setSessionStatus] = useState("checking");
   const [sessionKey, setSessionKey] = useState("");
@@ -394,6 +414,33 @@ export default function Home() {
     const response = await sessionFetch(sessionKey, input, init);
     if (response.status === 401) lockSession("That session key is no longer valid.");
     return response;
+  };
+
+  const loadEventDirectory = async ({ force = false } = {}) => {
+    if (!force && (eventDirectoryState.status === "loading" || eventDirectoryState.status === "ready")) return;
+    setEventDirectoryState((current) => ({ ...current, status: "loading", error: "" }));
+    try {
+      const response = await apiFetch("/api/events/directory", { cache: "no-store" });
+      const data: any = await response.json();
+      if (!response.ok) throw new Error(data.error || "Unable to load the event calendar.");
+      setEventDirectoryState({
+        status: "ready",
+        events: Array.isArray(data.events) ? data.events : [],
+        error: "",
+      });
+    } catch (error) {
+      setEventDirectoryState((current) => ({
+        ...current,
+        status: "error",
+        error: error instanceof Error ? error.message : "Unable to load the event calendar.",
+      }));
+    }
+  };
+
+  const openEventDirectory = () => {
+    setEventDirectoryOpen(true);
+    setProfilePanelOpen(false);
+    void loadEventDirectory();
   };
 
   const updateInviteMetadata = (updater) => {
@@ -704,6 +751,12 @@ export default function Home() {
   const multiEventMode = selectedEvents.length > 1;
   const uniqueWorkspaceStats = multiEventMode ? multiEventStatsByKey[multiEventStatsKey] || null : null;
   const selectedEventManageUrl = lumaEventManageUrl(selectedEvent);
+  const selectedFeedbackEvents = selectedEvents.filter((event) => event.source === "luma");
+  const selectedFeedbackEventIdsKey = selectedFeedbackEvents.map((event) => event.id).join("\u0000");
+  const selectedEventFeedback = useMemo(
+    () => workspaceEventFeedback(selectedFeedbackEvents, eventFeedbackById),
+    [selectedFeedbackEventIdsKey, eventFeedbackById],
+  );
   const selectedPerson = getPerson(state, state.selectedPersonId);
   const selectedTrace = selectedPerson ? activityTraces[selectedPerson.id] || { status: "idle", records: [] } : { status: "idle", records: [] };
   const selectedProfileRecord = selectedPerson ? currentProfileRecord(state, selectedPerson) : null;
@@ -738,7 +791,7 @@ export default function Home() {
     () => universalSearchResults(state, universalQuery, activeUniversalIndexedPeople),
     [state, universalQuery, activeUniversalIndexedPeople],
   );
-  const universalResultCount = universalResults.events.length + universalResults.people.length + universalResults.groups.length;
+  const universalResultCount = universalResults.people.length;
   const showGuestGroups = visibleGuests.some(({ person }) => person.groups.length > 0);
   const hasSelectedProfile = hasProfileContent(state, selectedPerson);
   const showProfilePanel = profilePanelOpen && hasSelectedProfile;
@@ -1192,6 +1245,7 @@ export default function Home() {
       preserveProfile = false,
     }: { additive?: boolean; range?: boolean; preserveProfile?: boolean } = {},
   ) => {
+    setEventDirectoryOpen(false);
     const selection = nextEventSelection({
       currentIds: selectedWorkspaceEvents(state).map((event) => event.id),
       eventId,
@@ -1861,11 +1915,12 @@ export default function Home() {
     if (!diagnostic || diagnostic.tab !== activeEventTab) return;
     const activeTabReady = diagnostic.tab === "invite"
       || (diagnostic.tab === "analytics" && selectedEvent.analyticsLoaded && !selectedEvent.analyticsLoading)
+      || (diagnostic.tab === "feedback" && ["ready", "error"].includes(selectedEventFeedback.status))
       || (diagnostic.tab === "overview" && selectedEvent.guestsLoaded && !selectedEvent.guestQueryLoading);
     if (!activeTabReady) return;
     const frame = window.requestAnimationFrame(() => completeEventSwitchDiagnostic(selectedEvent.id));
     return () => window.cancelAnimationFrame(frame);
-  }, [activeEventTab, selectedEvent?.id, selectedEvent?.guestsLoaded, selectedEvent?.guestQueryLoading, selectedEvent?.analyticsLoaded, selectedEvent?.analyticsLoading]);
+  }, [activeEventTab, selectedEvent?.id, selectedEvent?.guestsLoaded, selectedEvent?.guestQueryLoading, selectedEvent?.analyticsLoaded, selectedEvent?.analyticsLoading, selectedEventFeedback.status]);
 
   const loadMoreGuests = () => {
     if (multiEventMode) {
@@ -2976,6 +3031,109 @@ export default function Home() {
     }
   };
 
+  const loadEventFeedback = async (
+    eventIdOrIds: string | string[],
+    { token = "", force = false, prompt = true }: { token?: string; force?: boolean; prompt?: boolean } = {},
+  ) => {
+    const requestedEventIds = [...new Set(
+      (Array.isArray(eventIdOrIds) ? eventIdOrIds : [eventIdOrIds]).filter(Boolean),
+    )];
+    if (!requestedEventIds.length) return false;
+    const lumaSessionToken = normalizeLumaSessionTokenInput(
+      token || window.localStorage.getItem(LUMA_SESSION_TOKEN_STORAGE_KEY),
+    );
+    const pending = { kind: "feedback", eventIds: requestedEventIds };
+    if (!lumaSessionToken) {
+      if (prompt) setLumaSessionPrompt({ pending, token: "", error: "", submitting: false });
+      return false;
+    }
+    if (requestedEventIds.length > EVENT_FEEDBACK_REQUEST_BATCH_SIZE) {
+      for (let index = 0; index < requestedEventIds.length; index += EVENT_FEEDBACK_REQUEST_BATCH_SIZE) {
+        const loaded = await loadEventFeedback(
+          requestedEventIds.slice(index, index + EVENT_FEEDBACK_REQUEST_BATCH_SIZE),
+          { token: lumaSessionToken, force, prompt: false },
+        );
+        if (!loaded) return false;
+      }
+      return true;
+    }
+
+    const eventIds = requestedEventIds.filter((eventId) => (
+      !feedbackRequestsRef.current.has(eventId)
+      && (force || eventFeedbackById[eventId]?.status !== "ready")
+    ));
+    if (!eventIds.length) {
+      return requestedEventIds.every((eventId) => eventFeedbackById[eventId]?.status === "ready");
+    }
+
+    eventIds.forEach((eventId) => feedbackRequestsRef.current.add(eventId));
+    setEventFeedbackById((current) => ({
+      ...current,
+      ...Object.fromEntries(eventIds.map((eventId) => [
+        eventId,
+        { ...(current[eventId] || {}), status: "loading", error: "" },
+      ])),
+    }));
+
+    try {
+      const result = await postLumaAction({
+        action: "getEventFeedback",
+        eventIds,
+        lumaSessionToken,
+      }, apiFetch);
+      const feedbackByEventId = result.feedbackByEventId
+        || (eventIds.length === 1 && result.feedback ? { [eventIds[0]]: result.feedback } : {});
+      const errorsByEventId = new Map(
+        (Array.isArray(result.errors) ? result.errors : [])
+          .map((failure) => [failure.eventId, failure.error || "Unable to load event feedback."]),
+      );
+      setEventFeedbackById((current) => ({
+        ...current,
+        ...Object.fromEntries(eventIds.map((eventId) => {
+          const feedback = feedbackByEventId[eventId];
+          return [eventId, feedback ? {
+            status: "ready",
+            ...feedback,
+            requestId: result.requestId || "",
+            loadedAt: new Date().toISOString(),
+            error: "",
+          } : {
+            ...(current[eventId] || {}),
+            status: "error",
+            error: errorsByEventId.get(eventId) || "Unable to load event feedback.",
+          }];
+        })),
+      }));
+      return Object.keys(feedbackByEventId).length > 0;
+    } catch (error: any) {
+      setEventFeedbackById((current) => ({
+        ...current,
+        ...Object.fromEntries(eventIds.map((eventId) => [eventId, {
+          ...(current[eventId] || {}),
+          status: "error",
+          error: error.message || "Unable to load event feedback.",
+        }])),
+      }));
+      if (error.code === "LUMA_SESSION_INVALID") {
+        window.localStorage.removeItem(LUMA_SESSION_TOKEN_STORAGE_KEY);
+        if (prompt) setLumaSessionPrompt({ pending, token: "", error: error.message, submitting: false });
+      }
+      return false;
+    } finally {
+      eventIds.forEach((eventId) => feedbackRequestsRef.current.delete(eventId));
+    }
+  };
+
+  const refreshEventDirectory = async () => {
+    const eventIds = eventDirectoryState.events.map((event) => event.id).filter(Boolean);
+    if (!eventIds.length) {
+      await loadEventDirectory({ force: true });
+      return;
+    }
+    const loaded = await loadEventFeedback(eventIds, { force: true, prompt: true });
+    if (loaded) await loadEventDirectory({ force: true });
+  };
+
   const performLumaCheckInChange = async (pending, token) => {
     const guestKey = `${pending.eventId}:${pending.personId}`;
     if (lumaCheckInGuestKey === guestKey) return false;
@@ -3019,7 +3177,9 @@ export default function Home() {
       ? await performSelectedEventSync(pending.eventIds, token)
       : pending.kind === "reinvite"
         ? await reinviteGuest(pending.personId, pending.eventId, token, pending)
-        : await performLumaCheckInChange(pending, token);
+        : pending.kind === "feedback"
+          ? await loadEventFeedback(pending.eventIds, { token, force: true })
+          : await performLumaCheckInChange(pending, token);
     if (updated) setLumaSessionPrompt(null);
     else setLumaSessionPrompt((current) => current ? { ...current, submitting: false } : current);
   };
@@ -3030,6 +3190,42 @@ export default function Home() {
     setLumaSessionPrompt(null);
     void performSelectedEventSync(pending.eventIds);
   };
+
+  useEffect(() => {
+    if (
+      sessionStatus !== "ready"
+      || !eventDirectoryOpen
+      || eventDirectoryState.status !== "ready"
+    ) return;
+    const missingEventIds = eventDirectoryState.events
+      .filter((event) => !event.feedbackStatsUpdatedAt)
+      .map((event) => event.id)
+      .filter(Boolean);
+    if (!missingEventIds.length) return;
+    const storedToken = normalizeLumaSessionTokenInput(window.localStorage.getItem(LUMA_SESSION_TOKEN_STORAGE_KEY));
+    if (!storedToken) return;
+    const backfillKey = missingEventIds.join("\u0000");
+    if (directoryFeedbackBackfillKeyRef.current === backfillKey) return;
+    directoryFeedbackBackfillKeyRef.current = backfillKey;
+    void loadEventFeedback(missingEventIds, { token: storedToken, prompt: false })
+      .then((loaded) => loaded ? loadEventDirectory({ force: true }) : null);
+  }, [
+    sessionStatus,
+    eventDirectoryOpen,
+    eventDirectoryState.status,
+    eventDirectoryState.events.map((event) => `${event.id}:${event.feedbackStatsUpdatedAt || ""}`).join("|"),
+  ]);
+
+  useEffect(() => {
+    if (
+      sessionStatus !== "ready"
+      || !selectedFeedbackEvents.length
+    ) return;
+    const feedbackTabOpen = activeEventTab === "feedback";
+    const storedToken = normalizeLumaSessionTokenInput(window.localStorage.getItem(LUMA_SESSION_TOKEN_STORAGE_KEY));
+    if (!feedbackTabOpen && (multiEventMode || !storedToken)) return;
+    void loadEventFeedback(selectedFeedbackEvents.map((event) => event.id), { prompt: feedbackTabOpen });
+  }, [sessionStatus, activeEventTab, multiEventMode, selectedFeedbackEventIdsKey, selectedEventFeedback.status]);
 
   const closeGuestStatusDialog = () => {
     setGuestStatusDraft((current) => current?.submitting ? current : null);
@@ -3249,39 +3445,25 @@ export default function Home() {
   };
 
   const selectUniversalResult = (result) => {
-    const eventChanged = result.type === "event" && result.id !== state.selectedEventId;
-    if (result.type === "event" || result.type === "person") workspaceUrlModeRef.current = "push";
-    if (result.type === "person") pendingProfileIdRef.current = "";
+    if (result.type !== "person") return;
+    workspaceUrlModeRef.current = "push";
+    pendingProfileIdRef.current = "";
     updateState((draft) => {
-      if (result.type === "event") {
-        draft.selectedEventId = result.id;
-        draft.selectedEventIds = [result.id];
-        draft.invite.targetEventId = result.id;
+      if (result.person) {
+        const existingPerson = draft.people.find((person) => person.id === result.person.id || (person.email && person.email.toLocaleLowerCase() === result.person.email?.toLocaleLowerCase()));
+        const mergedPerson = mergePersonRecord(existingPerson, result.person);
+        draft.people = existingPerson
+          ? draft.people.map((person) => person.id === existingPerson.id ? mergedPerson : person)
+          : [...draft.people, mergedPerson];
+      }
+      draft.selectedPersonId = result.id;
+      if (result.eventId) {
+        draft.selectedEventId = result.eventId;
+        draft.selectedEventIds = [result.eventId];
         draft.filters.event = "all";
       }
-      if (result.type === "person") {
-        if (result.person) {
-          const existingPerson = draft.people.find((person) => person.id === result.person.id || (person.email && person.email.toLocaleLowerCase() === result.person.email?.toLocaleLowerCase()));
-          const mergedPerson = mergePersonRecord(existingPerson, result.person);
-          draft.people = existingPerson
-            ? draft.people.map((person) => person.id === existingPerson.id ? mergedPerson : person)
-            : [...draft.people, mergedPerson];
-        }
-        draft.selectedPersonId = result.id;
-        if (result.eventId) {
-          draft.selectedEventId = result.eventId;
-          draft.selectedEventIds = [result.eventId];
-          draft.filters.event = "all";
-        }
-      }
-      if (result.type === "group") {
-        draft.selectedGroupId = result.id;
-      }
     });
-    if (result.type === "person") setProfilePanelOpen(true);
-    if (eventChanged) {
-      setProfilePanelOpen(false);
-    }
+    setProfilePanelOpen(true);
     setSearchOpen(false);
   };
 
@@ -3307,7 +3489,7 @@ export default function Home() {
         <button className="command-button" type="button" onClick={openUniversalSearch}>
           <span className="command-label">
             <Search size={17} aria-hidden="true" />
-            <span>Search people, events, groups</span>
+            <span>Search people</span>
           </span>
           <kbd aria-label="Command K"><span aria-hidden="true">⌘</span><span>K</span></kbd>
         </button>
@@ -3330,10 +3512,19 @@ export default function Home() {
       <main className={`workspace ${showProfilePanel ? "" : "workspace-no-profile"}`}>
         <aside className="rail panel">
           <div className="panel-heading">
-            <div>
-              <p className="eyebrow">Events</p>
-              <h2>Calendar</h2>
-            </div>
+            <button
+              className={`calendar-directory-button ${eventDirectoryOpen ? "active" : ""}`}
+              type="button"
+              aria-label={eventDirectoryOpen ? "Event calendar is open" : "Back to events calendar"}
+              aria-current={eventDirectoryOpen ? "page" : undefined}
+              onClick={openEventDirectory}
+            >
+              {!eventDirectoryOpen ? <ArrowLeft size={16} aria-hidden="true" /> : null}
+              <span>
+                <span className="eyebrow">Events</span>
+                <strong>Calendar</strong>
+              </span>
+            </button>
             {multiEventMode ? (
               <button
                 className="count-pill count-pill-clearable"
@@ -3449,6 +3640,18 @@ export default function Home() {
         </aside>
 
         <section className="main-stack">
+          {eventDirectoryOpen ? (
+            <EventDirectory
+              events={eventDirectoryState.events}
+              eventFeedbackById={eventFeedbackById}
+              status={eventDirectoryState.status}
+              error={eventDirectoryState.error}
+              onOpenEvent={(eventId) => selectEvent(eventId)}
+              onRetry={() => void loadEventDirectory({ force: true })}
+              onRefresh={() => void refreshEventDirectory()}
+            />
+          ) : (
+            <>
           <section className="workbench panel">
             {selectedEvent ? (
               <div className={`event-summary ${multiEventMode ? "multi-event-summary" : ""}`} key={selectedEventIdsKey}>
@@ -3524,10 +3727,20 @@ export default function Home() {
                     mode={eventSelectionTiming(selectedEvents, lifecycleNow)}
                     loading={workspaceStatsLoading || (!multiEventMode && selectedEvents.some((event) => event.source === "luma" && !eventHeaderStatsReady(event)))}
                     uniquePeople={multiEventMode}
+                    feedback={selectedFeedbackEvents.length ? selectedEventFeedback : null}
+                    feedbackActive={activeEventTab === "feedback"}
                     activeFilter={state.filters.guestStatuses.length === 1 && !state.filters.guestExcludedStatuses.length
                       ? state.filters.guestStatuses[0]
                       : "all"}
                     onFilter={selectGuestFilter}
+                    onFeedback={selectedFeedbackEvents.length
+                      ? () => {
+                          if (activeEventTab !== "feedback") workspaceUrlModeRef.current = "push";
+                          setActiveEventTab("feedback");
+                          pendingProfileIdRef.current = "";
+                          setProfilePanelOpen(false);
+                        }
+                      : null}
                   />
                 </div>
                 {selectedEvent.source !== "luma" ? (
@@ -3921,10 +4134,23 @@ export default function Home() {
               onOpenRespondents={openAnalyticsRespondents}
               onFilter={openAnalyticsGuestFilter}
             />
+          ) : activeEventTab === "feedback" ? (
+            <FeedbackTab
+              events={selectedFeedbackEvents}
+              feedback={selectedEventFeedback}
+              people={state.people}
+              onRefresh={() => void loadEventFeedback(selectedFeedbackEvents.map((event) => event.id), { force: true })}
+              onLoad={() => void loadEventFeedback(selectedFeedbackEvents.map((event) => event.id), { force: true })}
+              onOpenPerson={openPerson}
+              onSelectEvent={selectEvent}
+              onAvatarClick={setAvatarPreview}
+            />
           ) : null}
+            </>
+          )}
         </section>
 
-        {showProfilePanel ? (
+        {!eventDirectoryOpen && showProfilePanel ? (
           <ProfilePanel
             state={state}
             person={selectedPerson}
@@ -4120,6 +4346,158 @@ export default function Home() {
         />
       ) : null}
     </div>
+  );
+}
+
+const eventDirectoryColumns = [
+  { key: "title", label: "Event", kind: "text" },
+  { key: "date", label: "Date", kind: "date" },
+  { key: "newFaces", label: "New faces", kind: "number" },
+  { key: "newReferrals", label: "New referrals", kind: "number" },
+  { key: "checkedIn", label: "Check-ins", kind: "number" },
+  { key: "firstRegisters", label: "First registers", kind: "number" },
+  { key: "accepted", label: "Accepted", kind: "number" },
+  { key: "registered", label: "Registered", kind: "number" },
+  { key: "invited", label: "Invited", kind: "number" },
+  { key: "waitlisted", label: "Waitlist", kind: "number" },
+  { key: "averageRating", label: "Average rating", kind: "number" },
+  { key: "modifiedAt", label: "Date modified", kind: "date" },
+] as const;
+
+function EventDirectory({ events, eventFeedbackById, status, error, onOpenEvent, onRetry, onRefresh }) {
+  const [sort, setSort] = useState<{ key: typeof eventDirectoryColumns[number]["key"]; direction: "asc" | "desc" }>({
+    key: "date",
+    direction: "desc",
+  });
+  const rows = useMemo(() => events.map((event) => {
+    const feedback = eventFeedbackById[event.id];
+    return feedback?.status === "ready"
+      ? {
+          ...event,
+          averageRating: feedback.averageRating,
+          ratingCount: Object.values(feedback.ratingCounts || {})
+            .reduce<number>((sum, count) => sum + Math.max(0, Number(count) || 0), 0),
+        }
+      : event;
+  }), [events, eventFeedbackById]);
+  const ratingsLoading = events.some((event) => eventFeedbackById[event.id]?.status === "loading");
+  const sortedRows = useMemo(() => {
+    const column = eventDirectoryColumns.find((item) => item.key === sort.key);
+    const direction = sort.direction === "asc" ? 1 : -1;
+    return [...rows].sort((left, right) => {
+      const leftValue = left[sort.key];
+      const rightValue = right[sort.key];
+      if (leftValue == null && rightValue == null) return String(left.title).localeCompare(String(right.title));
+      if (leftValue == null) return 1;
+      if (rightValue == null) return -1;
+      const comparison = column?.kind === "text"
+        ? String(leftValue).localeCompare(String(rightValue), undefined, { sensitivity: "base" })
+        : column?.kind === "date"
+          ? Date.parse(String(leftValue)) - Date.parse(String(rightValue))
+          : Number(leftValue) - Number(rightValue);
+      return comparison === 0
+        ? String(left.title).localeCompare(String(right.title), undefined, { sensitivity: "base" })
+        : comparison * direction;
+    });
+  }, [rows, sort]);
+
+  const setSortKey = (key: typeof eventDirectoryColumns[number]["key"]) => {
+    setSort((current) => current.key === key
+      ? { key, direction: current.direction === "asc" ? "desc" : "asc" }
+      : { key, direction: key === "title" ? "asc" : "desc" });
+  };
+
+  return (
+    <section className="event-directory panel" aria-labelledby="event-directory-title">
+      <header className="event-directory-header">
+        <div>
+          <p className="eyebrow">Events calendar</p>
+          <h2 id="event-directory-title">All events</h2>
+          <p>Click a column heading to sort; click it again to reverse the order.</p>
+        </div>
+        <div className="event-directory-header-actions">
+          {status === "ready" ? <span className="count-pill">{rows.length}</span> : null}
+          <button className="button secondary" type="button" disabled={status === "loading" || ratingsLoading} onClick={onRefresh}>
+            <RefreshCw className={status === "loading" || ratingsLoading ? "animate-spin" : ""} size={15} aria-hidden="true" />
+            Refresh ratings
+          </button>
+        </div>
+      </header>
+
+      {status === "loading" && !rows.length ? (
+        <div className="event-directory-state" role="status">
+          <span className="loading-spinner" aria-hidden="true" />
+          <span>Loading event metrics</span>
+        </div>
+      ) : status === "error" && !rows.length ? (
+        <div className="event-directory-state event-directory-error" role="alert">
+          <span>{error}</span>
+          <button className="button secondary" type="button" onClick={onRetry}>Try again</button>
+        </div>
+      ) : (
+        <>
+          {error ? <p className="event-directory-inline-error" role="alert">{error}</p> : null}
+          <div className="event-directory-table-wrap">
+            <table className="event-directory-table">
+              <thead>
+                <tr>
+                  {eventDirectoryColumns.map((column) => {
+                    const active = sort.key === column.key;
+                    const SortIcon = sort.direction === "asc" ? ArrowUp : ArrowDown;
+                    return (
+                      <th key={column.key} scope="col" aria-sort={active ? (sort.direction === "asc" ? "ascending" : "descending") : "none"}>
+                        <button type="button" onClick={() => setSortKey(column.key)}>
+                          <span>{column.label}</span>
+                          {active ? <SortIcon size={13} aria-hidden="true" /> : null}
+                        </button>
+                      </th>
+                    );
+                  })}
+                </tr>
+              </thead>
+              <tbody>
+                {sortedRows.map((event) => (
+                  <tr key={event.id}>
+                    <td className="event-directory-name">
+                      <button type="button" onClick={() => onOpenEvent(event.id)}>
+                        <EventArtwork event={event} />
+                        <span className="event-directory-name-copy">
+                          <strong>{event.title}</strong>
+                          <span className="event-directory-open-label">
+                            Open event <ArrowRight size={12} aria-hidden="true" />
+                          </span>
+                        </span>
+                      </button>
+                    </td>
+                    <td><time dateTime={event.date}>{formatDate(event.date)}</time></td>
+                    <td>{Number(event.newFaces).toLocaleString()}</td>
+                    <td>{Number(event.newReferrals).toLocaleString()}</td>
+                    <td>{Number(event.checkedIn).toLocaleString()}</td>
+                    <td>{Number(event.firstRegisters).toLocaleString()}</td>
+                    <td>{Number(event.accepted).toLocaleString()}</td>
+                    <td>{Number(event.registered).toLocaleString()}</td>
+                    <td>{Number(event.invited).toLocaleString()}</td>
+                    <td>{Number(event.waitlisted).toLocaleString()}</td>
+                    <td
+                      className="event-directory-rating"
+                      title={event.averageRating == null
+                        ? event.feedbackStatsUpdatedAt || eventFeedbackById[event.id]?.status === "ready"
+                          ? "No ratings have been submitted for this event."
+                          : "Select Refresh ratings to load this event's feedback."
+                        : `${event.ratingCount || 0} rating${event.ratingCount === 1 ? "" : "s"}`}
+                    >
+                      {event.averageRating == null ? "—" : `${Number(event.averageRating).toFixed(1)} / 5`}
+                    </td>
+                    <td><time dateTime={event.modifiedAt}>{formatDateTime(event.modifiedAt)}</time></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {!sortedRows.length ? <div className="event-directory-state">No indexed events were found.</div> : null}
+        </>
+      )}
+    </section>
   );
 }
 
@@ -4452,16 +4830,21 @@ function BulkTagConfirmationDialog({ draft, definitions, onClose, onSubmit }) {
 function LumaSessionTokenDialog({ draft, onChange, onClose, onSubmit, onSkip }) {
   const syncingReferrers = draft.pending?.kind === "sync_referrers";
   const reinviting = draft.pending?.kind === "reinvite";
+  const loadingFeedback = draft.pending?.kind === "feedback";
   const accessTitle = syncingReferrers
     ? "Luma guest details access"
     : reinviting
       ? "Luma email delivery access"
-      : "Luma check-in access";
+      : loadingFeedback
+        ? "Luma feedback access"
+        : "Luma check-in access";
   const requestName = syncingReferrers
     ? "get-guest-info"
     : reinviting
       ? "invite/send"
-      : "update-check-in";
+      : loadingFeedback
+        ? "event/analytics/survey-responses"
+        : "update-check-in";
   return (
     <div className="modal-scrim" role="presentation" onMouseDown={onClose}>
       <form
@@ -4476,7 +4859,13 @@ function LumaSessionTokenDialog({ draft, onChange, onClose, onSubmit, onSkip }) 
           <div>
             <p className="eyebrow">{accessTitle}</p>
             <h2 id="luma-session-dialog-title">Add your session token</h2>
-            <p className="dialog-description">{syncingReferrers ? "Luma only includes referrers in its signed-in guest details response." : "This private Luma action needs the signed-in session header."} Paste the <code>x-luma-auth-session</code> token to continue.</p>
+            <p className="dialog-description">
+              {syncingReferrers
+                ? "Luma only includes referrers in its signed-in guest details response."
+                : loadingFeedback
+                  ? "Luma only exposes event ratings and comments to signed-in event managers."
+                  : "This private Luma action needs the signed-in session header."} Paste the <code>x-luma-auth-session</code> token to continue.
+            </p>
           </div>
           <button className="icon-button" type="button" disabled={draft.submitting} aria-label="Close Luma session token dialog" title="Close" onClick={onClose}>
             <X size={18} aria-hidden="true" />
@@ -4504,8 +4893,8 @@ function LumaSessionTokenDialog({ draft, onChange, onClose, onSubmit, onSkip }) 
           <button className="button ghost" type="button" disabled={draft.submitting} onClick={onClose}>Cancel</button>
           {syncingReferrers ? <button className="button ghost" type="button" disabled={draft.submitting} onClick={onSkip}>Sync guests only</button> : null}
           <button className="button primary" type="submit" disabled={draft.submitting || !draft.token.trim()}>
-            {draft.submitting ? <RefreshCw className="animate-spin" size={16} aria-hidden="true" /> : syncingReferrers ? <RefreshCw size={16} aria-hidden="true" /> : <BadgeCheck size={16} aria-hidden="true" />}
-            {draft.submitting ? "Checking..." : syncingReferrers ? "Save and sync" : "Save and retry"}
+            {draft.submitting ? <RefreshCw className="animate-spin" size={16} aria-hidden="true" /> : syncingReferrers ? <RefreshCw size={16} aria-hidden="true" /> : loadingFeedback ? <MessageSquare size={16} aria-hidden="true" /> : <BadgeCheck size={16} aria-hidden="true" />}
+            {draft.submitting ? "Checking..." : syncingReferrers ? "Save and sync" : loadingFeedback ? "Save and load" : "Save and retry"}
           </button>
         </div>
       </form>
@@ -5336,12 +5725,12 @@ function UniversalSearchModal({
   const hasCriteria = hasQuery || hasPeopleFilters;
   return (
     <div className="search-scrim" role="presentation" onMouseDown={onClose}>
-      <section className={`search-dialog ${expanded ? "expanded" : "compact"}`} role="dialog" aria-modal="true" aria-label="Universal search" onMouseDown={(event) => event.stopPropagation()}>
+      <section className={`search-dialog ${expanded ? "expanded" : "compact"}`} role="dialog" aria-modal="true" aria-label="People search" onMouseDown={(event) => event.stopPropagation()}>
         <div className="search-input-wrap">
           <input
             ref={inputRef}
             type="search"
-            placeholder="Search people, events, groups"
+            placeholder="Search people"
             value={query}
             onChange={(event) => onQueryChange(event.target.value)}
           />
@@ -5375,8 +5764,6 @@ function UniversalSearchModal({
                   onCreateTag={onCreateTag}
                   onSavePhone={onSavePhone}
                 />
-                <SearchSection title="Events" results={results.events} onSelect={onSelect} />
-                <SearchSection title="Groups" results={results.groups} onSelect={onSelect} />
               </div>
             ) : (
               <div className="search-empty">
@@ -5634,41 +6021,17 @@ function PersonPhoneEditor({ person, saving, onSave }) {
   );
 }
 
-function SearchSection({ title, results, loading = false, error = "", onSelect }) {
-  if (!results.length && !loading && !error) return null;
-  return (
-    <section className="search-section">
-      <p className="eyebrow">{title}</p>
-      <div className="search-result-list">
-        {results.map((result) => (
-          <button className="search-result plain" type="button" key={result.type + "-" + result.id} onClick={() => onSelect(result)}>
-            <span className="search-result-leading">
-              {result.person ? <Avatar person={result.person} /> : null}
-              <span className="search-result-kind">{result.kind}</span>
-            </span>
-            <span className="search-result-main">
-              <strong>{result.title}</strong>
-              <span>{result.subtitle}</span>
-              {result.tags?.length ? (
-                <span className="search-result-tags">
-                  {result.tags.slice(0, 3).map((tag) => (
-                    <span className="tag-chip" style={tagChipStyle(tag.color)} key={tag.name}>{tagDisplayName(tag.name)}</span>
-                  ))}
-                  {result.tags.length > 3 ? <span className="tag-chip tag-chip-more">+{result.tags.length - 3}</span> : null}
-                </span>
-              ) : null}
-              {result.detail ? <small>{result.detail}</small> : null}
-            </span>
-          </button>
-        ))}
-        {loading ? <div className="search-result-state">Searching every indexed person...</div> : null}
-        {error ? <div className="search-result-state search-result-error">{error} Showing loaded matches instead.</div> : null}
-      </div>
-    </section>
-  );
-}
-
-function EventStats({ stats, mode = "past", loading = false, uniquePeople = false, activeFilter, onFilter }) {
+function EventStats({
+  stats,
+  mode = "past",
+  loading = false,
+  uniquePeople = false,
+  feedback = null,
+  feedbackActive = false,
+  activeFilter,
+  onFilter,
+  onFeedback = null,
+}) {
   const items = [
     ...(mode === "upcoming"
       ? [{ value: "to_decide", label: "To Decide", count: stats.toDecide ?? 0 }]
@@ -5706,6 +6069,31 @@ function EventStats({ stats, mode = "past", loading = false, uniquePeople = fals
           <span>{item.label}</span>
         </button>
       ))}
+      {onFeedback ? (
+        <button
+          className={`summary-stat summary-stat-feedback ${feedbackActive ? "active" : ""}`}
+          type="button"
+          aria-pressed={feedbackActive}
+          aria-label={feedback?.status === "ready"
+            ? `Open feedback: ${feedback.totalResponses || 0} ratings${feedback.averageRating ? `, ${feedback.averageRating.toFixed(1)} average` : ""}`
+            : "Open event feedback"}
+          title="Open event feedback"
+          onClick={onFeedback}
+        >
+          <strong>
+            {feedback?.status === "loading"
+              ? "..."
+              : feedback?.status === "ready" && feedback.averageRating
+                ? Number(feedback.averageRating).toFixed(1)
+                : "—"}
+          </strong>
+          <span>
+            {feedback?.status === "ready"
+              ? `${feedback.totalResponses || 0} ${feedback.totalResponses === 1 ? "rating" : "ratings"}`
+              : "Feedback"}
+          </span>
+        </button>
+      ) : null}
       </div>
     </div>
   );
@@ -6901,6 +7289,211 @@ function AnalyticsTab({ event, analytics, loading = false, uniquePeople = false,
           </div>
         ) : <div className="empty-state">No registration answers from first registers are available for this event.</div>}
       </section>
+    </section>
+  );
+}
+
+function FeedbackTab({ events, feedback, people, onRefresh, onLoad, onOpenPerson, onSelectEvent, onAvatarClick }) {
+  if (!events.length) {
+    return (
+      <section className="feedback-tab panel" role="tabpanel" aria-label="Feedback">
+        <div className="empty-state">Select one or more Luma events to view feedback.</div>
+      </section>
+    );
+  }
+
+  const bulk = events.length > 1;
+  const scopeLabel = bulk ? `${events.length} selected events` : events[0].title;
+
+  if (feedback?.status === "loading") {
+    return (
+      <section className="feedback-tab panel" role="tabpanel" aria-label="Feedback" aria-busy="true">
+        <div className="guest-loading-state" role="status">
+          <span className="loading-spinner" aria-hidden="true" />
+          <span>Loading feedback for {scopeLabel}</span>
+        </div>
+      </section>
+    );
+  }
+
+  if (feedback?.status === "error") {
+    return (
+      <section className="feedback-tab panel" role="tabpanel" aria-label="Feedback">
+        <div className="feedback-error" role="alert">
+          <div>
+            <strong>Feedback could not be loaded</strong>
+            <span>{feedback.error}</span>
+          </div>
+          <button className="button" type="button" onClick={onLoad}>Try again</button>
+        </div>
+      </section>
+    );
+  }
+
+  if (feedback?.status !== "ready") {
+    return (
+      <section className="feedback-tab panel" role="tabpanel" aria-label="Feedback">
+        <div className="feedback-access-state">
+          <MessageSquare size={22} aria-hidden="true" />
+          <div>
+            <strong>{bulk ? "Combined event feedback" : "Event feedback"}</strong>
+            <span>Load ratings and comments for {scopeLabel}.</span>
+          </div>
+          <button className="button primary" type="button" onClick={onLoad}>
+            Load {bulk ? `${events.length} events` : "feedback"}
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  const responses = Array.isArray(feedback.responses) ? feedback.responses : [];
+  const ratedCount = Object.values(feedback.ratingCounts || {}).reduce<number>((sum, count) => sum + Number(count || 0), 0);
+  const peopleByEmail = new Map<string, any>(
+    (people || [])
+      .filter((person) => person.email)
+      .map((person) => [person.email.trim().toLocaleLowerCase(), person]),
+  );
+
+  return (
+    <section className="feedback-tab panel" role="tabpanel" aria-label="Feedback" aria-busy={feedback.loadingEventCount > 0}>
+      <header className="event-tab-heading">
+        <div><p className="eyebrow">{bulk ? "Combined event feedback" : "Event feedback"}</p><h2>{scopeLabel}</h2></div>
+        <button
+          className={`icon-button feedback-refresh ${feedback.loadingEventCount ? "is-loading" : ""}`}
+          type="button"
+          aria-label={bulk ? "Refresh feedback for selected events" : "Refresh event feedback"}
+          title={bulk ? "Refresh selected event feedback" : "Refresh event feedback"}
+          disabled={feedback.loadingEventCount > 0}
+          onClick={onRefresh}
+        >
+          <RefreshCw className={feedback.loadingEventCount ? "animate-spin" : ""} size={17} aria-hidden="true" />
+        </button>
+      </header>
+
+      {feedback.loadingEventCount ? (
+        <div className="feedback-progress" role="status">
+          <span className="loading-spinner" aria-hidden="true" />
+          Refreshing {feedback.loadingEventCount} {feedback.loadingEventCount === 1 ? "event" : "events"}…
+        </div>
+      ) : null}
+
+      {feedback.errorEvents?.length ? (
+        <div className="feedback-partial-error" role="alert">
+          <strong>{feedback.error}</strong>
+          <span>{feedback.errorEvents.map((item) => item.eventTitle).join(", ")}</span>
+          <button className="plain" type="button" onClick={onLoad}>Retry</button>
+        </div>
+      ) : null}
+
+      <section className="feedback-summary" aria-label="Rating summary">
+        <div className="feedback-score">
+          <span>{bulk ? "Combined average" : "Average rating"}</span>
+          <strong>{feedback.averageRating ? Number(feedback.averageRating).toFixed(1) : "—"}</strong>
+          <small>{feedback.totalResponses || 0} {feedback.totalResponses === 1 ? "rating" : "ratings"}</small>
+        </div>
+        <div className="feedback-distribution">
+          {feedbackRatingOptions.map((option) => {
+            const count = Number(feedback.ratingCounts?.[option.rating] || 0);
+            const percent = ratedCount ? Math.round((count / ratedCount) * 100) : 0;
+            return (
+              <div className="feedback-rating-row" key={option.rating}>
+                <span className="feedback-rating-label">
+                  <b aria-hidden="true">{option.emoji}</b>
+                  <span>{option.label}</span>
+                </span>
+                <span className="feedback-rating-track" aria-hidden="true"><i style={{ width: `${percent}%` }} /></span>
+                <strong>{count}</strong>
+                <small>{percent}%</small>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      {bulk ? (
+        <section className="feedback-event-breakdown" aria-label="Feedback by event">
+          <div className="feedback-responses-head">
+            <div><p className="eyebrow">Event breakdown</p><h3>Ratings by event</h3></div>
+            <span>{feedback.loadedEventCount}/{feedback.eventCount} loaded</span>
+          </div>
+          <div className="feedback-event-list">
+            {feedback.eventSummaries.map((summary) => (
+              <button
+                className={`feedback-event-row ${summary.status}`}
+                type="button"
+                key={summary.eventId}
+                onClick={() => onSelectEvent(summary.eventId)}
+              >
+                <span>
+                  <strong>{summary.eventTitle}</strong>
+                  <small>{formatDate(summary.eventDate)}</small>
+                </span>
+                {summary.status === "loading" ? (
+                  <RefreshCw className="animate-spin" size={15} aria-label="Loading" />
+                ) : summary.status === "error" ? (
+                  <CircleX size={16} aria-label="Could not load" />
+                ) : summary.status === "ready" ? (
+                  <span className="feedback-event-score">
+                    <strong>{summary.averageRating ? summary.averageRating.toFixed(1) : "—"}</strong>
+                    <small>{summary.totalResponses} {summary.totalResponses === 1 ? "rating" : "ratings"}</small>
+                  </span>
+                ) : <span className="feedback-event-score"><small>Not loaded</small></span>}
+              </button>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      <div className="feedback-responses-head">
+        <div><p className="eyebrow">Responses</p><h3>Guest feedback</h3></div>
+        <span>{responses.length} shown</span>
+      </div>
+
+      {feedback.truncated ? (
+        <p className="feedback-truncated">Showing the newest {responses.length} of {feedback.totalResponses} responses.</p>
+      ) : null}
+
+      {responses.length ? (
+        <div className="feedback-card-grid">
+          {responses.map((response) => {
+            const matchedPerson = peopleByEmail.get(String(response.email || "").trim().toLocaleLowerCase());
+            const displayPerson = matchedPerson || { name: response.name, email: response.email };
+            const ratingOption = feedbackRatingOptions.find((option) => option.rating === response.rating);
+            return (
+              <article className="feedback-card" key={`${response.eventId || events[0].id}:${response.id}`}>
+                <div className="feedback-card-head">
+                  <Avatar person={displayPerson} onPreview={matchedPerson ? onAvatarClick : null} />
+                  <div className="feedback-card-person">
+                    <strong>{response.name}</strong>
+                    {response.email ? <span>{response.email}</span> : null}
+                  </div>
+                  <span className="feedback-card-rating" title={`${response.rating} out of 5`}>
+                    <b aria-hidden="true">{ratingOption?.emoji}</b>
+                    <strong>{response.rating}/5</strong>
+                  </span>
+                </div>
+                {response.comment ? <p className="feedback-card-comment">{response.comment}</p> : <p className="feedback-card-comment empty">Rating only</p>}
+                <footer>
+                  <span className="feedback-card-context">
+                    {response.createdAt ? <time dateTime={response.createdAt}>{formatDateTime(response.createdAt)}</time> : null}
+                    {bulk && response.eventId ? (
+                      <button className="plain feedback-event-link" type="button" onClick={() => onSelectEvent(response.eventId)}>
+                        {response.eventTitle}
+                      </button>
+                    ) : null}
+                  </span>
+                  {matchedPerson ? (
+                    <button className="plain feedback-open-person" type="button" onClick={() => onOpenPerson(matchedPerson.id)}>
+                      Open guest <ArrowRight size={13} aria-hidden="true" />
+                    </button>
+                  ) : null}
+                </footer>
+              </article>
+            );
+          })}
+        </div>
+      ) : <div className="empty-state">No feedback has been submitted for {bulk ? "these events" : "this event"} yet.</div>}
     </section>
   );
 }
@@ -8427,7 +9020,7 @@ function peopleSearchFiltersKey(filters) {
 
 function universalSearchResults(state, query, indexedPeople = null) {
   const normalized = query.trim().toLowerCase();
-  if (!normalized && indexedPeople === null) return { people: [], events: [], groups: [] };
+  if (!normalized && indexedPeople === null) return { people: [] };
 
   return {
     people: (indexedPeople === null
@@ -8450,47 +9043,7 @@ function universalSearchResults(state, query, indexedPeople = null) {
         tags: orderedPersonTags(person).map((tag) => tagDefinitionForName(state.tagDefinitions, tag)),
         detail: (normalized ? searchSnippet(text, normalized) : "") || personGroupsLabel(state, person),
       })),
-    events: normalized ? sortEvents(state.events)
-      .filter((event) => eventSearchText(event).includes(normalized))
-      .slice(0, 6)
-      .map((event) => ({
-        type: "event",
-        kind: "Event",
-        id: event.id,
-        title: event.title,
-        subtitle: formatDate(event.date) + " - " + event.location,
-        detail: event.category,
-      })) : [],
-    groups: normalized ? state.groups
-      .filter((group) => groupSearchText(state, group).includes(normalized))
-      .slice(0, 6)
-      .map((group) => ({
-        type: "group",
-        kind: "Group",
-        id: group.id,
-        title: group.name,
-        subtitle: groupMemberCount(state, group.id) + " people",
-        detail: groupSearchDetail(state, group),
-      })) : [],
   };
-}
-
-function eventSearchText(event) {
-  return [event.title, event.category, event.location, event.lumaUrl].filter(Boolean).join(" ").toLowerCase();
-}
-
-function groupSearchText(state, group) {
-  const members = state.people.filter((person) => person.groups.includes(group.id));
-  return [group.name, ...members.map((person) => personSearchText(state, person))].join(" ").toLowerCase();
-}
-
-function groupSearchDetail(state, group) {
-  const members = state.people.filter((person) => person.groups.includes(group.id)).slice(0, 3).map((person) => person.name);
-  return members.length ? members.join(", ") : "No members yet";
-}
-
-function groupMemberCount(state, groupId) {
-  return state.people.filter((person) => person.groups.includes(groupId)).length;
 }
 
 function personSearchText(state, person) {
@@ -8585,6 +9138,59 @@ function selectedWorkspaceEvents(state) {
   if (events.length) return events;
   const selectedEvent = getEvent(state, state.selectedEventId);
   return selectedEvent ? [selectedEvent] : [];
+}
+
+function workspaceEventFeedback(events, feedbackByEventId) {
+  const states = events.map((event) => ({
+    event,
+    feedback: feedbackByEventId[event.id] || { status: "idle" },
+  }));
+  const usable = states.filter(({ feedback }) => (
+    feedback.status === "ready"
+    || (feedback.status === "loading" && Array.isArray(feedback.responses))
+  ));
+  const loadingEventCount = states.filter(({ feedback }) => feedback.status === "loading").length;
+  const errorEvents = states
+    .filter(({ feedback }) => feedback.status === "error")
+    .map(({ event, feedback }) => ({
+      eventId: event.id,
+      eventTitle: event.title,
+      error: feedback.error || "Unable to load event feedback.",
+    }));
+  const aggregate = aggregateEventFeedback(usable.map(({ event, feedback }) => ({
+    eventId: event.id,
+    eventTitle: event.title,
+    eventDate: event.date,
+    feedback,
+  })));
+  const status = usable.length
+    ? "ready"
+    : loadingEventCount
+      ? "loading"
+      : errorEvents.length === states.length && states.length
+        ? "error"
+        : "idle";
+
+  return {
+    ...aggregate,
+    status,
+    eventCount: states.length,
+    loadedEventCount: usable.length,
+    loadingEventCount,
+    eventSummaries: states.map(({ event, feedback }) => ({
+      eventId: event.id,
+      eventTitle: event.title,
+      eventDate: event.date,
+      status: feedback.status,
+      totalResponses: Number(feedback.totalResponses) || 0,
+      averageRating: Number.isFinite(Number(feedback.averageRating)) ? Number(feedback.averageRating) : null,
+      error: feedback.error || "",
+    })),
+    errorEvents,
+    error: errorEvents.length
+      ? `${errorEvents.length} ${errorEvents.length === 1 ? "event" : "events"} could not be loaded.`
+      : "",
+  };
 }
 
 function workspaceEventGuests(

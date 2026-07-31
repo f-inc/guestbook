@@ -3,7 +3,7 @@ import { appendFile, mkdir } from "node:fs/promises";
 type AnyRecord = Record<string, any>;
 type HttpError = Error & { status?: number };
 import nodePath from "node:path";
-import { createSyncRun, finishSyncRun, getEventSyncStates, getIndexStats, hasLumaDb, recordEventSyncState, removeIndexedEventGuestsMissingFromSnapshot, runAutomaticTagClassifier, upsertNormalizedLumaSnapshot } from "../db";
+import { createSyncRun, finishSyncRun, getEventSyncStates, getIndexStats, hasLumaDb, recordEventSyncState, refreshIndexedEventOverviewStats, removeIndexedEventGuestsMissingFromSnapshot, runAutomaticTagClassifier, upsertNormalizedLumaSnapshot } from "../db";
 import { lumaEventDate } from "../event-date";
 import { requestedEventIds, shouldRefreshEventGuests } from "../sync-policy";
 import { orderAvatarCandidates } from "../../../avatar-order";
@@ -63,6 +63,7 @@ async function runSync(request: Request) {
   let truncatedGuestEventCount = 0;
   let automaticTags = null;
   let syncLockAcquired = false;
+  const overviewStatsEventIds: string[] = [];
 
   try {
     requireSessionKey(request);
@@ -194,6 +195,7 @@ async function runSync(request: Request) {
             personIds: guests.map((guest) => guest.personId),
           });
           reconciliation.personIds.forEach((personId) => people.add(personId));
+          overviewStatsEventIds.push(event.id);
         }
         await recordEventSyncState({
           eventId: event.id,
@@ -223,6 +225,7 @@ async function runSync(request: Request) {
       forceFull: !upcomingScope,
       personIds: [...people],
     });
+    if (overviewStatsEventIds.length) await refreshIndexedEventOverviewStats(overviewStatsEventIds);
     const status = failedEventCount ? "partial_error" : "success";
     if (syncRun) {
       await finishSyncRun(syncRun.id, {

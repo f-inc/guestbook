@@ -689,7 +689,10 @@ export async function searchIndexedPeople(search: string, {
         COUNT(DISTINCT guest.event_id)
           FILTER (WHERE ${indexedRegisteredGuestPredicateSql()})::integer AS events_registered
         FROM luma_event_guests AS guest
+        JOIN luma_events AS counted_event ON counted_event.event_id = guest.event_id
         WHERE guest.person_id = person.person_id
+          AND counted_event.catalog_active = TRUE
+          AND LOWER(COALESCE(counted_event.raw->>'status', '')) NOT IN ('cancelled', 'canceled')
     ) AS activity ON TRUE
     ORDER BY ranked.rank, person.last_seen_at DESC, person.name ASC
   `);
@@ -1098,9 +1101,11 @@ function audienceEventCohortsWhereSql(selections: Array<{ eventId: string; cohor
 
 export async function listIndexedAudiencePage(
   rawCriteria: IndexedAudienceCriteria,
-  { cursor = "", pageSize = 100, includeTotals = true }: { cursor?: string | number; pageSize?: number; includeTotals?: boolean } = {},
+  { cursor = "", pageSize = 100, includeTotals = true, query = "" }: { cursor?: string | number; pageSize?: number; includeTotals?: boolean; query?: string } = {},
 ) {
   const criteria = normalizeIndexedAudienceCriteria(rawCriteria);
+  const normalizedQuery = String(query || "").trim().slice(0, 120);
+  const searchPattern = `%${normalizedQuery}%`;
   const offset = includeTotals && typeof cursor === "number" ? Math.max(0, Math.trunc(cursor) || 0) : 0;
   const cursorPersonId = !includeTotals && typeof cursor === "string" ? cursor.trim().slice(0, 200) : "";
   const limit = Math.max(1, Math.min(200, Math.trunc(pageSize) || 100));
@@ -1235,6 +1240,10 @@ export async function listIndexedAudiencePage(
       JOIN luma_people AS person ON person.person_id = audience.person_id
       LEFT JOIN target_members AS target ON target.person_id = audience.person_id
       WHERE ${cursorPersonId ? Prisma.sql`person.person_id > ${cursorPersonId}` : Prisma.sql`TRUE`}
+        AND ${normalizedQuery ? Prisma.sql`(
+          person.name ILIKE ${searchPattern}
+          OR person.email ILIKE ${searchPattern}
+        )` : Prisma.sql`TRUE`}
       ORDER BY ${includeTotals
         ? Prisma.sql`person.last_seen_at DESC, person.name ASC, person.person_id`
         : Prisma.sql`person.person_id ASC`}
@@ -1247,7 +1256,10 @@ export async function listIndexedAudiencePage(
         COUNT(*) FILTER (WHERE guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')::integer AS attended,
         COUNT(*) FILTER (WHERE guest.status IN ('registered', 'going', 'waitlisted', 'checked_in', 'no_show'))::integer AS registered
       FROM luma_event_guests AS guest
+      JOIN luma_events AS counted_event ON counted_event.event_id = guest.event_id
       JOIN person_page AS page ON page.person_id = guest.person_id
+      WHERE counted_event.catalog_active = TRUE
+        AND LOWER(COALESCE(counted_event.raw->>'status', '')) NOT IN ('cancelled', 'canceled')
       GROUP BY guest.person_id
     )
     SELECT
@@ -1451,7 +1463,10 @@ async function indexedPeopleSearchResult(matches: Array<{ personId: string }>, {
         COUNT(*) FILTER (WHERE guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')::integer AS attended,
         COUNT(*) FILTER (WHERE guest.status IN ('registered', 'going', 'waitlisted', 'checked_in', 'no_show'))::integer AS registered
       FROM luma_event_guests AS guest
+      JOIN luma_events AS counted_event ON counted_event.event_id = guest.event_id
       WHERE guest.person_id IN (${Prisma.join(personIds)})
+        AND counted_event.catalog_active = TRUE
+        AND LOWER(COALESCE(counted_event.raw->>'status', '')) NOT IN ('cancelled', 'canceled')
       GROUP BY guest.person_id
     `),
   ]);
@@ -1712,14 +1727,20 @@ export async function listIndexedMultiEventGuests(
         (
           SELECT COUNT(*)::integer
           FROM luma_event_guests AS lifetime_guest
+          JOIN luma_events AS lifetime_event ON lifetime_event.event_id = lifetime_guest.event_id
           WHERE lifetime_guest.person_id = guest.person_id
             AND (lifetime_guest.checked_in_at IS NOT NULL OR lifetime_guest.status = 'checked_in')
+            AND lifetime_event.catalog_active = TRUE
+            AND LOWER(COALESCE(lifetime_event.raw->>'status', '')) NOT IN ('cancelled', 'canceled')
         ) AS events_attended,
         (
           SELECT COUNT(*)::integer
           FROM luma_event_guests AS lifetime_guest
+          JOIN luma_events AS lifetime_event ON lifetime_event.event_id = lifetime_guest.event_id
           WHERE lifetime_guest.person_id = guest.person_id
             AND lifetime_guest.status IN ('registered', 'going', 'waitlisted', 'checked_in', 'no_show')
+            AND lifetime_event.catalog_active = TRUE
+            AND LOWER(COALESCE(lifetime_event.raw->>'status', '')) NOT IN ('cancelled', 'canceled')
         ) AS events_registered,
         COUNT(*)::integer AS registration_count
       FROM matching_guests AS guest
@@ -1809,7 +1830,10 @@ export async function listIndexedMultiEventGuests(
           COUNT(*) FILTER (WHERE guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')::integer AS attended,
           COUNT(*) FILTER (WHERE guest.status IN ('registered', 'going', 'waitlisted', 'checked_in', 'no_show'))::integer AS registered
         FROM luma_event_guests AS guest
+        JOIN luma_events AS counted_event ON counted_event.event_id = guest.event_id
         WHERE guest.person_id IN (${Prisma.join(personIds)})
+          AND counted_event.catalog_active = TRUE
+          AND LOWER(COALESCE(counted_event.raw->>'status', '')) NOT IN ('cancelled', 'canceled')
         GROUP BY guest.person_id
       `)
     : [];
@@ -1867,17 +1891,23 @@ function indexedGuestPageSortSql(query: GuestListQuery) {
   const direction = query.sortDirection === "asc" ? Prisma.sql`ASC` : Prisma.sql`DESC`;
   const countExpression = query.sortBy === "events_attended"
     ? Prisma.sql`(
-        SELECT COUNT(*)::integer
-        FROM luma_event_guests AS lifetime_guest
-        WHERE lifetime_guest.person_id = guest.person_id
-          AND (lifetime_guest.checked_in_at IS NOT NULL OR lifetime_guest.status = 'checked_in')
+          SELECT COUNT(*)::integer
+          FROM luma_event_guests AS lifetime_guest
+          JOIN luma_events AS lifetime_event ON lifetime_event.event_id = lifetime_guest.event_id
+          WHERE lifetime_guest.person_id = guest.person_id
+            AND (lifetime_guest.checked_in_at IS NOT NULL OR lifetime_guest.status = 'checked_in')
+            AND lifetime_event.catalog_active = TRUE
+            AND LOWER(COALESCE(lifetime_event.raw->>'status', '')) NOT IN ('cancelled', 'canceled')
       )`
     : query.sortBy === "events_registered"
       ? Prisma.sql`(
           SELECT COUNT(*)::integer
           FROM luma_event_guests AS lifetime_guest
+          JOIN luma_events AS lifetime_event ON lifetime_event.event_id = lifetime_guest.event_id
           WHERE lifetime_guest.person_id = guest.person_id
             AND lifetime_guest.status IN ('registered', 'going', 'waitlisted', 'checked_in', 'no_show')
+            AND lifetime_event.catalog_active = TRUE
+            AND LOWER(COALESCE(lifetime_event.raw->>'status', '')) NOT IN ('cancelled', 'canceled')
         )`
       : null;
   return countExpression
@@ -2319,7 +2349,10 @@ export async function getIndexedLifetimeEventCounts(
         WHERE guest.status IN ('registered', 'going', 'waitlisted', 'checked_in', 'no_show')
       )::integer AS registered
     FROM luma_event_guests AS guest
+    JOIN luma_events AS counted_event ON counted_event.event_id = guest.event_id
     WHERE guest.person_id IN (${Prisma.join(boundedPersonIds)})
+      AND counted_event.catalog_active = TRUE
+      AND LOWER(COALESCE(counted_event.raw->>'status', '')) NOT IN ('cancelled', 'canceled')
     GROUP BY guest.person_id
   `);
   diagnosticReporter?.("lifetime_event_counts", Date.now() - diagnosticStartedAt, {
@@ -2828,13 +2861,19 @@ async function indexedEventCountsForPeople(
     SELECT
       guest.person_id AS "personId",
       COUNT(*) FILTER (
-        WHERE guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in'
+        WHERE (guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')
+          AND history_event.catalog_active = TRUE
+          AND LOWER(COALESCE(history_event.raw->>'status', '')) NOT IN ('cancelled', 'canceled')
       )::integer AS attended,
       COUNT(*) FILTER (
         WHERE guest.status IN ('registered', 'going', 'waitlisted', 'checked_in', 'no_show')
+          AND history_event.catalog_active = TRUE
+          AND LOWER(COALESCE(history_event.raw->>'status', '')) NOT IN ('cancelled', 'canceled')
       )::integer AS registered,
       COUNT(*) FILTER (
         WHERE guest.event_id <> ${eventId}
+          AND history_event.catalog_active = TRUE
+          AND LOWER(COALESCE(history_event.raw->>'status', '')) NOT IN ('cancelled', 'canceled')
         ${historyBoundary}
       )::integer AS history
     FROM luma_event_guests AS guest
@@ -3651,8 +3690,11 @@ function automaticTagDesiredCtes(targetPeopleSql: Prisma.Sql, settleMinutes: num
           '[]'::jsonb
         ) AS event_ids
       FROM luma_event_guests AS guest
+      JOIN luma_events AS counted_event ON counted_event.event_id = guest.event_id
       JOIN attributed_events AS attributed_event ON attributed_event.event_id = guest.event_id
       JOIN target_people AS target ON target.person_id = guest.person_id
+      WHERE counted_event.catalog_active = TRUE
+        AND LOWER(COALESCE(counted_event.raw->>'status', '')) NOT IN ('cancelled', 'canceled')
       GROUP BY guest.person_id
     ),
     newcomer_matches AS (
@@ -3999,6 +4041,8 @@ export async function getIndexedTrace({ tracePersonId, traceEmail, limit = 500 }
           category: true,
           location: true,
           lumaUrl: true,
+          catalogActive: true,
+          raw: true,
         },
       },
     },
@@ -4961,6 +5005,8 @@ function indexedGuestToApiGuest(row, eventCounts = null) {
 
 function indexedGuestToTraceRecord(row) {
   const registeredAt = indexedRegisteredAt(row);
+  const rawEvent = row.event?.raw && typeof row.event.raw === "object" && !Array.isArray(row.event.raw) ? row.event.raw : {};
+  const rawEventStatus = String(rawEvent.status || "").toLowerCase();
   return {
     eventId: row.eventId,
     eventTitle: row.event?.title || "Untitled event",
@@ -4969,6 +5015,8 @@ function indexedGuestToTraceRecord(row) {
     eventCategory: row.event?.category || "Luma",
     eventLocation: row.event?.location || "Location TBD",
     eventUrl: row.event?.lumaUrl || "",
+    eventCancelled: ["cancelled", "canceled"].includes(rawEventStatus),
+    eventCatalogActive: row.event?.catalogActive !== false,
     personId: row.personId,
     lumaGuestId: row.lumaGuestId,
     status: row.status || "registered",

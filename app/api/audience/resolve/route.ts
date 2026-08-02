@@ -21,7 +21,8 @@ export async function POST(request: Request) {
     const cursor = typeof body?.cursor === "string" ? body.cursor : Number(body?.cursor) || 0;
     const pageSize = Number(body?.pageSize) || 100;
     const includeTotals = body?.includeTotals !== false;
-    const data = await listIndexedAudiencePage(criteria, { cursor, pageSize, includeTotals });
+    const query = typeof body?.query === "string" ? body.query.trim().slice(0, 120) : "";
+    const data = await listIndexedAudiencePage(criteria, { cursor, pageSize, includeTotals, query });
     return Response.json(data, {
       headers: { "server-timing": `audience-page;dur=${(performance.now() - startedAt).toFixed(1)}` },
     });

@@ -1,6 +1,25 @@
 import { MAX_SELECTED_EVENT_IDS } from "./event-selection";
 
 export const EVENT_DIRECTORY_PATH = "/events";
+export type EventDirectorySortKey = "title" | "date" | "newFaces" | "newReferrals" | "checkedIn" | "firstRegisters" | "accepted" | "registered" | "invited" | "waitlisted" | "averageRating" | "modifiedAt";
+
+const EVENT_DIRECTORY_SORT_PARAMS: Record<EventDirectorySortKey, string> = {
+  title: "title",
+  date: "date",
+  newFaces: "new_faces",
+  newReferrals: "new_referrals",
+  checkedIn: "check_ins",
+  firstRegisters: "first_registers",
+  accepted: "accepted",
+  registered: "registered",
+  invited: "invited",
+  waitlisted: "waitlist",
+  averageRating: "average_rating",
+  modifiedAt: "modified_at",
+};
+const EVENT_DIRECTORY_SORT_KEYS = new Map(
+  Object.entries(EVENT_DIRECTORY_SORT_PARAMS).map(([key, value]) => [value, key as EventDirectorySortKey]),
+);
 
 export function isEventDirectoryPath(pathname: string) {
   return pathname === EVENT_DIRECTORY_PATH || pathname === `${EVENT_DIRECTORY_PATH}/`;
@@ -15,6 +34,8 @@ export type WorkspaceUrlState = {
   eventIds: string[];
   eventView: "upcoming" | "past" | "all";
   eventSearch: string;
+  eventSort?: EventDirectorySortKey;
+  eventSortDirection?: "asc" | "desc";
   tab: "overview" | "invite" | "analytics" | "feedback";
   guestStatus: string;
   guestStatuses?: string[];
@@ -62,6 +83,8 @@ const WORKSPACE_PARAMS = [
   "event",
   "event_view",
   "event_search",
+  "sort",
+  "direction",
   "tab",
   "guest_status",
   "guest_status_mode",
@@ -87,6 +110,8 @@ export function parseWorkspaceUrl(search: string): WorkspaceUrlState {
   const requestedPage = Number.parseInt(params.get("guest_page") || "1", 10);
   const eventIds = unique(params.getAll("event").map((eventId) => boundedText(eventId, 160)).filter(Boolean))
     .slice(0, MAX_SELECTED_EVENT_IDS);
+  const eventSort = EVENT_DIRECTORY_SORT_KEYS.get(params.get("sort") || "");
+  const eventSortDirection = params.get("direction") === "asc" ? "asc" : "desc";
 
   const guestHasNotes = params.get("guest_has_notes") === "1";
   const guestAttendedGreaterThan = boundedOptionalInteger(params.get("guest_attended_gt"), 0, 10_000);
@@ -95,6 +120,7 @@ export function parseWorkspaceUrl(search: string): WorkspaceUrlState {
     eventIds,
     eventView: EVENT_VIEWS.has(eventView) ? eventView as WorkspaceUrlState["eventView"] : "upcoming",
     eventSearch: boundedText(params.get("event_search"), 120),
+    ...(eventSort ? { eventSort, eventSortDirection } : {}),
     tab: EVENT_TABS.has(tab) ? tab as WorkspaceUrlState["tab"] : "overview",
     guestStatus: guestStatuses[0] || "all",
     guestStatuses,
@@ -119,6 +145,12 @@ export function buildWorkspaceUrlSearch(currentSearch: string, state: WorkspaceU
   eventIds.forEach((eventId) => params.append("event", eventId));
   if (state.eventView !== "upcoming") params.set("event_view", state.eventView);
   if (state.eventSearch) params.set("event_search", state.eventSearch);
+  const eventSort = state.eventSort || "date";
+  const eventSortDirection = state.eventSortDirection === "asc" ? "asc" : "desc";
+  if (eventSort !== "date" || eventSortDirection !== "desc") {
+    params.set("sort", EVENT_DIRECTORY_SORT_PARAMS[eventSort]);
+    params.set("direction", eventSortDirection);
+  }
   if (state.tab !== "overview") params.set("tab", state.tab);
   const guestStatuses = unique(state.guestStatuses?.length
     ? state.guestStatuses

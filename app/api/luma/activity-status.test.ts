@@ -69,3 +69,29 @@ test("registration evidence outranks an invited status", () => {
 test("treats a date-only event today as not yet started", () => {
   assert.equal(activityRecordStatus({ status: "registered", eventDate: "2026-07-12" }, now), "registered");
 });
+
+test("does not blame a guest for an explicitly cancelled event", () => {
+  assert.equal(activityRecordStatus({
+    status: "no_show",
+    registeredAt: "2026-07-10T09:00:00-07:00",
+    eventStartsAt: "2026-07-12T18:00:00-07:00",
+    eventCancelled: true,
+  }, now), "cancelled");
+});
+
+test("does not call a guest a no-show when the event was deleted", () => {
+  assert.equal(activityRecordStatus({
+    status: "no_show",
+    registeredAt: "2026-07-10T09:00:00-07:00",
+    eventStartsAt: "2026-07-12T18:00:00-07:00",
+    eventCatalogActive: false,
+  }, now), "cancelled");
+});
+
+test("preserves a real check-in even if an event is later removed", () => {
+  assert.equal(activityRecordStatus({
+    status: "checked_in",
+    checkedInAt: "2026-07-12T18:05:00-07:00",
+    eventCatalogActive: false,
+  }, now), "checked_in");
+});

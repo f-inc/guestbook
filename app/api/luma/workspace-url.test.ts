@@ -11,6 +11,14 @@ test("uses a dedicated path for the event directory", () => {
   assert.equal(isEventDirectoryPath("/"), false);
 });
 
+test("round-trips event directory sorting", () => {
+  const state = parseWorkspaceUrl("?sort=average_rating&direction=asc");
+  assert.equal(state.eventSort, "averageRating");
+  assert.equal(state.eventSortDirection, "asc");
+  assert.match(buildWorkspaceUrlSearch("", state), /sort=average_rating/);
+  assert.match(buildWorkspaceUrlSearch("", state), /direction=asc/);
+});
+
 test("parses workspace navigation state from the URL", () => {
   assert.deepEqual(parseWorkspaceUrl("?event=evt-1&event_view=past&tab=analytics&guest_status=accepted&guest_search=ada&guest_tag=VIP&guest_tag=Builder&guest_page=3&profile=person-2"), {
     eventId: "evt-1",

@@ -1149,6 +1149,7 @@ export async function POST(request: Request) {
   }
 }
 function normalizeEvent(event) {
+  const eventStatus = String(event.status || "").toLowerCase();
   return {
     id: event.id,
     title: event.name || "Untitled event",
@@ -1162,6 +1163,7 @@ function normalizeEvent(event) {
     lumaUrl: event.url || "",
     imageUrl: extractEventImageUrl(event),
     description: firstString(event.description, event.description_md, event.event_description, event.summary),
+    cancelled: ["cancelled", "canceled"].includes(eventStatus),
     guests: [],
     guestsLoaded: false,
     source: "luma",
@@ -1967,8 +1969,12 @@ function normalizeGuest(event, guest) {
   const avatarUrl = avatarCandidates[0] || "";
   const profileUrl = extractProfileUrl(guest);
   const searchText = [profileDescription, registrationSearchText, phoneNumber, socialLinks.map((link) => link.display).join(" "), referrerText(referrer)].filter(Boolean).join(" ");
-  const status =
-    checkedIn ? "checked_in" : isPast && guest.approval_status === "approved" ? "no_show" : approvalToStatus[guest.approval_status] || "registered";
+  const eventCancelled = ["cancelled", "canceled"].includes(String(event.status || "").toLowerCase());
+  const status = checkedIn
+    ? "checked_in"
+    : isPast && !eventCancelled && guest.approval_status === "approved"
+      ? "no_show"
+      : approvalToStatus[guest.approval_status] || "registered";
   const title = extractGuestTitle(guest, registrationAnswers);
   const registeredAt = firstString(guest.registered_at, guest.joined_at, status === "invited" ? "" : guest.created_at);
 
@@ -2037,6 +2043,8 @@ function normalizeTraceRecord(event, guest) {
     eventCategory: event.category,
     eventLocation: event.location,
     eventUrl: event.lumaUrl,
+    eventCancelled: event.cancelled === true,
+    eventCatalogActive: true,
     personId: guest.personId,
     lumaGuestId: guest.lumaGuestId,
     status: guest.status,

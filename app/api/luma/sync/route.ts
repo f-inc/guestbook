@@ -467,6 +467,7 @@ function wait(ms) {
 }
 
 function normalizeEvent(event) {
+  const eventStatus = String(event.status || "").toLowerCase();
   return {
     id: event.id,
     title: event.name || "Untitled event",
@@ -479,6 +480,7 @@ function normalizeEvent(event) {
     capacity: event.max_capacity || event.guest_capacity || event.guest_count || 1,
     lumaUrl: event.url || "",
     imageUrl: extractEventImageUrl(event),
+    cancelled: ["cancelled", "canceled"].includes(eventStatus),
     guests: [],
     guestsLoaded: false,
     source: "luma",
@@ -499,7 +501,12 @@ function normalizeGuest(event, guest) {
   const referrer = extractReferrer(guest);
   const avatarCandidates = extractAvatarCandidates(guest);
   const searchText = [profileDescription, extractRegistrationAnswerText(registrationAnswers), phoneNumber, socialLinks.map((link) => link.display).join(" "), referrerText(referrer)].filter(Boolean).join(" ");
-  const status = checkedIn ? "checked_in" : isPast && guest.approval_status === "approved" ? "no_show" : approvalToStatus[guest.approval_status] || "registered";
+  const eventCancelled = ["cancelled", "canceled"].includes(String(event.status || "").toLowerCase());
+  const status = checkedIn
+    ? "checked_in"
+    : isPast && !eventCancelled && guest.approval_status === "approved"
+      ? "no_show"
+      : approvalToStatus[guest.approval_status] || "registered";
   const registeredAt = firstString(guest.registered_at, guest.joined_at, status === "invited" ? "" : guest.created_at);
 
   return {

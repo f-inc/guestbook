@@ -65,7 +65,7 @@ import {
   EVENT_SWITCH_DIAGNOSTICS_PARAM,
 } from "./event-switch-diagnostics";
 import { aggregateEventFeedback } from "./api/luma/event-feedback";
-import { buildWorkspaceUrlSearch, isEventDirectoryPath, parseWorkspaceUrl, workspacePathname, type WorkspaceUrlState } from "./workspace-url";
+import { buildWorkspaceUrlSearch, isEventDirectoryPath, parseWorkspaceUrl, workspacePathname, type EventDirectorySortKey, type WorkspaceUrlState } from "./workspace-url";
 
 const statusLabels = {
   registered: "Registered",
@@ -75,12 +75,14 @@ const statusLabels = {
   checked_in: "Checked in",
   declined: "Declined",
   no_show: "No-show",
+  cancelled: "Event cancelled",
 };
 
 const activityFilterOptions = [
   { status: "registered", label: "Registered" },
   { status: "checked_in", label: "Checked in" },
   { status: "no_show", label: "No-show" },
+  { status: "cancelled", label: "Event cancelled" },
   { status: "invited", label: "Invited" },
 ];
 
@@ -317,6 +319,10 @@ export default function Home() {
   const [multiEventStatsByKey, setMultiEventStatsByKey] = useState<Record<string, any>>({});
   const [eventFeedbackById, setEventFeedbackById] = useState<Record<string, any>>({});
   const [eventDirectoryOpen, setEventDirectoryOpen] = useState(false);
+  const [eventDirectorySort, setEventDirectorySort] = useState<{ key: EventDirectorySortKey; direction: "asc" | "desc" }>({
+    key: "date",
+    direction: "desc",
+  });
   const [eventDirectoryState, setEventDirectoryState] = useState<{ status: "idle" | "loading" | "ready" | "error"; events: any[]; error: string }>({
     status: "idle",
     events: [],
@@ -340,6 +346,10 @@ export default function Home() {
     pendingProfileIdRef.current = urlState.profileId;
     setGuestPageTarget(urlState.guestPage);
     setActiveEventTab(urlState.tab);
+    setEventDirectorySort({
+      key: urlState.eventSort || "date",
+      direction: urlState.eventSortDirection || "desc",
+    });
     setProfilePanelOpen(Boolean(urlState.profileId));
     setState((current) => ({
       ...current,
@@ -868,6 +878,8 @@ export default function Home() {
       eventIds: selectedEvents.map((event) => event.id),
       eventView: state.filters.event as WorkspaceUrlState["eventView"],
       eventSearch: state.filters.globalSearch.trim(),
+      eventSort: eventDirectoryOpen ? eventDirectorySort.key : undefined,
+      eventSortDirection: eventDirectoryOpen ? eventDirectorySort.direction : undefined,
       tab: activeEventTab as WorkspaceUrlState["tab"],
       guestStatus: state.filters.guestStatus,
       guestStatuses: state.filters.guestStatuses,
@@ -899,6 +911,8 @@ export default function Home() {
     selectedEvent?.id,
     selectedEventIdsKey,
     eventDirectoryOpen,
+    eventDirectorySort.key,
+    eventDirectorySort.direction,
     activeEventTab,
     profilePanelOpen,
     selectedPerson?.id,
@@ -3663,11 +3677,16 @@ export default function Home() {
             <EventDirectory
               events={eventDirectoryState.events}
               eventFeedbackById={eventFeedbackById}
+              sort={eventDirectorySort}
               status={eventDirectoryState.status}
               error={eventDirectoryState.error}
               onOpenEvent={(eventId) => selectEvent(eventId)}
               onRetry={() => void loadEventDirectory({ force: true })}
               onRefresh={() => void refreshEventDirectory()}
+              onSortChange={(sort) => {
+                workspaceUrlModeRef.current = "push";
+                setEventDirectorySort(sort);
+              }}
             />
           ) : (
             <>
@@ -4138,6 +4157,12 @@ export default function Home() {
               onSend={sendInviteAudience}
               onInvitePeople={(people, options) => sendInviteRecipients(people, options)}
               onMergePeople={mergeIndexedPeople}
+              openTagPersonId={openTagPersonId}
+              savingTagPersonId={savingTagPersonId}
+              onOpenTags={setOpenTagPersonId}
+              onCloseTags={() => setOpenTagPersonId("")}
+              onChangeTags={(person, tags, mutation) => savePersonTags(person.id, tags, { ...mutation, eventId: "" })}
+              onCreateTag={(person, name, tags) => createAndAssignTag(person.id, name, tags, "")}
               request={apiFetch}
               metadata={inviteMetadata}
               onLoadMetadata={loadInviteMetadata}
@@ -4383,11 +4408,7 @@ const eventDirectoryColumns = [
   { key: "modifiedAt", label: "Date modified", kind: "date" },
 ] as const;
 
-function EventDirectory({ events, eventFeedbackById, status, error, onOpenEvent, onRetry, onRefresh }) {
-  const [sort, setSort] = useState<{ key: typeof eventDirectoryColumns[number]["key"]; direction: "asc" | "desc" }>({
-    key: "date",
-    direction: "desc",
-  });
+function EventDirectory({ events, eventFeedbackById, sort, status, error, onOpenEvent, onRetry, onRefresh, onSortChange }) {
   const rows = useMemo(() => events.map((event) => {
     const feedback = eventFeedbackById[event.id];
     return feedback?.status === "ready"
@@ -4421,8 +4442,8 @@ function EventDirectory({ events, eventFeedbackById, status, error, onOpenEvent,
   }, [rows, sort]);
 
   const setSortKey = (key: typeof eventDirectoryColumns[number]["key"]) => {
-    setSort((current) => current.key === key
-      ? { key, direction: current.direction === "asc" ? "desc" : "asc" }
+    onSortChange(sort.key === key
+      ? { key, direction: sort.direction === "asc" ? "desc" : "asc" }
       : { key, direction: key === "title" ? "asc" : "desc" });
   };
 
@@ -6131,6 +6152,12 @@ function InviteTab({
   onSend,
   onInvitePeople,
   onMergePeople,
+  openTagPersonId,
+  savingTagPersonId,
+  onOpenTags,
+  onCloseTags,
+  onChangeTags,
+  onCreateTag,
   request,
   metadata,
   onLoadMetadata,
@@ -6156,6 +6183,8 @@ function InviteTab({
   const inviteBuilderRef = useRef<HTMLElement | null>(null);
   const directoryScrollRef = useRef<HTMLDivElement | null>(null);
   const audienceLoadMoreRef = useRef<HTMLDivElement | null>(null);
+  const audiencePageCriteriaKeyRef = useRef("");
+  const excludedPersonIdsRef = useRef<string[]>([]);
   const tagGroups = metadata.tagGroups || [];
   const superTagGroups = metadata.superTagGroups || [];
   const tagsLoading = metadata.tagsStatus === "idle" || metadata.tagsStatus === "loading";
@@ -6191,6 +6220,10 @@ function InviteTab({
     superTagIdByName,
   ]);
   const audienceCriteriaKey = useMemo(() => JSON.stringify(audienceCriteria), [audienceCriteria]);
+  const audiencePageCriteriaKey = useMemo(() => JSON.stringify({
+    ...audienceCriteria,
+    excludePersonIds: [],
+  }), [audienceCriteria]);
   const confirmationKey = `${audienceCriteriaKey}:${message}:${targetEvents.map((event) => event.id).join(",")}`;
 
   useEffect(() => setConfirmationStatus("idle"), [confirmationKey]);
@@ -6213,14 +6246,38 @@ function InviteTab({
       return;
     }
     const controller = new AbortController();
-    setDirectorySearch({ query, loading: true, results: [], error: "" });
+    setDirectorySearch((current) => ({
+      query,
+      loading: true,
+      results: current.query === query ? current.results : [],
+      error: "",
+    }));
     const timeout = window.setTimeout(async () => {
       try {
-        const params = new URLSearchParams({ q: query, scope: "name", limit: "30" });
-        const response = await request(`/api/search/people?${params.toString()}`, { cache: "no-store", signal: controller.signal });
+        const response = stage === "subtract"
+          ? await request("/api/audience/resolve", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                criteria: audienceCriteria,
+                query,
+                cursor: "",
+                pageSize: 30,
+                includeTotals: false,
+              }),
+              signal: controller.signal,
+            })
+          : await request(`/api/search/people?${new URLSearchParams({ q: query, scope: "name", limit: "30" }).toString()}`, {
+              cache: "no-store",
+              signal: controller.signal,
+            });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Unable to search people.");
-        if (!controller.signal.aborted) setDirectorySearch({ query, loading: false, results: data.people || [], error: "" });
+        if (!controller.signal.aborted) {
+          const people = data.people || [];
+          onMergePeople(people);
+          setDirectorySearch({ query, loading: false, results: people, error: "" });
+        }
       } catch (error: any) {
         if (!controller.signal.aborted) setDirectorySearch({ query, loading: false, results: [], error: error.message || "Unable to search people." });
       }
@@ -6229,10 +6286,20 @@ function InviteTab({
       window.clearTimeout(timeout);
       controller.abort();
     };
-  }, [directoryQuery]);
+  }, [directoryQuery, stage, audienceCriteriaKey]);
 
   useEffect(() => {
+    const previousPageCriteriaKey = audiencePageCriteriaKeyRef.current;
+    const previousExcludedPersonIds = excludedPersonIdsRef.current;
+    const currentExcludedPersonIds = audienceCriteria.excludePersonIds;
+    const onlyAddedIndividualExclusions = previousPageCriteriaKey === audiencePageCriteriaKey
+      && currentExcludedPersonIds.length > previousExcludedPersonIds.length
+      && previousExcludedPersonIds.every((personId) => currentExcludedPersonIds.includes(personId));
+    audiencePageCriteriaKeyRef.current = audiencePageCriteriaKey;
+    excludedPersonIdsRef.current = currentExcludedPersonIds;
+
     const hasIncludes = audienceCriteria.includeTagIds.length
+      || audienceCriteria.includeSuperTagIds.length
       || audienceCriteria.includeEventCohorts.length
       || audienceCriteria.includePersonIds.length;
     if (!hasIncludes) {
@@ -6240,33 +6307,39 @@ function InviteTab({
       return;
     }
     const controller = new AbortController();
-    setResolvedAudience({ loading: true, loadingMore: false, countLoading: true, people: [], total: 0, matchedTotal: 0, nextCursor: null, error: "" });
-    void (async () => {
-      try {
-        const response = await request("/api/audience/resolve", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ criteria: audienceCriteria, cursor: "", pageSize: 10, includeTotals: false }),
-          signal: controller.signal,
-        });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "Unable to load the selected audience.");
-        if (!controller.signal.aborted) {
-          setResolvedAudience((current) => ({
-            ...current,
-            loading: false,
-            loadingMore: false,
-            people: data.people || [],
-            nextCursor: data.pageInfo?.nextCursor ?? null,
-            error: "",
-          }));
+    if (onlyAddedIndividualExclusions) {
+      setResolvedAudience((current) => ({ ...current, loading: false, loadingMore: false, countLoading: true, error: "" }));
+    } else {
+      setResolvedAudience({ loading: true, loadingMore: false, countLoading: true, people: [], total: 0, matchedTotal: 0, nextCursor: null, error: "" });
+      void (async () => {
+        try {
+          const response = await request("/api/audience/resolve", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ criteria: audienceCriteria, cursor: "", pageSize: 10, includeTotals: false }),
+            signal: controller.signal,
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || "Unable to load the selected audience.");
+          if (!controller.signal.aborted) {
+            const people = data.people || [];
+            onMergePeople(people);
+            setResolvedAudience((current) => ({
+              ...current,
+              loading: false,
+              loadingMore: false,
+              people,
+              nextCursor: data.pageInfo?.nextCursor ?? null,
+              error: "",
+            }));
+          }
+        } catch (error) {
+          if (!controller.signal.aborted) {
+            setResolvedAudience((current) => ({ ...current, loading: false, loadingMore: false, people: [], nextCursor: null, error: error.message || "Unable to load the selected audience." }));
+          }
         }
-      } catch (error) {
-        if (!controller.signal.aborted) {
-          setResolvedAudience((current) => ({ ...current, loading: false, loadingMore: false, people: [], nextCursor: null, error: error.message || "Unable to load the selected audience." }));
-        }
-      }
-    })();
+      })();
+    }
     void (async () => {
       try {
         const response = await request("/api/audience/resolve", {
@@ -6290,7 +6363,7 @@ function InviteTab({
       }
     })();
     return () => controller.abort();
-  }, [audienceCriteriaKey]);
+  }, [audienceCriteriaKey, audiencePageCriteriaKey]);
 
   const includeTags = state.invite.includeTags || [];
   const excludeTags = state.invite.excludeTags || [];
@@ -6301,7 +6374,13 @@ function InviteTab({
   const directoryRows = directoryQuery.trim()
     ? directorySearch.results
     : resolvedAudience.people;
-  const renderedDirectoryRows = directoryRows;
+  const statePeopleById = new Map(state.people.map((person) => [person.id, person]));
+  const renderedDirectoryRows = directoryRows.map((entry) => ({
+    ...entry,
+    person: statePeopleById.has(entry.person?.id)
+      ? mergePersonRecord(entry.person, statePeopleById.get(entry.person.id))
+      : entry.person,
+  }));
   const audienceTotal = resolvedAudience.total;
   const matchedAudienceTotal = resolvedAudience.matchedTotal;
   const existingAudienceTotal = Math.max(0, matchedAudienceTotal - audienceTotal);
@@ -6317,10 +6396,12 @@ function InviteTab({
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Unable to load more recipients.");
+      const people = data.people || [];
+      onMergePeople(people);
       setResolvedAudience((current) => ({
         ...current,
         loadingMore: false,
-        people: [...current.people, ...(data.people || [])],
+        people: [...current.people, ...people],
         nextCursor: data.pageInfo?.nextCursor ?? null,
       }));
     } catch (error: any) {
@@ -6425,6 +6506,23 @@ function InviteTab({
     if (directorySelectedPeople.includes(person.id)) {
       onSetInvite(directorySelectionKey, directorySelectedPeople.filter((personId) => personId !== person.id));
       return;
+    }
+    if (stage === "subtract") {
+      const scrollTop = directoryScrollRef.current?.scrollTop || 0;
+      if (directoryQuery.trim()) {
+        setDirectorySearch((current) => ({
+          ...current,
+          results: current.results.filter((entry) => entry.person?.id !== person.id),
+        }));
+      } else {
+        setResolvedAudience((current) => ({
+          ...current,
+          people: current.people.filter((entry) => entry.person?.id !== person.id),
+        }));
+      }
+      window.requestAnimationFrame(() => {
+        if (directoryScrollRef.current) directoryScrollRef.current.scrollTop = scrollTop;
+      });
     }
     onMergePeople([person]);
     onSetInvite(directorySelectionKey, [...directorySelectedPeople, person.id]);
@@ -6577,7 +6675,7 @@ function InviteTab({
         <section className="invite-directory">
           <div className="invite-directory-head">
             <div><p className="eyebrow">People directory</p><h3>{directoryQuery.trim() ? "Search results" : "Selected recipients"}</h3>{!directoryQuery.trim() && existingAudienceTotal ? <small>{matchedAudienceTotal.toLocaleString()} matched · {existingAudienceTotal.toLocaleString()} already in this event</small> : null}</div>
-            <label className="invite-directory-search"><Search size={17} aria-hidden="true" /><input type="search" value={directoryQuery} placeholder="Search everyone by name" onChange={(event) => setDirectoryQuery(event.target.value)} />{directoryQuery ? <button className="plain" type="button" aria-label="Clear search" onClick={() => setDirectoryQuery("")}><X size={15} /></button> : null}</label>
+            <label className="invite-directory-search"><Search size={17} aria-hidden="true" /><input type="search" value={directoryQuery} placeholder={stage === "subtract" ? "Search selected recipients" : "Search everyone by name"} onChange={(event) => setDirectoryQuery(event.target.value)} />{directoryQuery ? <button className="plain" type="button" aria-label="Clear search" onClick={() => setDirectoryQuery("")}><X size={15} /></button> : null}</label>
           </div>
           <div className="table-wrap invite-directory-table-wrap" ref={directoryScrollRef}>
             <table className="invite-directory-table">
@@ -6599,7 +6697,18 @@ function InviteTab({
                   return (
                   <tr className={rowAlreadyInTargetEvent ? "invite-directory-row-ineligible" : ""} key={person.id}>
                     <td><PersonButton person={person} onAvatarClick={onAvatarClick} onClick={() => { onMergePeople([person]); onOpenPerson(person.id); }} /></td>
-                    <td><InvitePersonTags person={person} definitions={state.tagDefinitions} /></td>
+                    <td className="tag-cell" onClick={(event) => event.stopPropagation()}>
+                      <PersonTags
+                        person={person}
+                        definitions={state.tagDefinitions}
+                        open={openTagPersonId === person.id}
+                        saving={savingTagPersonId === person.id}
+                        onOpen={() => onOpenTags(openTagPersonId === person.id ? "" : person.id)}
+                        onClose={onCloseTags}
+                        onChange={(tags, mutation) => onChangeTags(person, tags, mutation)}
+                        onCreate={(name, tags) => onCreateTag(person, name, tags)}
+                      />
+                    </td>
                     <td className="invite-count-cell">{eventCounts?.attended || 0}</td>
                     <td className="invite-count-cell">{eventCounts?.registered || 0}</td>
                     <td><button className={`button small invite-row-action ${manuallySelected || directoryLocked ? "active" : ""}`} type="button" title={rowAlreadyInTargetEvent ? "Already part of the selected event" : manuallySelected && !directoryLocked ? "Click to undo" : undefined} disabled={rowAlreadyInTargetEvent || directoryLocked} onClick={() => toggleDirectoryPerson(person)}>{rowAlreadyInTargetEvent || manuallySelected || directoryLocked ? <CircleCheck size={14} /> : null}{rowAlreadyInTargetEvent ? existingStatusLabel : directoryLocked ? "Selected" : manuallySelected ? (stage === "subtract" ? "Subtracted" : "Added") : `${stage === "subtract" ? "−" : "+"} ${directoryActionLabel}`}</button></td>
@@ -6769,15 +6878,6 @@ function eventCohortCount(event, cohort, indexedCounts: any = null) {
     if (cohort === "invited") return hasInvitationEvidence(guest);
     return isRegisteredGuest(guest);
   }).length;
-}
-
-function InvitePersonTags({ person, definitions }) {
-  const tags = orderedPersonTags(person);
-  if (!tags.length) return <span className="person-email">No tags</span>;
-  return <div className="invite-person-tags">{tags.slice(0, 2).map((tag) => {
-    const definition = tagDefinitionForName(definitions, tag);
-    return <span className="tag-chip" style={tagChipStyle(definition.color)} key={tag}>{tagDisplayName(tag)}</span>;
-  })}{tags.length > 2 ? <span className="tag-chip tag-chip-more">+{tags.length - 2}</span> : null}</div>;
 }
 
 function ManualAudienceSearch({ mode, selected, request, onMergePeople, onChange }) {
@@ -9427,6 +9527,8 @@ function activityRecordsFromHistory(records) {
     eventCategory: event.category,
     eventLocation: event.location,
     eventUrl: event.lumaUrl,
+    eventCancelled: event.cancelled === true,
+    eventCatalogActive: event.catalogActive,
     lumaGuestId: guest.lumaGuestId || guest.personId,
     status: guest.status,
     registeredAt: guest.registeredAt,
@@ -9850,9 +9952,10 @@ function getPersonHistory(state, personId) {
 }
 
 function personHistoryFromRecords(records) {
-  const attendedRecords = records.filter(({ guest }) => guest.status === "checked_in" || Boolean(guest.checkedInAt));
-  const registeredRecords = records.filter(({ guest }) => isRegisteredGuest(guest));
-  const noShowRecords = records.filter(({ guest }) => guest.status === "no_show");
+  const countableRecords = records.filter(({ event }) => event.cancelled !== true && event.catalogActive !== false);
+  const attendedRecords = countableRecords.filter(({ guest }) => guest.status === "checked_in" || Boolean(guest.checkedInAt));
+  const registeredRecords = countableRecords.filter(({ guest }) => isRegisteredGuest(guest));
+  const noShowRecords = countableRecords.filter(({ guest }) => guest.status === "no_show");
   const categories = {};
   attendedRecords.forEach(({ event }) => {
     categories[event.category] = (categories[event.category] || 0) + 1;

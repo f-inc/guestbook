@@ -3,6 +3,8 @@ type ActivityRecord = {
   checkedInAt?: unknown;
   eventDate?: unknown;
   eventStartsAt?: unknown;
+  eventCancelled?: unknown;
+  eventCatalogActive?: unknown;
   invitedAt?: unknown;
   lumaApprovalStatus?: unknown;
   registeredAt?: unknown;
@@ -11,6 +13,7 @@ type ActivityRecord = {
 
 export function activityRecordStatus(record: ActivityRecord, now = new Date()): string | undefined {
   if (record.checkedInAt || record.status === "checked_in") return "checked_in";
+  if (eventWasCancelledOrDeleted(record)) return "cancelled";
 
   const isRegistered = Boolean(record.registeredAt || ["registered", "going", "no_show"].includes(record.status));
   if (isRegistered) {
@@ -22,6 +25,10 @@ export function activityRecordStatus(record: ActivityRecord, now = new Date()): 
 
   if (record.status === "invited" || record.invitedAt) return "invited";
   return record.status;
+}
+
+export function eventWasCancelledOrDeleted(record: ActivityRecord): boolean {
+  return record.eventCancelled === true || record.eventCatalogActive === false;
 }
 
 export function eventHasStarted(record: ActivityRecord, now = new Date()): boolean {

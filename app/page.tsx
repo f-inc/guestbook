@@ -273,6 +273,7 @@ export default function Home() {
   const [searchOpen, setSearchOpen] = useState(false);
   const searchOpenRef = useRef(false);
   const universalSearchClosedAtRef = useRef(0);
+  const universalSearchScrollTopRef = useRef(0);
   const [universalSearchExpanded, setUniversalSearchExpanded] = useState(false);
   const [universalQuery, setUniversalQuery] = useState("");
   const [universalPeopleFilters, setUniversalPeopleFilters] = useState(() => emptyPeopleSearchFilters());
@@ -578,6 +579,7 @@ export default function Home() {
     const hasFreshCache = universalSearchClosedAtRef.current > 0
       && Date.now() - universalSearchClosedAtRef.current <= UNIVERSAL_SEARCH_CACHE_TTL_MS;
     if (!hasFreshCache) {
+      universalSearchScrollTopRef.current = 0;
       setUniversalQuery("");
       setUniversalPeopleFilters(emptyPeopleSearchFilters());
       setUniversalPeopleSearch({ query: "", status: "idle", results: [], error: "", hasMore: false, nextOffset: 0 });
@@ -598,6 +600,7 @@ export default function Home() {
   const clearUniversalSearch = () => {
     universalSearchClosedAtRef.current = 0;
     searchOpenRef.current = false;
+    universalSearchScrollTopRef.current = 0;
     setUniversalQuery("");
     setUniversalPeopleFilters(emptyPeopleSearchFilters());
     setUniversalPeopleSearch({ query: "", status: "idle", results: [], error: "", hasMore: false, nextOffset: 0 });
@@ -4359,12 +4362,19 @@ export default function Home() {
           peopleSearchError={activeUniversalPeopleSearch?.error || ""}
           hasMorePeople={Boolean(activeUniversalPeopleSearch?.hasMore)}
           loadingMorePeople={activeUniversalPeopleSearch?.status === "loadingMore"}
+          cachedScrollTop={universalSearchScrollTopRef.current}
           openTagPersonId={openTagPersonId}
           savingTagPersonId={savingTagPersonId}
           savingPhonePersonId={savingPhonePersonId}
           inputRef={universalSearchInputRef}
-          onQueryChange={setUniversalQuery}
-          onPeopleFiltersChange={setUniversalPeopleFilters}
+          onQueryChange={(value) => {
+            universalSearchScrollTopRef.current = 0;
+            setUniversalQuery(value);
+          }}
+          onPeopleFiltersChange={(value) => {
+            universalSearchScrollTopRef.current = 0;
+            setUniversalPeopleFilters(value);
+          }}
           onClose={closeUniversalSearch}
           onSelect={selectUniversalResult}
           onAvatarClick={setAvatarPreview}
@@ -4375,6 +4385,9 @@ export default function Home() {
           onCreateTag={(person, name, tags) => createAndAssignTag(person.id, name, tags, "")}
           onSavePhone={savePersonPhone}
           onLoadMorePeople={loadMoreUniversalPeople}
+          onScrollPositionChange={(scrollTop) => {
+            universalSearchScrollTopRef.current = scrollTop;
+          }}
         />
       ) : null}
 
@@ -6018,6 +6031,7 @@ function UniversalSearchModal({
   peopleSearchError,
   hasMorePeople,
   loadingMorePeople,
+  cachedScrollTop,
   openTagPersonId,
   savingTagPersonId,
   savingPhonePersonId,
@@ -6034,6 +6048,7 @@ function UniversalSearchModal({
   onCreateTag,
   onSavePhone,
   onLoadMorePeople,
+  onScrollPositionChange,
 }) {
   const hasQuery = query.trim().length > 0;
   const hasPeopleFilters = peopleSearchFiltersActive(peopleFilters);
@@ -6063,11 +6078,13 @@ function UniversalSearchModal({
             {!hasCriteria ? null : resultCount || peopleSearchStatus === "loading" || peopleSearchError ? (
               <div className="search-results">
                 <PeopleSearchTable
+                  key={`${query}\u0000${peopleSearchFiltersKey(peopleFilters)}`}
                   results={results.people}
                   definitions={tagDefinitions}
                   loading={peopleSearchStatus === "loading"}
                   loadingMore={loadingMorePeople}
                   hasMore={hasMorePeople}
+                  initialScrollTop={cachedScrollTop}
                   error={peopleSearchError}
                   openTagPersonId={openTagPersonId}
                   savingTagPersonId={savingTagPersonId}
@@ -6081,6 +6098,7 @@ function UniversalSearchModal({
                   onCreateTag={onCreateTag}
                   onSavePhone={onSavePhone}
                   onLoadMore={onLoadMorePeople}
+                  onScrollPositionChange={onScrollPositionChange}
                 />
               </div>
             ) : (
@@ -6179,6 +6197,7 @@ function PeopleSearchTable({
   loading,
   loadingMore,
   hasMore,
+  initialScrollTop,
   error,
   openTagPersonId,
   savingTagPersonId,
@@ -6192,7 +6211,13 @@ function PeopleSearchTable({
   onCreateTag,
   onSavePhone,
   onLoadMore,
+  onScrollPositionChange,
 }) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (!scrollRef.current || !initialScrollTop) return;
+    scrollRef.current.scrollTop = initialScrollTop;
+  }, []);
   if (!results.length && !loading && !error) return null;
   return (
     <section className="search-section search-people-section">
@@ -6202,9 +6227,11 @@ function PeopleSearchTable({
       </div>
       {results.length ? (
         <div
+          ref={scrollRef}
           className="table-wrap search-people-table-wrap"
           onScroll={(event) => {
             const target = event.currentTarget;
+            onScrollPositionChange(target.scrollTop);
             if (hasMore && !loadingMore && target.scrollHeight - target.scrollTop - target.clientHeight < 320) onLoadMore();
           }}
         >

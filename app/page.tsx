@@ -156,6 +156,7 @@ const LUMA_SESSION_TOKEN_STORAGE_KEY = "guestbook.lumaAuthSession";
 const SESSION_KEY_HEADER = "x-guestbook-session-key";
 const SESSION_KEY_COOKIE = "guestbook_session_key";
 const UNIVERSAL_PEOPLE_SEARCH_DEBOUNCE_MS = 180;
+const UNIVERSAL_SEARCH_CACHE_TTL_MS = 60_000;
 const INVITE_METADATA_CLIENT_CACHE_MS = 120_000;
 const TAG_COLOR_PALETTE = ["#0f766e", "#2563eb", "#7c3aed", "#db2777", "#dc2626", "#d97706", "#65a30d", "#475569"];
 const AUTOMATIC_TAG_EMOJIS = {
@@ -270,10 +271,13 @@ export default function Home() {
   const [tagSettingsSaving, setTagSettingsSaving] = useState(false);
   const [superTags, setSuperTags] = useState<any[]>([]);
   const [searchOpen, setSearchOpen] = useState(false);
+  const searchOpenRef = useRef(false);
+  const universalSearchClosedAtRef = useRef(0);
   const [universalSearchExpanded, setUniversalSearchExpanded] = useState(false);
   const [universalQuery, setUniversalQuery] = useState("");
   const [universalPeopleFilters, setUniversalPeopleFilters] = useState(() => emptyPeopleSearchFilters());
-  const [universalPeopleSearch, setUniversalPeopleSearch] = useState({ query: "", status: "idle", results: [], error: "" });
+  const [universalPeopleSearch, setUniversalPeopleSearch] = useState({ query: "", status: "idle", results: [], error: "", hasMore: false, nextOffset: 0 });
+  const universalPeopleLoadMoreInFlightRef = useRef(false);
   const universalPeopleFiltersKey = peopleSearchFiltersKey(universalPeopleFilters);
   const hasUniversalPeopleFilters = peopleSearchFiltersActive(universalPeopleFilters);
   const universalSearchInputRef = useRef(null);
@@ -419,7 +423,7 @@ export default function Home() {
     inviteMetadataRequestsRef.current = { tags: null, events: null };
     setInviteMetadata(clearedInviteMetadata);
     setActivityTraces({});
-    setSearchOpen(false);
+    clearUniversalSearch();
     setProfilePanelOpen(false);
     setAvatarPreview(null);
   };
@@ -567,12 +571,39 @@ export default function Home() {
   };
 
   const openUniversalSearch = () => {
-    setUniversalQuery("");
-    setUniversalPeopleFilters(emptyPeopleSearchFilters());
-    setUniversalPeopleSearch({ query: "", status: "idle", results: [], error: "" });
-    setUniversalSearchExpanded(false);
+    if (searchOpenRef.current) {
+      window.requestAnimationFrame(() => universalSearchInputRef.current?.focus());
+      return;
+    }
+    const hasFreshCache = universalSearchClosedAtRef.current > 0
+      && Date.now() - universalSearchClosedAtRef.current <= UNIVERSAL_SEARCH_CACHE_TTL_MS;
+    if (!hasFreshCache) {
+      setUniversalQuery("");
+      setUniversalPeopleFilters(emptyPeopleSearchFilters());
+      setUniversalPeopleSearch({ query: "", status: "idle", results: [], error: "", hasMore: false, nextOffset: 0 });
+      setUniversalSearchExpanded(false);
+    }
+    searchOpenRef.current = true;
     setOpenTagPersonId("");
     setSearchOpen(true);
+  };
+
+  const closeUniversalSearch = () => {
+    universalSearchClosedAtRef.current = Date.now();
+    searchOpenRef.current = false;
+    setOpenTagPersonId("");
+    setSearchOpen(false);
+  };
+
+  const clearUniversalSearch = () => {
+    universalSearchClosedAtRef.current = 0;
+    searchOpenRef.current = false;
+    setUniversalQuery("");
+    setUniversalPeopleFilters(emptyPeopleSearchFilters());
+    setUniversalPeopleSearch({ query: "", status: "idle", results: [], error: "", hasMore: false, nextOffset: 0 });
+    setUniversalSearchExpanded(false);
+    setOpenTagPersonId("");
+    setSearchOpen(false);
   };
 
   useEffect(() => {
@@ -594,7 +625,7 @@ export default function Home() {
           setAvatarPreview(null);
           return;
         }
-        setSearchOpen(false);
+        closeUniversalSearch();
         setProfilePanelOpen(false);
         setGuestStatusDraft((current) => current?.submitting ? current : null);
         setGuestNoteDraft((current) => current?.saving ? current : null);
@@ -614,14 +645,23 @@ export default function Home() {
   useEffect(() => {
     const query = universalQuery.trim().toLocaleLowerCase();
     const requestKey = `${query}\u0000${universalPeopleFiltersKey}`;
-    if (!searchOpen || (!query && !hasUniversalPeopleFilters)) {
-      setUniversalPeopleSearch({ query: "", status: "idle", results: [], error: "" });
+    if (!searchOpen) return;
+    if (!query && !hasUniversalPeopleFilters) {
+      setUniversalPeopleSearch({ query: "", status: "idle", results: [], error: "", hasMore: false, nextOffset: 0 });
       setUniversalSearchExpanded(false);
+      return;
+    }
+    const canReuseCachedResults = universalPeopleSearch.query === requestKey
+      && universalPeopleSearch.status === "ready"
+      && universalSearchClosedAtRef.current > 0
+      && Date.now() - universalSearchClosedAtRef.current <= UNIVERSAL_SEARCH_CACHE_TTL_MS;
+    if (canReuseCachedResults) {
+      setUniversalSearchExpanded(true);
       return;
     }
 
     const controller = new AbortController();
-    setUniversalPeopleSearch({ query: requestKey, status: "loading", results: [], error: "" });
+    setUniversalPeopleSearch({ query: requestKey, status: "loading", results: [], error: "", hasMore: false, nextOffset: 0 });
     const timeout = window.setTimeout(async () => {
       setUniversalSearchExpanded(true);
       try {
@@ -639,11 +679,18 @@ export default function Home() {
         if (!controller.signal.aborted) {
           const results = Array.isArray(data.people) ? data.people : [];
           mergeIndexedPeople(results);
-          setUniversalPeopleSearch({ query: requestKey, status: "ready", results, error: "" });
+          setUniversalPeopleSearch({
+            query: requestKey,
+            status: "ready",
+            results,
+            error: "",
+            hasMore: Boolean(data.hasMore),
+            nextOffset: Number(data.nextOffset) || results.length,
+          });
         }
       } catch (error) {
         if (controller.signal.aborted) return;
-        setUniversalPeopleSearch({ query: requestKey, status: "error", results: [], error: error.message || "Unable to search people." });
+        setUniversalPeopleSearch({ query: requestKey, status: "error", results: [], error: error.message || "Unable to search people.", hasMore: false, nextOffset: 0 });
       }
     }, UNIVERSAL_PEOPLE_SEARCH_DEBOUNCE_MS);
 
@@ -652,6 +699,57 @@ export default function Home() {
       controller.abort();
     };
   }, [searchOpen, universalQuery, universalPeopleFiltersKey, sessionKey]);
+
+  const loadMoreUniversalPeople = async () => {
+    const query = universalQuery.trim().toLocaleLowerCase();
+    const requestKey = `${query}\u0000${universalPeopleFiltersKey}`;
+    const current = universalPeopleSearch;
+    if (
+      universalPeopleLoadMoreInFlightRef.current
+      || current.query !== requestKey
+      || current.status !== "ready"
+      || !current.hasMore
+    ) return;
+
+    universalPeopleLoadMoreInFlightRef.current = true;
+    setUniversalPeopleSearch((value) => value.query === requestKey ? { ...value, status: "loadingMore", error: "" } : value);
+    try {
+      const params = new URLSearchParams({
+        q: universalQuery.trim(),
+        limit: "20",
+        offset: String(current.nextOffset || current.results.length),
+      });
+      universalPeopleFilters.includedTags.forEach((tag) => params.append("tag", tag));
+      universalPeopleFilters.excludedTags.forEach((tag) => params.append("exclude_tag", tag));
+      params.set("tag_mode", universalPeopleFilters.tagMode);
+      params.set("comments", universalPeopleFilters.comments);
+      const response = await apiFetch(`/api/search/people?${params.toString()}`, { cache: "no-store" });
+      const data: any = await response.json();
+      if (!response.ok) throw new Error(data.error || "Unable to load more people.");
+      const nextResults = Array.isArray(data.people) ? data.people : [];
+      mergeIndexedPeople(nextResults);
+      setUniversalPeopleSearch((value) => {
+        if (value.query !== requestKey) return value;
+        const peopleById = new Map(value.results.map((entry) => [entry?.person?.id, entry]));
+        nextResults.forEach((entry) => peopleById.set(entry?.person?.id, entry));
+        peopleById.delete(undefined);
+        return {
+          ...value,
+          status: "ready",
+          results: [...peopleById.values()],
+          error: "",
+          hasMore: Boolean(data.hasMore),
+          nextOffset: Number(data.nextOffset) || current.nextOffset + nextResults.length,
+        };
+      });
+    } catch (error) {
+      setUniversalPeopleSearch((value) => value.query === requestKey
+        ? { ...value, status: "ready", error: error.message || "Unable to load more people." }
+        : value);
+    } finally {
+      universalPeopleLoadMoreInFlightRef.current = false;
+    }
+  };
 
   useEffect(() => {
     if (!apiState.message) return;
@@ -807,7 +905,7 @@ export default function Home() {
   const normalizedUniversalQuery = universalQuery.trim().toLocaleLowerCase();
   const universalPeopleRequestKey = `${normalizedUniversalQuery}\u0000${universalPeopleFiltersKey}`;
   const activeUniversalPeopleSearch = universalPeopleSearch.query === universalPeopleRequestKey ? universalPeopleSearch : null;
-  const activeUniversalIndexedPeople = activeUniversalPeopleSearch?.status === "ready"
+  const activeUniversalIndexedPeople = activeUniversalPeopleSearch?.status === "ready" || activeUniversalPeopleSearch?.status === "loadingMore"
     ? activeUniversalPeopleSearch.results
     : activeUniversalPeopleSearch
       ? []
@@ -2403,6 +2501,24 @@ export default function Home() {
     }
   };
 
+  const applyBulkTaggedPeople = (people) => {
+    if (!Array.isArray(people) || !people.length) return;
+    const updates = new Map(people.map((person) => [person.personId, person]));
+    setState((current) => normalizeState({
+      ...current,
+      people: current.people.map((person) => {
+        const update: any = updates.get(person.id);
+        return update ? {
+          ...person,
+          tags: Array.isArray(update.tags) ? update.tags : person.tags,
+          manualTags: Array.isArray(update.manualTags) ? update.manualTags : person.manualTags,
+          automaticTags: Array.isArray(update.automaticTags) ? update.automaticTags : person.automaticTags,
+        } : person;
+      }),
+    }));
+    void loadInviteMetadata("tags", { force: true }).catch(() => {});
+  };
+
   useEffect(() => {
     if (!profilePanelOpen || selectedPerson?.source !== "luma" || selectedTrace.status !== "idle") return;
     tracePersonActivity(selectedPerson);
@@ -3497,7 +3613,7 @@ export default function Home() {
       }
     });
     setProfilePanelOpen(true);
-    setSearchOpen(false);
+    closeUniversalSearch();
   };
 
   if (sessionStatus !== "ready") {
@@ -3528,8 +3644,8 @@ export default function Home() {
         </button>
         <div className="topbar-actions">
           <button className="button" type="button" onClick={openTagSettings}>
-            <Settings2 size={17} aria-hidden="true" />
-            Tag settings
+            <Tag size={17} aria-hidden="true" />
+            Tags
           </button>
           <button className="button" type="button" onClick={() => lockSession()}>
             <Lock size={17} aria-hidden="true" />
@@ -4241,13 +4357,15 @@ export default function Home() {
           peopleFilters={universalPeopleFilters}
           peopleSearchStatus={activeUniversalPeopleSearch?.status || (normalizedUniversalQuery || hasUniversalPeopleFilters ? "loading" : "idle")}
           peopleSearchError={activeUniversalPeopleSearch?.error || ""}
+          hasMorePeople={Boolean(activeUniversalPeopleSearch?.hasMore)}
+          loadingMorePeople={activeUniversalPeopleSearch?.status === "loadingMore"}
           openTagPersonId={openTagPersonId}
           savingTagPersonId={savingTagPersonId}
           savingPhonePersonId={savingPhonePersonId}
           inputRef={universalSearchInputRef}
           onQueryChange={setUniversalQuery}
           onPeopleFiltersChange={setUniversalPeopleFilters}
-          onClose={() => setSearchOpen(false)}
+          onClose={closeUniversalSearch}
           onSelect={selectUniversalResult}
           onAvatarClick={setAvatarPreview}
           onOpenComments={openGuestNote}
@@ -4256,6 +4374,7 @@ export default function Home() {
           onChangeTags={(person, tags, mutation) => savePersonTags(person.id, tags, { ...mutation, eventId: "" })}
           onCreateTag={(person, name, tags) => createAndAssignTag(person.id, name, tags, "")}
           onSavePhone={savePersonPhone}
+          onLoadMorePeople={loadMoreUniversalPeople}
         />
       ) : null}
 
@@ -4381,12 +4500,14 @@ export default function Home() {
       ) : null}
 
       {tagSettingsOpen ? (
-        <TagSettingsDialog
+        <TagsDialog
           definitions={state.tagDefinitions}
           superTags={superTags}
           saving={tagSettingsSaving}
           onClose={() => setTagSettingsOpen(false)}
           onSave={saveTagSettings}
+          onBulkApplied={applyBulkTaggedPeople}
+          request={apiFetch}
         />
       ) : null}
     </div>
@@ -4878,13 +4999,6 @@ function LumaSessionTokenDialog({ draft, onChange, onClose, onSubmit, onSkip }) 
       : loadingFeedback
         ? "Luma feedback access"
         : "Luma check-in access";
-  const requestName = syncingReferrers
-    ? "get-guest-info"
-    : reinviting
-      ? "invite/send"
-      : loadingFeedback
-        ? "event/analytics/survey-responses"
-        : "update-check-in";
   return (
     <div className="modal-scrim" role="presentation" onMouseDown={onClose}>
       <form
@@ -4904,7 +5018,7 @@ function LumaSessionTokenDialog({ draft, onChange, onClose, onSubmit, onSkip }) 
                 ? "Luma only includes referrers in its signed-in guest details response."
                 : loadingFeedback
                   ? "Luma only exposes event ratings and comments to signed-in event managers."
-                  : "This private Luma action needs the signed-in session header."} Paste the <code>x-luma-auth-session</code> token to continue.
+                  : "This private Luma action needs your signed-in Luma session."} Paste the value of your Luma session cookie to continue.
             </p>
           </div>
           <button className="icon-button" type="button" disabled={draft.submitting} aria-label="Close Luma session token dialog" title="Close" onClick={onClose}>
@@ -4925,8 +5039,16 @@ function LumaSessionTokenDialog({ draft, onChange, onClose, onSubmit, onSkip }) 
             onChange={(event) => onChange((current) => current ? { ...current, token: event.target.value, error: "" } : current)}
           />
         </label>
-        <p className="luma-session-help">In Luma, open DevTools → Network, select a <code>{requestName}</code> request, then copy this request header’s value.</p>
-        <p className="luma-session-storage-note"><Lock size={14} aria-hidden="true" /> Persisted only in this browser’s local storage. Expired tokens are removed automatically.</p>
+        <div className="luma-session-help">
+          <p>Get the token from the browser where you are signed in to Luma:</p>
+          <ol>
+            <li>Open <code>luma.com</code>, then open Developer Tools.</li>
+            <li>Go to <strong>Application</strong> → <strong>Storage</strong> → <strong>Cookies</strong> → <code>https://luma.com</code>.</li>
+            <li>Find the cookie whose name starts with <code>luma.auth-session-</code>.</li>
+            <li>Copy its complete <strong>Value</strong> and paste it above.</li>
+          </ol>
+        </div>
+        <p className="luma-session-storage-note"><Lock size={14} aria-hidden="true" /> This value grants access to your Luma account. Do not share it. Guestbook stores it only in this browser’s local storage and removes it when Luma reports that it has expired.</p>
         {draft.error ? <p className="session-error" role="alert">{draft.error}</p> : null}
 
         <div className="dialog-actions">
@@ -5164,7 +5286,8 @@ function GuestNoteDialog({ draft, person, onChange, onClose, onSubmit, onEdit, o
   );
 }
 
-function TagSettingsDialog({ definitions, superTags, saving, onClose, onSave }) {
+function TagsDialog({ definitions, superTags, saving, onClose, onSave, onBulkApplied, request }) {
+  const [mode, setMode] = useState<"bulk" | "tags" | "supertags" | null>(null);
   const [drafts, setDrafts] = useState(() => definitions.map((tag) => ({ ...tag })));
   const [superTagDrafts, setSuperTagDrafts] = useState(() => superTags.map((tag) => ({
     ...tag,
@@ -5180,13 +5303,10 @@ function TagSettingsDialog({ definitions, superTags, saving, onClose, onSave }) 
     || superTagDrafts.some((tag) => !cleanTagName(tag.name)
       || !tag.rules.length
       || tag.rules.some((rule) => rule.phrase.trim().length < 2));
-  const updateSuperTag = (index, updates) => setSuperTagDrafts((current) => current.map((item, itemIndex) => (
-    itemIndex === index ? { ...item, ...updates } : item
-  )));
   return (
     <div className="modal-scrim" role="presentation" onMouseDown={onClose}>
       <form
-        className="event-dialog tag-settings-dialog"
+        className={`event-dialog tag-settings-dialog tag-settings-dialog-${mode || "home"}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby="tag-settings-title"
@@ -5196,116 +5316,268 @@ function TagSettingsDialog({ definitions, superTags, saving, onClose, onSave }) 
         }}
         onMouseDown={(event) => event.stopPropagation()}
       >
-        <div className="dialog-head">
+        <div className="dialog-head tag-dialog-head">
           <div>
-            <p className="eyebrow">Settings</p>
-            <h2 id="tag-settings-title">Tags</h2>
-            <p className="dialog-description">Manage tag styles and build reusable supertags from tag or event name phrases.</p>
+            <div className="tag-dialog-title">
+              <span><Tag size={16} aria-hidden="true" /></span>
+              <h2 id="tag-settings-title">Tags</h2>
+              {mode ? <><span className="tag-dialog-divider" aria-hidden="true">/</span><strong>{mode === "bulk" ? "Bulk Tag" : mode === "tags" ? "Manage Tags" : "Supertags"}</strong></> : null}
+            </div>
+            {!mode ? <p className="dialog-description">Organize and tag your audience.</p> : null}
           </div>
-          <button className="icon-button" type="button" disabled={saving} aria-label="Close tag settings" title="Close" onClick={onClose}>
+          <button className="icon-button" type="button" disabled={saving} aria-label="Close tags" title="Close" onClick={onClose}>
             <X size={18} aria-hidden="true" />
           </button>
         </div>
-        {drafts.length ? (
-          <div className="tag-settings-block">
-            <div className="tag-settings-section-head"><div><strong>Tags</strong><span>Names and colors update everywhere.</span></div></div>
+        <div className="tag-dialog-body">
+          {!mode ? <TagWorkspaceChooser onChoose={setMode} /> : (
+            <div className="tag-workspace-view">
+              <button className="tag-workspace-back" type="button" disabled={saving} onClick={() => setMode(null)}>
+                <ArrowLeft size={14} aria-hidden="true" /> All tools
+              </button>
+              {mode === "bulk" ? <BulkTagPanel definitions={definitions} onApplied={onBulkApplied} request={request} /> : null}
+              {mode === "tags" ? (
+                <ManageTagsPanel
+                  drafts={drafts}
+                  saving={saving}
+                  onChange={(index, previousName, updates) => {
+                    setDrafts((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, ...updates } : item));
+                    if (updates.name !== undefined) setSuperTagDrafts((current) => current.map((superTag) => ({
+                      ...superTag,
+                      rules: superTag.rules.map((rule) => rule.source === "tag_exact" && rule.phrase === previousName ? { ...rule, phrase: updates.name } : rule),
+                    })));
+                  }}
+                />
+              ) : null}
+              {mode === "supertags" ? <ManageSuperTagsPanel definitions={definitions} drafts={superTagDrafts} saving={saving} onChange={setSuperTagDrafts} /> : null}
+              {mode !== "bulk" ? (
+                <div className="dialog-actions tag-dialog-actions">
+                  <button className="button ghost compact" type="button" disabled={saving} onClick={onClose}>Cancel</button>
+                  <button className="button primary compact" type="submit" disabled={saving || hasInvalidName}>
+                    {saving ? <RefreshCw className="animate-spin" size={15} aria-hidden="true" /> : <Check size={15} aria-hidden="true" />}
+                    {saving ? "Saving..." : "Save"}
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          )}
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function TagWorkspaceChooser({ onChoose }) {
+  const tools = [
+    { id: "bulk", title: "Bulk Tag", description: "Match emails and apply a tag", icon: Users },
+    { id: "tags", title: "Manage Tags", description: "Edit names and colors", icon: Tag },
+    { id: "supertags", title: "Supertags", description: "Build reusable rule-based groups", icon: Layers3 },
+  ];
+  return (
+    <div className="tag-tool-grid">
+      {tools.map((tool) => {
+        const ToolIcon = tool.icon;
+        return (
+          <button className="tag-tool-card" type="button" key={tool.id} onClick={() => onChoose(tool.id)}>
+            <span className="tag-tool-icon"><ToolIcon size={22} aria-hidden="true" /></span>
+            <strong>{tool.title}</strong>
+            <span>{tool.description}</span>
+            <ArrowRight size={16} aria-hidden="true" />
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function BulkTagPanel({ definitions, onApplied, request: authenticatedRequest }) {
+  const manualDefinitions = definitions.filter((tag) => !tag.managed);
+  const [emails, setEmails] = useState("");
+  const [tagId, setTagId] = useState("");
+  const [status, setStatus] = useState<"editing" | "loading" | "preview" | "applying" | "success">("editing");
+  const [result, setResult] = useState<any>(null);
+  const [error, setError] = useState("");
+  const [copied, setCopied] = useState(false);
+  const request = async (action: "preview" | "apply") => {
+    setStatus(action === "preview" ? "loading" : "applying");
+    setError("");
+    try {
+      const response = await authenticatedRequest("/api/tags/bulk-email", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action, emails, ...(action === "apply" ? { tagId } : {}) }),
+      });
+      const data: any = await response.json();
+      if (!response.ok) throw new Error(data.error || "Unable to match emails.");
+      setResult(data);
+      setStatus(action === "apply" ? "success" : "preview");
+      if (action === "apply") onApplied(data.people || []);
+    } catch (requestError) {
+      setError(requestError.message);
+      setStatus(result ? "preview" : "editing");
+    }
+  };
+  const unmatched = Array.isArray(result?.unmatchedEmails) ? result.unmatchedEmails : [];
+  const copyUnmatched = async () => {
+    if (!unmatched.length) return;
+    const didCopy = await copyTextToClipboard(unmatched.join("\n"));
+    if (!didCopy) return;
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1600);
+  };
+  return (
+    <section className="bulk-tag-panel">
+      <div className="tag-settings-section-head">
+        <div><strong>Bulk Tag</strong><span>Paste emails → match people → apply a tag</span></div>
+      </div>
+      <label className="bulk-tag-field">
+        <span>Email list</span>
+        <textarea
+          rows={9}
+          value={emails}
+          disabled={["loading", "applying"].includes(status)}
+          placeholder={'person@example.com\nanother@example.com'}
+          onChange={(event) => {
+            setEmails(event.target.value);
+            setResult(null);
+            setError("");
+            setStatus("editing");
+          }}
+        />
+        <small>Up to 2,000 emails. Lines, commas, spaces, and semicolons work.</small>
+      </label>
+      {result ? (
+        <div className="bulk-tag-stats" aria-label="Email matching results">
+          <div><strong>{result.inputCount?.toLocaleString()}</strong><span>Unique inputs</span></div>
+          <div><strong>{result.matchedEmailCount?.toLocaleString()}</strong><span>Emails matched</span></div>
+          <div><strong>{result.matchedPeopleCount?.toLocaleString()}</strong><span>People matched</span></div>
+          <div><strong>{unmatched.length.toLocaleString()}</strong><span>Unmatched</span></div>
+        </div>
+      ) : null}
+      {status === "success" ? (
+        <div className="bulk-tag-success" role="status">
+          <CircleCheck size={18} aria-hidden="true" />
+          <div><strong>Tagging complete</strong><span>{result.taggedPeopleCount.toLocaleString()} people were processed successfully.</span></div>
+        </div>
+      ) : null}
+      {result && status !== "success" ? (
+        <label className="bulk-tag-field">
+          <span>Tag to apply</span>
+          <select value={tagId} disabled={status === "applying"} onChange={(event) => setTagId(event.target.value)}>
+            <option value="">Choose an existing tag</option>
+            {manualDefinitions.map((tag) => <option value={tag.id} key={tag.id}>{tagDisplayName(tag.name)}</option>)}
+          </select>
+          {!manualDefinitions.length ? <small>Create a manual tag before using Bulk Tag. Automatic tags cannot be assigned manually.</small> : null}
+        </label>
+      ) : null}
+      {status === "success" ? (
+        <div className="bulk-tag-unmatched">
+          <div className="tag-settings-section-head">
+            <div><strong>Failed to match</strong><span>{unmatched.length ? "These emails were not found in the Luma database." : "Every email matched."}</span></div>
+            {unmatched.length ? <button className="button compact" type="button" onClick={copyUnmatched}><Copy size={14} aria-hidden="true" /> {copied ? "Copied" : "Copy list"}</button> : null}
+          </div>
+          {unmatched.length ? <textarea readOnly rows={Math.min(8, Math.max(3, unmatched.length))} value={unmatched.join("\n")} aria-label="Unmatched emails" /> : null}
+        </div>
+      ) : null}
+      {error ? <p className="session-error" role="alert">{error}</p> : null}
+      <div className="dialog-actions">
+        {status !== "success" ? (
+          result ? (
+            <button className="button primary" type="button" disabled={!tagId || !result.matchedPeopleCount || status === "applying"} onClick={() => request("apply")}>
+              {status === "applying" ? <RefreshCw className="animate-spin" size={16} aria-hidden="true" /> : <Tag size={16} aria-hidden="true" />}
+              {status === "applying" ? "Applying tag..." : `Tag ${result.matchedPeopleCount.toLocaleString()} people`}
+            </button>
+          ) : (
+            <button className="button primary" type="button" disabled={!emails.trim() || status === "loading"} onClick={() => request("preview")}>
+              {status === "loading" ? <RefreshCw className="animate-spin" size={16} aria-hidden="true" /> : <Search size={16} aria-hidden="true" />}
+              {status === "loading" ? "Matching..." : "Match emails"}
+            </button>
+          )
+        ) : (
+          <button className="button" type="button" onClick={() => { setEmails(""); setTagId(""); setResult(null); setStatus("editing"); }}>Tag another list</button>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function ManageTagsPanel({ drafts, saving, onChange }) {
+  if (!drafts.length) return <div className="empty-state compact">Create your first tag from any guest’s Tags cell.</div>;
+  const manualTags = drafts.map((tag, index) => ({ tag, index })).filter(({ tag }) => !tag.managed);
+  const automaticTags = drafts.map((tag, index) => ({ tag, index })).filter(({ tag }) => tag.managed);
+  const renderTag = ({ tag, index }, automatic = false) => (
+    <div className={`tag-settings-row ${automatic ? "managed" : ""}`} key={tag.id}>
+      <label className="tag-settings-name">
+        <span className="sr-only">Tag name</span>
+        {automatic ? <Lock size={14} aria-label="Automatically managed tag" /> : null}
+        <input type="text" maxLength={40} value={tag.name} disabled={saving || automatic} aria-label={`Name for ${tag.name}`} onChange={(event) => onChange(index, tag.name, { name: event.target.value })} />
+      </label>
+      <div className="tag-color-options" aria-label={`Color for ${tag.name}`}>
+        {automatic ? (
+          <span className="tag-color-preview" style={{ backgroundColor: tag.color }} aria-hidden="true" />
+        ) : (
+          <label className="tag-custom-color" style={{ "--tag-color": tag.color } as CSSProperties} title="Choose a custom color">
+            <input type="color" value={tag.color} disabled={saving} aria-label={`Choose a custom color for ${tag.name}`} onChange={(event) => onChange(index, tag.name, { color: event.target.value })} />
+          </label>
+        )}
+      </div>
+    </div>
+  );
+  return (
+    <div className="tag-settings-block">
+      <div className="tag-settings-section-head"><div><strong>Manage Tags</strong><span>{manualTags.length} editable · {automaticTags.length} automatic</span></div></div>
+      <div className="tag-settings-groups">
+        <section className="tag-settings-group">
+          <div className="tag-settings-group-head"><strong>Manual Tags</strong><span>{manualTags.length}</span></div>
+          {manualTags.length ? <div className="tag-settings-list">{manualTags.map((item) => renderTag(item))}</div> : <div className="empty-state compact">No manual tags yet.</div>}
+        </section>
+        {automaticTags.length ? (
+          <section className="tag-settings-group automatic">
+            <div className="tag-settings-group-head"><strong>Automatic Tags</strong><span>{automaticTags.length}</span></div>
             <div className="tag-settings-list">
-              {drafts.map((tag, index) => (
-                <div className={`tag-settings-row ${tag.managed ? "managed" : ""}`} key={tag.id}>
-                  <span className="tag-color-preview" style={{ backgroundColor: tag.color }} aria-hidden="true" />
-                  <label className="tag-settings-name">
-                    <span className="sr-only">Tag name</span>
-                    {tag.managed ? <Lock size={15} aria-label="Automatically managed tag" /> : null}
-                    <input
-                      type="text"
-                      maxLength={40}
-                      value={tag.name}
-                      disabled={saving || tag.managed}
-                      aria-label={`Name for ${tag.name}`}
-                      onChange={(event) => {
-                        const previousName = tag.name;
-                        const name = event.target.value;
-                        setDrafts((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, name } : item));
-                        setSuperTagDrafts((current) => current.map((superTag) => ({
-                          ...superTag,
-                          rules: superTag.rules.map((rule) => rule.source === "tag_exact" && rule.phrase === previousName ? { ...rule, phrase: name } : rule),
-                        })));
-                      }}
-                    />
-                  </label>
-                  <div className="tag-color-options" aria-label={`Color for ${tag.name}`}>
-                    <label className="tag-custom-color" style={{ "--tag-color": tag.color } as CSSProperties} title={tag.managed ? "Automatically managed color" : "Choose a custom color"}>
-                      <input type="color" value={tag.color} disabled={saving || tag.managed} aria-label={`Choose a custom color for ${tag.name}`} onChange={(event) => {
-                        const color = event.target.value;
-                        setDrafts((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, color } : item));
-                      }} />
-                    </label>
-                  </div>
+              {automaticTags.map((item) => renderTag(item, true))}
+            </div>
+          </section>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function ManageSuperTagsPanel({ definitions, drafts, saving, onChange }) {
+  const update = (index, updates) => onChange((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, ...updates } : item));
+  return (
+    <div className="tag-settings-block">
+      <div className="tag-settings-section-head">
+        <div><strong>Supertags</strong><span>{drafts.length} reusable groups</span></div>
+        <button className="button compact" type="button" disabled={saving} onClick={() => onChange((current) => [...current, { id: `new-${crypto.randomUUID()}`, name: "", color: "#38bdf8", rules: [{ source: "tag_exact", phrase: "" }] }])}><Plus size={14} aria-hidden="true" /> New supertag</button>
+      </div>
+      <div className="supertag-settings-list">
+        {drafts.map((tag, index) => (
+          <section className="supertag-settings-card" key={tag.id}>
+            <div className="supertag-settings-primary">
+              <label className="tag-custom-color" style={{ "--tag-color": tag.color } as CSSProperties} title="Choose a supertag color"><input type="color" value={tag.color} disabled={saving} aria-label={`Color for ${tag.name || "new supertag"}`} onChange={(event) => update(index, { color: event.target.value })} /></label>
+              <input type="text" maxLength={40} placeholder="Supertag name" value={tag.name} disabled={saving} aria-label="Supertag name" onChange={(event) => update(index, { name: event.target.value })} />
+              <button className="icon-button compact" type="button" disabled={saving} aria-label={`Delete ${tag.name || "supertag"}`} title="Delete supertag" onClick={() => onChange((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={15} aria-hidden="true" /></button>
+            </div>
+            <div className="supertag-rule-list">
+              {tag.rules.map((rule, ruleIndex) => (
+                <div className="supertag-rule-row" key={`${rule.source}-${ruleIndex}`}>
+                  <select value={rule.source} disabled={saving} aria-label="Match source" onChange={(event) => update(index, { rules: tag.rules.map((item, itemIndex) => itemIndex === ruleIndex ? { ...item, source: event.target.value } : item) })}><option value="tag_exact">Specific tag is</option><option value="tag">Tag name contains</option><option value="event">Checked-in event contains</option></select>
+                  {rule.source === "tag_exact" ? (
+                    <select value={rule.phrase} disabled={saving} aria-label="Specific tag" onChange={(event) => update(index, { rules: tag.rules.map((item, itemIndex) => itemIndex === ruleIndex ? { ...item, phrase: event.target.value } : item) })}><option value="">Choose a tag</option>{definitions.map((definition) => <option value={definition.name} key={definition.id}>{tagDisplayName(definition.name)}</option>)}</select>
+                  ) : (
+                    <input type="text" maxLength={80} placeholder={rule.source === "event" ? "Open Campus" : "Off Season"} value={rule.phrase} disabled={saving} aria-label="Phrase to match" onChange={(event) => update(index, { rules: tag.rules.map((item, itemIndex) => itemIndex === ruleIndex ? { ...item, phrase: event.target.value } : item) })} />
+                  )}
+                  <button className="icon-button compact" type="button" disabled={saving || tag.rules.length === 1} aria-label="Remove rule" title="Remove rule" onClick={() => update(index, { rules: tag.rules.filter((_, itemIndex) => itemIndex !== ruleIndex) })}><X size={14} aria-hidden="true" /></button>
                 </div>
               ))}
             </div>
-          </div>
-        ) : <div className="empty-state compact">Create your first tag from any guest’s Tags cell.</div>}
-        <div className="tag-settings-block">
-          <div className="tag-settings-section-head">
-            <div><strong>Supertags</strong><span>Match people through phrases found in tag names or event names.</span></div>
-            <button className="button compact" type="button" disabled={saving} onClick={() => setSuperTagDrafts((current) => [...current, {
-              id: `new-${crypto.randomUUID()}`,
-              name: "",
-              color: "#38bdf8",
-              rules: [{ source: "tag_exact", phrase: "" }],
-            }])}><Plus size={14} aria-hidden="true" /> New supertag</button>
-          </div>
-          <div className="supertag-settings-list">
-            {superTagDrafts.map((tag, index) => (
-              <section className="supertag-settings-card" key={tag.id}>
-                <div className="supertag-settings-primary">
-                  <label className="tag-custom-color" style={{ "--tag-color": tag.color } as CSSProperties} title="Choose a supertag color">
-                    <input type="color" value={tag.color} disabled={saving} aria-label={`Color for ${tag.name || "new supertag"}`} onChange={(event) => updateSuperTag(index, { color: event.target.value })} />
-                  </label>
-                  <input type="text" maxLength={40} placeholder="Supertag name" value={tag.name} disabled={saving} aria-label="Supertag name" onChange={(event) => updateSuperTag(index, { name: event.target.value })} />
-                  <button className="icon-button compact" type="button" disabled={saving} aria-label={`Delete ${tag.name || "supertag"}`} title="Delete supertag" onClick={() => setSuperTagDrafts((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={15} aria-hidden="true" /></button>
-                </div>
-                <div className="supertag-rule-list">
-                  {tag.rules.map((rule, ruleIndex) => (
-                    <div className="supertag-rule-row" key={`${rule.source}-${ruleIndex}`}>
-                      <select value={rule.source} disabled={saving} aria-label="Match source" onChange={(event) => updateSuperTag(index, {
-                        rules: tag.rules.map((item, itemIndex) => itemIndex === ruleIndex ? { ...item, source: event.target.value } : item),
-                      })}>
-                        <option value="tag_exact">Specific tag is</option>
-                        <option value="tag">Tag name contains</option>
-                        <option value="event">Checked-in event contains</option>
-                      </select>
-                      {rule.source === "tag_exact" ? (
-                        <select value={rule.phrase} disabled={saving} aria-label="Specific tag" onChange={(event) => updateSuperTag(index, {
-                          rules: tag.rules.map((item, itemIndex) => itemIndex === ruleIndex ? { ...item, phrase: event.target.value } : item),
-                        })}>
-                          <option value="">Choose a tag</option>
-                          {definitions.map((definition) => <option value={definition.name} key={definition.id}>{tagDisplayName(definition.name)}</option>)}
-                        </select>
-                      ) : (
-                        <input type="text" maxLength={80} placeholder={rule.source === "event" ? "Open Campus" : "Off Season"} value={rule.phrase} disabled={saving} aria-label="Phrase to match" onChange={(event) => updateSuperTag(index, {
-                          rules: tag.rules.map((item, itemIndex) => itemIndex === ruleIndex ? { ...item, phrase: event.target.value } : item),
-                        })} />
-                      )}
-                      <button className="icon-button compact" type="button" disabled={saving || tag.rules.length === 1} aria-label="Remove rule" title="Remove rule" onClick={() => updateSuperTag(index, { rules: tag.rules.filter((_, itemIndex) => itemIndex !== ruleIndex) })}><X size={14} aria-hidden="true" /></button>
-                    </div>
-                  ))}
-                </div>
-                <button className="button ghost compact supertag-add-rule" type="button" disabled={saving || tag.rules.length >= 20} onClick={() => updateSuperTag(index, { rules: [...tag.rules, { source: "tag_exact", phrase: "" }] })}><Plus size={13} aria-hidden="true" /> Add matching rule</button>
-              </section>
-            ))}
-            {!superTagDrafts.length ? <div className="empty-state compact">No supertags yet. Create one to combine related tags or event audiences.</div> : null}
-          </div>
-        </div>
-        <div className="dialog-actions">
-          <button className="button ghost" type="button" disabled={saving} onClick={onClose}>Cancel</button>
-          <button className="button primary" type="submit" disabled={saving || hasInvalidName}>
-            {saving ? <RefreshCw className="animate-spin" size={16} aria-hidden="true" /> : <Settings2 size={16} aria-hidden="true" />}
-            {saving ? "Saving..." : "Save changes"}
-          </button>
-        </div>
-      </form>
+            <button className="button ghost compact supertag-add-rule" type="button" disabled={saving || tag.rules.length >= 20} onClick={() => update(index, { rules: [...tag.rules, { source: "tag_exact", phrase: "" }] })}><Plus size={13} aria-hidden="true" /> Add matching rule</button>
+          </section>
+        ))}
+        {!drafts.length ? <div className="empty-state compact">No supertags yet. Create one to combine related tags or event audiences.</div> : null}
+      </div>
     </div>
   );
 }
@@ -5744,6 +6016,8 @@ function UniversalSearchModal({
   peopleFilters,
   peopleSearchStatus,
   peopleSearchError,
+  hasMorePeople,
+  loadingMorePeople,
   openTagPersonId,
   savingTagPersonId,
   savingPhonePersonId,
@@ -5759,6 +6033,7 @@ function UniversalSearchModal({
   onChangeTags,
   onCreateTag,
   onSavePhone,
+  onLoadMorePeople,
 }) {
   const hasQuery = query.trim().length > 0;
   const hasPeopleFilters = peopleSearchFiltersActive(peopleFilters);
@@ -5791,6 +6066,8 @@ function UniversalSearchModal({
                   results={results.people}
                   definitions={tagDefinitions}
                   loading={peopleSearchStatus === "loading"}
+                  loadingMore={loadingMorePeople}
+                  hasMore={hasMorePeople}
                   error={peopleSearchError}
                   openTagPersonId={openTagPersonId}
                   savingTagPersonId={savingTagPersonId}
@@ -5803,6 +6080,7 @@ function UniversalSearchModal({
                   onChangeTags={onChangeTags}
                   onCreateTag={onCreateTag}
                   onSavePhone={onSavePhone}
+                  onLoadMore={onLoadMorePeople}
                 />
               </div>
             ) : (
@@ -5899,6 +6177,8 @@ function PeopleSearchTable({
   results,
   definitions,
   loading,
+  loadingMore,
+  hasMore,
   error,
   openTagPersonId,
   savingTagPersonId,
@@ -5911,6 +6191,7 @@ function PeopleSearchTable({
   onChangeTags,
   onCreateTag,
   onSavePhone,
+  onLoadMore,
 }) {
   if (!results.length && !loading && !error) return null;
   return (
@@ -5920,7 +6201,13 @@ function PeopleSearchTable({
         {results.length ? <span>{results.length}</span> : null}
       </div>
       {results.length ? (
-        <div className="table-wrap search-people-table-wrap">
+        <div
+          className="table-wrap search-people-table-wrap"
+          onScroll={(event) => {
+            const target = event.currentTarget;
+            if (hasMore && !loadingMore && target.scrollHeight - target.scrollTop - target.clientHeight < 320) onLoadMore();
+          }}
+        >
           <table className="guest-table search-people-table">
             <thead>
               <tr>
@@ -5985,6 +6272,8 @@ function PeopleSearchTable({
         </div>
       ) : null}
       {loading ? <div className="search-result-state">Searching every indexed person...</div> : null}
+      {loadingMore ? <div className="search-result-state search-result-loading-more"><RefreshCw className="animate-spin" size={14} aria-hidden="true" /> Loading more people...</div> : null}
+      {!hasMore && results.length >= 20 ? <div className="search-result-state search-result-end">You’ve reached the end.</div> : null}
       {error ? <div className="search-result-state search-result-error">{error}</div> : null}
     </section>
   );
@@ -6798,7 +7087,7 @@ function TagAudienceBubbles({ groups, superTags = [], selected, selectedSuperTag
             })}
           </div>
           {section.searchable && !section.groups.length ? <div className="empty-state compact">No manual tags match “{manualQuery}”.</div> : null}
-          {section.id === "supertag" && !section.groups.length ? <div className="empty-state compact">Create supertags in Tag settings to combine related tag and event audiences.</div> : null}
+          {section.id === "supertag" && !section.groups.length ? <div className="empty-state compact">Open Tags to create supertags that combine related tag and event audiences.</div> : null}
         </section>
       ))}
     </div>

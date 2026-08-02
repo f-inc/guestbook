@@ -15,6 +15,7 @@ export async function GET(request: Request) {
     const {
       query,
       limit,
+      offset,
       scope,
       includedTags,
       excludedTags,
@@ -22,11 +23,14 @@ export async function GET(request: Request) {
       comments,
       hasFilters,
     } = parsePeopleSearchQuery(new URL(request.url).searchParams);
-    if (!query && (scope === "name" || !hasFilters)) return Response.json({ people: [] });
+    if (!query && (scope === "name" || !hasFilters)) {
+      return Response.json({ people: [], hasMore: false, nextOffset: 0 });
+    }
     return Response.json(await (scope === "name"
-      ? searchIndexedPeopleByName(query, { limit })
+      ? searchIndexedPeopleByName(query, { limit, offset })
       : searchIndexedPeople(query, {
           limit,
+          offset,
           includedTags,
           excludedTags,
           tagMode,

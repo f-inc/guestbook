@@ -508,6 +508,7 @@ export async function refreshIndexedEventOverviewStats(eventIds: string[]) {
 
 type IndexedPeopleSearchOptions = {
   limit?: number;
+  offset?: number;
   includedTags?: string[];
   excludedTags?: string[];
   tagMode?: "any" | "all";
@@ -516,6 +517,7 @@ type IndexedPeopleSearchOptions = {
 
 export async function searchIndexedPeople(search: string, {
   limit = 8,
+  offset = 0,
   includedTags = [],
   excludedTags = [],
   tagMode = "any",
@@ -528,15 +530,17 @@ export async function searchIndexedPeople(search: string, {
   const hasFilters = normalizedIncludedTags.length > 0
     || normalizedExcludedTags.length > 0
     || normalizedComments !== "any";
-  if (!query && !hasFilters) return { people: [] };
+  if (!query && !hasFilters) return { people: [], hasMore: false, nextOffset: 0 };
 
   const db = prisma();
   const escapedQuery = query.replace(/[\\%_]/g, "\\$&");
   const containsQuery = `%${escapedQuery}%`;
   const prefixQuery = `${escapedQuery}%`;
-  const resultLimit = Math.max(1, Math.min(20, Math.trunc(limit) || 8));
-  const personCandidateLimit = resultLimit * 10;
-  const guestCandidateLimit = resultLimit * 20;
+  const pageSize = Math.max(1, Math.min(20, Math.trunc(limit) || 8));
+  const resultOffset = Math.max(0, Math.min(10_000, Math.trunc(offset) || 0));
+  const resultLimit = pageSize + 1;
+  const personCandidateLimit = (resultOffset + resultLimit) * 10;
+  const guestCandidateLimit = (resultOffset + resultLimit) * 20;
   const personFilterConditions: Prisma.Sql[] = [];
   if (normalizedIncludedTags.length) {
     personFilterConditions.push(tagMode === "all"
@@ -656,6 +660,7 @@ export async function searchIndexedPeople(search: string, {
       ${personFilterSql}
       ORDER BY candidate.rank, person.last_seen_at DESC, person.name ASC
       LIMIT ${resultLimit}
+      OFFSET ${resultOffset}
     )
     SELECT
       person.person_id AS "personId",
@@ -697,15 +702,17 @@ export async function searchIndexedPeople(search: string, {
     ORDER BY ranked.rank, person.last_seen_at DESC, person.name ASC
   `);
 
-  if (!matches.length) return { people: [] };
+  const hasMore = matches.length > pageSize;
+  const pageMatches = matches.slice(0, pageSize);
+  if (!pageMatches.length) return { people: [], hasMore: false, nextOffset: resultOffset };
   const people = await db.lumaPerson.findMany({
-    where: { personId: { in: matches.map((match) => match.personId) } },
+    where: { personId: { in: pageMatches.map((match) => match.personId) } },
     select: INDEXED_PERSON_SELECT,
   });
   const peopleById = new Map(people.map((person) => [person.personId, person]));
 
   return {
-    people: matches.flatMap((match) => {
+    people: pageMatches.flatMap((match) => {
       const person = peopleById.get(match.personId);
       return person ? [{
         person: {
@@ -718,16 +725,20 @@ export async function searchIndexedPeople(search: string, {
         eventId: match.eventId || "",
       }] : [];
     }),
+    hasMore,
+    nextOffset: resultOffset + pageMatches.length,
   };
 }
 
-export async function searchIndexedPeopleByName(search: string, { limit = 20 } = {}) {
+export async function searchIndexedPeopleByName(search: string, { limit = 20, offset = 0 } = {}) {
   const query = search.trim().slice(0, 120);
-  if (!query) return { people: [] };
+  if (!query) return { people: [], hasMore: false, nextOffset: 0 };
   const escapedQuery = query.replace(/[\\%_]/g, "\\$&");
   const containsQuery = `%${escapedQuery}%`;
   const prefixQuery = `${escapedQuery}%`;
-  const resultLimit = Math.max(1, Math.min(50, Math.trunc(limit) || 20));
+  const pageSize = Math.max(1, Math.min(50, Math.trunc(limit) || 20));
+  const resultOffset = Math.max(0, Math.min(10_000, Math.trunc(offset) || 0));
+  const resultLimit = pageSize + 1;
   const matches = await prisma().$queryRaw<Array<{ personId: string }>>(Prisma.sql`
     SELECT person.person_id AS "personId"
     FROM luma_people AS person
@@ -741,8 +752,15 @@ export async function searchIndexedPeopleByName(search: string, { limit = 20 } =
       person.last_seen_at DESC,
       person.name ASC
     LIMIT ${resultLimit}
+    OFFSET ${resultOffset}
   `);
-  return indexedPeopleSearchResult(matches);
+  const hasMore = matches.length > pageSize;
+  const pageMatches = matches.slice(0, pageSize);
+  return {
+    ...await indexedPeopleSearchResult(pageMatches),
+    hasMore,
+    nextOffset: resultOffset + pageMatches.length,
+  };
 }
 
 export async function listIndexedAudienceTagGroups() {
@@ -3271,6 +3289,24 @@ export async function mutateIndexedPersonTag({ personId, tagId, eventId, removed
   });
   if (!person) throw notFound("Person not found.");
   return person;
+}
+
+export async function matchIndexedPeopleByEmails(emails: string[]) {
+  const normalizedEmails = [...new Set(emails.map((email) => normalizeEmail(email)).filter(Boolean))];
+  if (!normalizedEmails.length) return [];
+  return prisma().lumaPerson.findMany({
+    where: { emailLower: { in: normalizedEmails } },
+    select: {
+      personId: true,
+      name: true,
+      email: true,
+      emailLower: true,
+      tags: true,
+      manualTags: true,
+      automaticTags: true,
+    },
+    orderBy: [{ name: "asc" }, { personId: "asc" }],
+  });
 }
 
 function notFound(message: string) {

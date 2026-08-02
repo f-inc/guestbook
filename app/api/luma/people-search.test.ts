@@ -7,6 +7,7 @@ test("people search trims its query and accepts a bounded result limit", () => {
   assert.deepEqual(parsed, {
     query: "reliable",
     limit: 12,
+    offset: 0,
     scope: "all",
     includedTags: [],
     excludedTags: [],
@@ -27,6 +28,7 @@ test("name-only people search supports a larger bounded directory page", () => {
     {
       query: "Ada",
       limit: 40,
+      offset: 0,
       scope: "name",
       includedTags: [],
       excludedTags: [],

@@ -45,6 +45,7 @@ model LumaPerson {
   lumaUserIdLower   String?   @map("luma_user_id_lower")
   email             String?
   emailLower        String?   @map("email_lower")
+  phoneNumber       String?   @map("phone_number")
   name              String
   title             String?
   bio               String?

@@ -25,8 +25,8 @@ import { MAX_SELECTED_EVENT_IDS } from "../../event-selection";
 import { AUTOMATIC_TAG_DEFINITIONS, AUTOMATIC_TAG_RULESET_VERSION, NEW_GUEST_MAX_REGISTRATIONS, automaticTagRunMode, normalizeAutomaticTagPersonIds } from "./auto-tags";
 import type { AnalyticsRespondentQuery } from "./analytics-respondents";
 
-const PRISMA_KEY = "__guestbookPrismaClientV3";
-const LEGACY_PRISMA_KEYS = ["__guestbookPrismaClientV2", "__guestbookPrismaClient"];
+const PRISMA_KEY = "__guestbookPrismaClientV4";
+const LEGACY_PRISMA_KEYS = ["__guestbookPrismaClientV3", "__guestbookPrismaClientV2", "__guestbookPrismaClient"];
 const AUDIENCE_TAG_GROUP_CACHE_MS = 120_000;
 const AUDIENCE_EVENT_COUNT_CACHE_MS = 30_000;
 const AUDIENCE_RESOLUTION_CACHE_MS = 30_000;
@@ -68,6 +68,7 @@ const INDEXED_PERSON_SELECT = {
   personId: true,
   lumaUserId: true,
   email: true,
+  phoneNumber: true,
   name: true,
   title: true,
   bio: true,
@@ -196,7 +197,7 @@ function indexedRegisteredGuestPredicateSql() {
 }
 
 function indexedGuestPhoneNumberSql() {
-  return Prisma.sql`guest.phone_number`;
+  return Prisma.sql`COALESCE(NULLIF(BTRIM(person.phone_number), ''), guest.phone_number)`;
 }
 
 function indexedInvitationEvidencePredicateSql() {
@@ -665,7 +666,7 @@ export async function searchIndexedPeople(search: string, {
     SELECT
       person.person_id AS "personId",
       latest_event.event_id AS "eventId",
-      latest_phone.phone_number AS "phoneNumber",
+      COALESCE(NULLIF(BTRIM(person.phone_number), ''), latest_phone.phone_number) AS "phoneNumber",
       COALESCE(activity.events_attended, 0)::integer AS "eventsAttended",
       COALESCE(activity.events_registered, 0)::integer AS "eventsRegistered"
     FROM ranked_people AS ranked
@@ -4189,7 +4190,7 @@ export async function updateIndexedGuestCheckIn({ eventId, lumaGuestId, checkedI
 
 export async function updateIndexedPersonPhoneNumber(personId: string, phoneNumber: string | null) {
   if (!personId) return { updatedCount: 0 };
-  const result = await prisma().lumaEventGuest.updateMany({
+  const result = await prisma().lumaPerson.updateMany({
     where: { personId },
     data: { phoneNumber },
   });
@@ -4588,6 +4589,7 @@ function normalizeGuestRows(event, guest, rawGuest = {}, now = new Date()) {
       lumaUserIdLower,
       email,
       emailLower,
+      phoneNumber: guest.phoneNumber || null,
       name: person.name || "Unnamed guest",
       title: person.title || null,
       bio,
@@ -4638,6 +4640,7 @@ async function bulkUpsertPeople(tx, rows) {
       luma_user_id_lower,
       email,
       email_lower,
+      phone_number,
       name,
       title,
       bio,
@@ -4659,6 +4662,7 @@ async function bulkUpsertPeople(tx, rows) {
           ${row.lumaUserIdLower},
           ${row.email},
           ${row.emailLower},
+          ${row.phoneNumber},
           ${row.name},
           ${row.title},
           ${row.bio},
@@ -4679,6 +4683,7 @@ async function bulkUpsertPeople(tx, rows) {
       luma_user_id_lower = COALESCE(EXCLUDED.luma_user_id_lower, luma_people.luma_user_id_lower),
       email = COALESCE(EXCLUDED.email, luma_people.email),
       email_lower = COALESCE(EXCLUDED.email_lower, luma_people.email_lower),
+      phone_number = COALESCE(NULLIF(BTRIM(luma_people.phone_number), ''), EXCLUDED.phone_number),
       name = EXCLUDED.name,
       title = COALESCE(EXCLUDED.title, luma_people.title),
       bio = COALESCE(EXCLUDED.bio, luma_people.bio),
@@ -4760,7 +4765,7 @@ async function bulkUpsertEventGuests(tx, rows) {
       luma_user_id_lower = COALESCE(EXCLUDED.luma_user_id_lower, luma_event_guests.luma_user_id_lower),
       email = COALESCE(EXCLUDED.email, luma_event_guests.email),
       email_lower = COALESCE(EXCLUDED.email_lower, luma_event_guests.email_lower),
-      phone_number = COALESCE(EXCLUDED.phone_number, luma_event_guests.phone_number),
+      phone_number = COALESCE(NULLIF(BTRIM(luma_event_guests.phone_number), ''), EXCLUDED.phone_number),
       status = EXCLUDED.status,
       luma_approval_status = EXCLUDED.luma_approval_status,
       operator_decision = CASE
@@ -4810,6 +4815,7 @@ async function upsertGuest(tx, event, guest, rawGuest = {}) {
       lumaUserIdLower,
       email,
       emailLower,
+      phoneNumber: guest.phoneNumber || null,
       name: person.name || "Unnamed guest",
       title: person.title || null,
       bio: person.bio || person.profileDescription || guest.profileDescription || null,
@@ -4840,6 +4846,15 @@ async function upsertGuest(tx, event, guest, rawGuest = {}) {
       syncedAt: now,
     }),
   });
+  if (guest.phoneNumber) {
+    await tx.lumaPerson.updateMany({
+      where: {
+        personId,
+        OR: [{ phoneNumber: null }, { phoneNumber: "" }],
+      },
+      data: { phoneNumber: guest.phoneNumber },
+    });
+  }
 
   await tx.lumaEventGuest.upsert({
     where: {
@@ -4880,7 +4895,6 @@ async function upsertGuest(tx, event, guest, rawGuest = {}) {
       lumaUserIdLower: lumaUserIdLower || undefined,
       email: email || undefined,
       emailLower: emailLower || undefined,
-      phoneNumber: guest.phoneNumber || undefined,
       status: guest.status || null,
       lumaApprovalStatus: guest.lumaApprovalStatus || null,
       registeredAt: parseDateTime(guest.registeredAt) || (guest.status === "invited" ? null : undefined),
@@ -4899,6 +4913,16 @@ async function upsertGuest(tx, event, guest, rawGuest = {}) {
       syncedAt: now,
     }),
   });
+  if (guest.phoneNumber) {
+    await tx.lumaEventGuest.updateMany({
+      where: {
+        eventId: event.id,
+        personId,
+        OR: [{ phoneNumber: null }, { phoneNumber: "" }],
+      },
+      data: { phoneNumber: guest.phoneNumber },
+    });
+  }
 }
 
 function indexedEventToApiEvent(row) {
@@ -4997,7 +5021,7 @@ function indexedPersonToApiPerson(row: any, guestRow: any = {}) {
     tags: row.tags || [],
     manualTags: row.manualTags || [],
     automaticTags: row.automaticTags || [],
-    phoneNumber: guestRow.phoneNumber || "",
+    phoneNumber: row.phoneNumber || guestRow.phoneNumber || "",
     crmNotes,
     crmNotesUpdatedAt: isoOrNull(crmNotesUpdatedAt),
     crmNoteCount,
@@ -5016,7 +5040,7 @@ function indexedGuestToApiGuest(row, eventCounts = null) {
     lumaGuestId: row.lumaGuestId,
     lumaApprovalStatus: row.lumaApprovalStatus,
     operatorDecision: row.operatorDecision,
-    phoneNumber: row.phoneNumber || "",
+    phoneNumber: row.person?.phoneNumber || row.phoneNumber || "",
     profileDescription: row.profileDescription || "",
     avatarUrl: avatarCandidates[0] || "",
     avatarCandidates,

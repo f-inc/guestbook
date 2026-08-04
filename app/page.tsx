@@ -1549,7 +1549,8 @@ export default function Home() {
     if (guestRequestsRef.current.has(requestKey)) return false;
 
     const requestToken = Symbol(requestKey);
-    latestGuestRequestRef.current.set(eventId, requestToken);
+    const requestScope = `${eventId}:${background ? "background" : "foreground"}`;
+    latestGuestRequestRef.current.set(requestScope, requestToken);
     guestRequestsRef.current.add(requestKey);
     if (!append) {
       setState((current) => ({
@@ -1571,8 +1572,8 @@ export default function Home() {
         cached: Boolean(data.cached),
         rowCount: Array.isArray(data.guests) ? data.guests.length : 0,
       });
-      if (latestGuestRequestRef.current.get(eventId) !== requestToken) return;
-      setState((current) => mergeLumaGuests(current, data, { append }));
+      if (latestGuestRequestRef.current.get(requestScope) !== requestToken) return;
+      setState((current) => mergeLumaGuests(current, data, { append, preserveView: background }));
       if (append) {
         const loadedThrough = (Number.parseInt(nextCursor, 10) || 0) + (Array.isArray(data.guests) ? data.guests.length : 0);
         setGuestPageTarget(Math.max(1, Math.ceil(loadedThrough / GUEST_PAGE_SIZE)));
@@ -1591,7 +1592,7 @@ export default function Home() {
       return true;
     } catch (error) {
       if (activeEventSwitchDiagnostic(eventId)) completeEventSwitchDiagnostic(eventId, "error");
-      if (latestGuestRequestRef.current.get(eventId) === requestToken) {
+      if (latestGuestRequestRef.current.get(requestScope) === requestToken) {
         setState((current) => ({
           ...current,
           events: current.events.map((item) => item.id === eventId ? { ...item, guestQueryLoading: false, guestSnapshotWarming: false } : item),
@@ -1601,7 +1602,8 @@ export default function Home() {
       return false;
     } finally {
       guestRequestsRef.current.delete(requestKey);
-      if (latestGuestRequestRef.current.get(eventId) === requestToken) {
+      if (latestGuestRequestRef.current.get(requestScope) === requestToken) {
+        latestGuestRequestRef.current.delete(requestScope);
         if (!background) setLoadingGuestEvents((current) => current.filter((id) => id !== eventId));
       }
     }
@@ -3388,8 +3390,8 @@ export default function Home() {
     if (!guestStatusDraft || guestStatusDraft.submitting) return;
 
     const draft = guestStatusDraft;
-    setGuestStatusDraft((current) => current ? { ...current, submitting: true } : current);
     if (draft.kind === "bulk") {
+      setGuestStatusDraft((current) => current ? { ...current, submitting: true } : current);
       const updated = await runBulkGuestStatus(draft.status, draft.label, {
         sendEmail: draft.sendEmail,
         message: draft.sendEmail ? draft.message : "",
@@ -3399,12 +3401,23 @@ export default function Home() {
       setGuestStatusDraft((current) => updated ? null : current ? { ...current, submitting: false } : current);
       return;
     }
-    const updated = await setGuestStatus(draft.personId, draft.status, {
+
+    const personName = getPerson(state, draft.personId)?.name || "Guest";
+    const emailAction = draft.label === "Approve" ? "Approval" : draft.label;
+    setGuestStatusDraft(null);
+    void setGuestStatus(draft.personId, draft.status, {
       sendEmail: draft.sendEmail,
       message: draft.sendEmail ? draft.message : "",
       eventId: draft.eventId,
+    }).then((updated) => {
+      if (!updated) return;
+      setApiState({
+        status: "live",
+        message: draft.sendEmail
+          ? `${emailAction} email sent to ${personName}.`
+          : `${personName} is now ${statusLabels[draft.status] || draft.status}.`,
+      });
     });
-    setGuestStatusDraft((current) => updated ? null : current ? { ...current, submitting: false } : current);
   };
 
   const saveEvent = (event) => {
@@ -4203,18 +4216,11 @@ export default function Home() {
                               )}
                             </td>
                             <td className="phone-cell" onClick={(event) => event.stopPropagation()}>
-                              {guest.phoneNumber ? (
-                                <a
-                                  className="phone-link"
-                                  href={phoneHref(guest.phoneNumber)}
-                                  title={`Call ${person.name}`}
-                                >
-                                  <PhoneIcon size={14} aria-hidden="true" />
-                                  <span>{guest.phoneNumber}</span>
-                                </a>
-                              ) : (
-                                <span className="phone-empty">-</span>
-                              )}
+                              <PersonPhoneEditor
+                                person={{ ...person, phoneNumber: person.phoneNumber || guest.phoneNumber || "" }}
+                                saving={savingPhonePersonId === person.id}
+                                onSave={(phoneNumber) => savePersonPhone(person.id, phoneNumber)}
+                              />
                             </td>
                           </tr>
                           );
@@ -6053,9 +6059,13 @@ function UniversalSearchModal({
   const hasQuery = query.trim().length > 0;
   const hasPeopleFilters = peopleSearchFiltersActive(peopleFilters);
   const hasCriteria = hasQuery || hasPeopleFilters;
+  const [filtersOpen, setFiltersOpen] = useState(() => hasPeopleFilters);
+  const activeFilterCount = peopleFilters.includedTags.length
+    + peopleFilters.excludedTags.length
+    + (peopleFilters.comments !== "any" ? 1 : 0);
   return (
     <div className="search-scrim" role="presentation" onMouseDown={onClose}>
-      <section className={`search-dialog ${expanded ? "expanded" : "compact"}`} role="dialog" aria-modal="true" aria-label="People search" onMouseDown={(event) => event.stopPropagation()}>
+      <section className={`search-dialog ${expanded ? "expanded" : "compact"} ${filtersOpen ? "filters-open" : ""}`} role="dialog" aria-modal="true" aria-label="People search" onMouseDown={(event) => event.stopPropagation()}>
         <div className="search-input-wrap">
           <input
             ref={inputRef}
@@ -6064,17 +6074,32 @@ function UniversalSearchModal({
             value={query}
             onChange={(event) => onQueryChange(event.target.value)}
           />
-          <button className="icon-button" type="button" aria-label="Close search" onClick={onClose}>
-            x
-          </button>
+          <div className="search-input-actions">
+            <button
+              className={`icon-button search-filter-toggle ${hasPeopleFilters ? "active" : ""}`}
+              type="button"
+              aria-label={`${filtersOpen ? "Hide" : "Show"} search filters`}
+              aria-expanded={filtersOpen}
+              title="Search filters"
+              onClick={() => setFiltersOpen((current) => !current)}
+            >
+              <ListFilter size={17} aria-hidden="true" />
+              {activeFilterCount ? <span className="search-filter-count">{activeFilterCount}</span> : null}
+            </button>
+            <button className="icon-button" type="button" aria-label="Close search" title="Close" onClick={onClose}>
+              <X size={18} aria-hidden="true" />
+            </button>
+          </div>
         </div>
+        {filtersOpen ? (
+          <UniversalPeopleFilters
+            definitions={tagDefinitions}
+            filters={peopleFilters}
+            onChange={onPeopleFiltersChange}
+          />
+        ) : null}
         {expanded ? (
           <>
-            <UniversalPeopleFilters
-              definitions={tagDefinitions}
-              filters={peopleFilters}
-              onChange={onPeopleFiltersChange}
-            />
             {!hasCriteria ? null : resultCount || peopleSearchStatus === "loading" || peopleSearchError ? (
               <div className="search-results">
                 <PeopleSearchTable
@@ -6368,11 +6393,16 @@ function PersonPhoneEditor({ person, saving, onSave }) {
           <span>{person.phoneNumber}</span>
         </a>
       ) : (
-        <span className="phone-empty">No phone</span>
+        <button className="phone-add-trigger" type="button" onClick={() => setEditing(true)}>
+          <Plus size={13} aria-hidden="true" />
+          <span>Add phone</span>
+        </button>
       )}
-      <button className="icon-button" type="button" aria-label={`Edit phone number for ${person.name}`} title="Edit phone" onClick={() => setEditing(true)}>
-        <Pencil size={13} aria-hidden="true" />
-      </button>
+      {person.phoneNumber ? (
+        <button className="icon-button" type="button" aria-label={`Edit phone number for ${person.name}`} title="Edit phone" onClick={() => setEditing(true)}>
+          <Pencil size={13} aria-hidden="true" />
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -9084,7 +9114,7 @@ function clearSessionCookie() {
   document.cookie = `${SESSION_KEY_COOKIE}=; path=/; max-age=0; SameSite=Lax${secure}`;
 }
 
-function mergeLumaGuests(current, lumaData, { append = false } = {}) {
+function mergeLumaGuests(current, lumaData, { append = false, preserveView = false } = {}) {
   const existingPeople = new Map();
   current.people.forEach((person) => {
     existingPeople.set(person.id, person);
@@ -9101,11 +9131,11 @@ function mergeLumaGuests(current, lumaData, { append = false } = {}) {
   const events = current.events.map((event) => {
     if (event.id !== lumaData.eventId) return event;
     const previousGuestsByPersonId = new Map(event.guests.map((guest) => [guest.personId, guest]));
-    const guestsByPersonId = new Map((append ? event.guests : []).map((guest) => [guest.personId, guest]));
+    const guestsByPersonId = new Map((append || preserveView ? event.guests : []).map((guest) => [guest.personId, guest]));
     const nextDisplayOrder = append
       ? Math.max(-1, ...event.guests.map((guest) => Number.isFinite(guest._displayOrder) ? guest._displayOrder : -1)) + 1
       : 0;
-    (lumaData.guests || []).forEach((guest, index) => {
+    (preserveView ? [] : lumaData.guests || []).forEach((guest, index) => {
       const existingGuest: any = previousGuestsByPersonId.get(guest.personId);
       guestsByPersonId.set(guest.personId, {
         ...existingGuest,
@@ -9122,16 +9152,16 @@ function mergeLumaGuests(current, lumaData, { append = false } = {}) {
           ...(lumaData.event || {}),
           guests,
           guestsLoaded: true,
-          guestLoadTruncated: lumaData.truncated,
+          guestLoadTruncated: preserveView ? event.guestLoadTruncated : lumaData.truncated,
           guestStats: lumaData.stats || event.guestStats,
           guestAnalyticsQuestions: lumaData.analyticsQuestions || event.guestAnalyticsQuestions || [],
           guestSnapshotReady: lumaData.snapshotReady ?? event.guestSnapshotReady ?? false,
           guestSnapshotWarming: false,
-          guestHistoryLoaded: guests.every((guest: any) => Boolean(guest.eventCounts)),
-          guestHistoryLoading: false,
-          guestPageInfo: lumaData.pageInfo || null,
-          guestQuery: lumaData.query || null,
-          guestQueryLoading: false,
+          guestHistoryLoaded: preserveView ? event.guestHistoryLoaded : guests.every((guest: any) => Boolean(guest.eventCounts)),
+          guestHistoryLoading: preserveView ? event.guestHistoryLoading : false,
+          guestPageInfo: preserveView ? event.guestPageInfo : lumaData.pageInfo || null,
+          guestQuery: preserveView ? event.guestQuery : lumaData.query || null,
+          guestQueryLoading: preserveView ? event.guestQueryLoading : false,
         };
   });
 

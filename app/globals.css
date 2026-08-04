@@ -1300,6 +1300,10 @@
     @apply text-xs text-muted;
   }
 
+  .phone-add-trigger {
+    @apply inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-xs font-semibold text-muted transition hover:bg-subtle hover:text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/30;
+  }
+
   .event-count-heading,
   .event-count-cell {
     @apply min-w-14;
@@ -4477,7 +4481,7 @@
     max-width: min(1200px, calc(100vw - 2rem));
   }
 
-  .search-dialog.compact .search-input-wrap {
+  .search-dialog.compact:not(.filters-open) .search-input-wrap {
     @apply border-b-0;
   }
 
@@ -4487,6 +4491,22 @@
 
   .search-input-wrap input {
     @apply h-12 border-0 text-base shadow-none ring-0;
+  }
+
+  .search-input-actions {
+    @apply flex shrink-0 items-center gap-1;
+  }
+
+  .search-filter-toggle {
+    @apply relative;
+  }
+
+  .search-filter-toggle.active {
+    @apply border-brand bg-brand-soft text-brand;
+  }
+
+  .search-filter-count {
+    @apply absolute -right-1 -top-1 inline-grid min-w-4 place-items-center rounded-full bg-brand px-1 text-[9px] font-bold leading-4 text-white;
   }
 
   .search-filter-bar {
@@ -4627,6 +4647,7 @@
   }
 
   .search-people-table tr:hover .search-phone-value .icon-button,
+  .guest-table-wrap tr:hover .search-phone-value .icon-button,
   .search-phone-value .icon-button:focus-visible {
     @apply opacity-100;
   }

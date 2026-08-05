@@ -54,6 +54,9 @@ export type GuestListQuery = {
   sortDirection?: "asc" | "desc";
   hasNotes?: boolean;
   attendedGreaterThan?: number | null;
+  answerQuestion?: string;
+  answer?: string;
+  answerKey?: string;
   cursor: number;
   pageSize: number;
   includeSummary?: boolean;
@@ -72,6 +75,9 @@ export function parseGuestListQuery(params: URLSearchParams): GuestListQuery {
   const filter = filters[0] || "all";
   const hasNotes = params.get("guest_has_notes") === "1";
   const attendedGreaterThan = optionalBoundedInteger(params.get("guest_attended_gt"), 0, 10_000);
+  const answerQuestion = (params.get("guest_answer_question") || "").trim().slice(0, 500);
+  const answer = (params.get("guest_answer") || "").trim().slice(0, 500);
+  const answerKey = (params.get("guest_answer_key") || "").trim().slice(0, 500);
   return {
     filter,
     filters,
@@ -87,6 +93,7 @@ export function parseGuestListQuery(params: URLSearchParams): GuestListQuery {
     sortDirection: params.get("guest_sort") === "asc" ? "asc" : "desc",
     ...(hasNotes ? { hasNotes: true } : {}),
     ...(attendedGreaterThan === null ? {} : { attendedGreaterThan }),
+    ...(answerQuestion ? { answerQuestion, answer, answerKey } : {}),
     cursor: boundedInteger(params.get("guest_cursor"), 0, 0, 1_000_000),
     pageSize: boundedInteger(params.get("guest_limit"), 50, 10, 100),
     includeSummary: params.get("guest_summary") !== "0",
@@ -103,7 +110,8 @@ export function guestQueryRequiresIndex(query: GuestListQuery): boolean {
     || query.sortBy === "events_registered"
     || query.sortDirection === "asc"
     || Boolean(query.hasNotes)
-    || query.attendedGreaterThan != null;
+    || query.attendedGreaterThan != null
+    || Boolean(query.answerQuestion);
 }
 
 export function eventGuestWhere(

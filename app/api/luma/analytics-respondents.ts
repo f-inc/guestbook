@@ -6,6 +6,7 @@ export type AnalyticsRespondentQuery = {
   eventIds: string[];
   question: string;
   answer: string;
+  answerKey: string;
   cursor: number;
   pageSize: number;
 };
@@ -15,6 +16,7 @@ export function parseAnalyticsRespondentQuery(params: URLSearchParams): Analytic
     eventIds: normalizeMultiEventIds(params.getAll("event_id")),
     question: boundedText(params.get("question"), 500),
     answer: boundedText(params.get("answer"), 500),
+    answerKey: boundedText(params.get("answer_key"), 500),
     cursor: boundedInteger(params.get("respondent_cursor"), 0, 1_000_000),
     pageSize: ANALYTICS_RESPONDENT_PAGE_SIZE,
   };

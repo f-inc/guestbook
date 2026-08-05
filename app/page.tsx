@@ -58,7 +58,7 @@ import { updateGuestSelection } from "./guest-selection";
 import { MAX_INVITE_MESSAGE_LENGTH } from "./invite-message";
 import { MAX_GUEST_STATUS_MESSAGE_LENGTH } from "./guest-status-notification";
 import { lumaEventManageUrl } from "./luma-event-url";
-import { buildRegistrationQuestionAnalytics, eventWideAnalyticsCounts, invitationOutcomeCounts, REFERRED_PERSON_TAG, sortRegistrationQuestionOptions } from "./event-analytics";
+import { buildRegistrationQuestionAnalytics, eventWideAnalyticsCounts, invitationOutcomeCounts, normalizeRegistrationAnswer, REFERRED_PERSON_TAG, sortRegistrationQuestionOptions } from "./event-analytics";
 import { changedLiveEventCountKeys, type LiveEventCounts } from "./event-count-reconciliation";
 import {
   EVENT_SWITCH_DIAGNOSTICS_ACTION,
@@ -211,6 +211,9 @@ const initialState = {
     guestExcludedTags: [],
     guestHasNotes: false,
     guestAttendedGreaterThan: "",
+    guestAnswerQuestion: "",
+    guestAnswer: "",
+    guestAnswerKey: "",
     globalSearch: "",
     memberSearch: "",
   },
@@ -251,6 +254,7 @@ export default function Home() {
   const [avatarPreview, setAvatarPreview] = useState<{ person: any; url: string } | null>(null);
   const avatarPreviewRef = useRef<{ person: any; url: string } | null>(null);
   const [activeEventTab, setActiveEventTab] = useState("overview");
+  const [analyticsCohort, setAnalyticsCohort] = useState<"all" | "first_registers">("all");
   const [guestSortField, setGuestSortField] = useState<"status_date" | "events_attended" | "events_registered">("status_date");
   const [guestDateSortDirection, setGuestDateSortDirection] = useState<"asc" | "desc">("desc");
   const [commandPressed, setCommandPressed] = useState(false);
@@ -263,7 +267,6 @@ export default function Home() {
   const [lumaCheckInGuestKey, setLumaCheckInGuestKey] = useState("");
   const [reinvitingGuestKey, setReinvitingGuestKey] = useState("");
   const [guestNoteDraft, setGuestNoteDraft] = useState(null);
-  const [analyticsRespondentDialog, setAnalyticsRespondentDialog] = useState(null);
   const [openTagPersonId, setOpenTagPersonId] = useState("");
   const [savingTagPersonId, setSavingTagPersonId] = useState("");
   const [savingPhonePersonId, setSavingPhonePersonId] = useState("");
@@ -351,6 +354,7 @@ export default function Home() {
     pendingProfileIdRef.current = urlState.profileId;
     setGuestPageTarget(urlState.guestPage);
     setActiveEventTab(urlState.tab);
+    setAnalyticsCohort(urlState.analyticsCohort || "all");
     setEventDirectorySort({
       key: urlState.eventSort || "date",
       direction: urlState.eventSortDirection || "desc",
@@ -375,6 +379,9 @@ export default function Home() {
         guestExcludedTags: urlState.guestExcludedTags || [],
         guestHasNotes: Boolean(urlState.guestHasNotes),
         guestAttendedGreaterThan: urlState.guestAttendedGreaterThan == null ? "" : String(urlState.guestAttendedGreaterThan),
+        guestAnswerQuestion: urlState.guestAnswerQuestion || "",
+        guestAnswer: urlState.guestAnswer || "",
+        guestAnswerKey: urlState.guestAnswerKey || "",
       },
       invite: {
         ...current.invite,
@@ -888,7 +895,10 @@ export default function Home() {
   const selectedProfileRecord = selectedPerson ? currentProfileRecord(state, selectedPerson) : null;
 
   const inviteAudience = useMemo(() => computeInviteAudience(state), [state]);
-  const selectedEventAnalytics = useMemo(() => buildWorkspaceAnalytics(state, selectedEvents, uniqueWorkspaceStats), [state, selectedEventIdsKey, uniqueWorkspaceStats]);
+  const selectedEventAnalytics = useMemo(
+    () => buildWorkspaceAnalytics(state, selectedEvents, uniqueWorkspaceStats, analyticsCohort),
+    [state, selectedEventIdsKey, uniqueWorkspaceStats, analyticsCohort],
+  );
   const filteredEvents = useMemo(() => visibleEvents(state, lifecycleNow), [state, lifecycleNow]);
   const eventSearchActive = Boolean(state.filters.globalSearch.trim());
   const allFilteredEventsSelected = filteredEvents.length > 0
@@ -904,7 +914,8 @@ export default function Home() {
   );
   const guestTagFilterKey = `${state.filters.guestTagMode}:${state.filters.guestTags.join("\u0000")}:${state.filters.guestExcludedTags.join("\u0000")}`;
   const guestStatusFilterKey = `${state.filters.guestStatusMode}:${state.filters.guestStatuses.join("\u0000")}:${state.filters.guestExcludedStatuses.join("\u0000")}`;
-  const multiEventGuestQueryKey = `${multiEventStatsKey}:${guestStatusFilterKey}:${debouncedGuestSearch}:${guestTagFilterKey}:${state.filters.guestHasNotes ? 1 : 0}:${state.filters.guestAttendedGreaterThan}:${guestSortField}:${guestDateSortDirection}`;
+  const guestAnswerFilterKey = `${state.filters.guestAnswerQuestion}:${state.filters.guestAnswerKey}:${state.filters.guestAnswer}`;
+  const multiEventGuestQueryKey = `${multiEventStatsKey}:${guestStatusFilterKey}:${debouncedGuestSearch}:${guestTagFilterKey}:${state.filters.guestHasNotes ? 1 : 0}:${state.filters.guestAttendedGreaterThan}:${guestAnswerFilterKey}:${guestSortField}:${guestDateSortDirection}`;
   const normalizedUniversalQuery = universalQuery.trim().toLocaleLowerCase();
   const universalPeopleRequestKey = `${normalizedUniversalQuery}\u0000${universalPeopleFiltersKey}`;
   const activeUniversalPeopleSearch = universalPeopleSearch.query === universalPeopleRequestKey ? universalPeopleSearch : null;
@@ -929,6 +940,7 @@ export default function Home() {
     || state.filters.guestExcludedTags.length > 0
     || state.filters.guestHasNotes
     || state.filters.guestAttendedGreaterThan !== ""
+    || Boolean(state.filters.guestAnswerQuestion)
     || Boolean(state.filters.guestSearch.trim());
   const inviteTargetEvent = getEvent(state, state.invite.targetEventId);
   const inviteTargetEvents = selectedEvents.length ? selectedEvents : inviteTargetEvent ? [inviteTargetEvent] : [];
@@ -982,6 +994,7 @@ export default function Home() {
       eventSort: eventDirectoryOpen ? eventDirectorySort.key : undefined,
       eventSortDirection: eventDirectoryOpen ? eventDirectorySort.direction : undefined,
       tab: activeEventTab as WorkspaceUrlState["tab"],
+      analyticsCohort,
       guestStatus: state.filters.guestStatus,
       guestStatuses: state.filters.guestStatuses,
       guestStatusMode: state.filters.guestStatusMode === "all" ? "all" : "any",
@@ -994,6 +1007,9 @@ export default function Home() {
       guestAttendedGreaterThan: state.filters.guestAttendedGreaterThan === ""
         ? null
         : Number(state.filters.guestAttendedGreaterThan),
+      guestAnswerQuestion: state.filters.guestAnswerQuestion,
+      guestAnswer: state.filters.guestAnswer,
+      guestAnswerKey: state.filters.guestAnswerKey,
       guestPage: Math.max(guestPageTarget, loadedGuestPage),
       profileId,
     });
@@ -1015,6 +1031,7 @@ export default function Home() {
     eventDirectorySort.key,
     eventDirectorySort.direction,
     activeEventTab,
+    analyticsCohort,
     profilePanelOpen,
     selectedPerson?.id,
     state.filters.event,
@@ -1024,6 +1041,7 @@ export default function Home() {
     guestTagFilterKey,
     state.filters.guestHasNotes,
     state.filters.guestAttendedGreaterThan,
+    guestAnswerFilterKey,
     guestPageTarget,
     loadedGuestPage,
   ]);
@@ -1274,60 +1292,29 @@ export default function Home() {
     }
   };
 
-  const loadAnalyticsRespondents = async (draft, { append = false } = {}) => {
-    if (!draft || draft.loading) return;
-    const cursor = append ? draft.pageInfo?.nextCursor || String(draft.respondents.length) : "0";
-    setAnalyticsRespondentDialog((current) => current?.key === draft.key
-      ? { ...current, loading: true, error: "" }
-      : current);
-
-    try {
-      const params = new URLSearchParams({
-        analytics_respondents: "1",
-        question: draft.question.label,
-        respondent_cursor: cursor,
-      });
-      draft.eventIds.forEach((eventId) => params.append("event_id", eventId));
-      if (draft.answer) params.set("answer", draft.answer);
-      const response = await apiFetch(`/api/luma?${params.toString()}`, { cache: "no-store" });
-      const data: any = await response.json();
-      if (!response.ok) throw new Error(withRequestId(data.error || "Unable to load respondents.", data.requestId));
-      setAnalyticsRespondentDialog((current) => {
-        if (!current || current.key !== draft.key) return current;
-        const respondents = append
-          ? [...new Map([...current.respondents, ...(data.respondents || [])].map((row) => [row.person.id, row])).values()]
-          : data.respondents || [];
-        return {
-          ...current,
-          respondents,
-          pageInfo: data.pageInfo || null,
-          loading: false,
-          error: "",
-        };
-      });
-    } catch (error: any) {
-      setAnalyticsRespondentDialog((current) => current?.key === draft.key
-        ? { ...current, loading: false, error: error.message }
-        : current);
-    }
-  };
-
-  const openAnalyticsRespondents = (question, option = null) => {
-    const eventIds = selectedEvents.map((event) => event.id);
-    const answer = option?.label || "";
-    const draft = {
-      key: `${eventIds.join("\u0000")}\u0000${question.id}\u0000${answer}`,
-      eventIds,
-      question: { id: question.id, label: question.label, responseCount: question.responseCount },
-      answer,
-      expectedCount: Number(option?.count ?? question.responseCount) || 0,
-      respondents: [],
-      pageInfo: null,
-      loading: false,
-      error: "",
-    };
-    setAnalyticsRespondentDialog(draft);
-    void loadAnalyticsRespondents(draft);
+  const openAnalyticsRespondents = (question, option = null, cohort: "all" | "first_registers" = "all") => {
+    workspaceUrlModeRef.current = "push";
+    setGuestPageTarget(1);
+    setDebouncedGuestSearch("");
+    setAllMatchingGuestsSelected(false);
+    setSelectedGuestIds(new Set());
+    lastSelectedGuestIdRef.current = "";
+    updateState((draft) => {
+      draft.filters.guestStatus = cohort === "first_registers" ? "first_registers" : "all";
+      draft.filters.guestStatuses = cohort === "first_registers" ? ["first_registers"] : [];
+      draft.filters.guestStatusMode = "any";
+      draft.filters.guestExcludedStatuses = [];
+      draft.filters.guestSearch = "";
+      draft.filters.guestTags = [];
+      draft.filters.guestTagMode = "any";
+      draft.filters.guestExcludedTags = [];
+      draft.filters.guestHasNotes = false;
+      draft.filters.guestAttendedGreaterThan = "";
+      draft.filters.guestAnswerQuestion = question.label;
+      draft.filters.guestAnswer = option?.label || "";
+      draft.filters.guestAnswerKey = option?.answerKey || "";
+    });
+    setActiveEventTab("overview");
   };
 
   const applyEventSelection = (
@@ -1365,6 +1352,9 @@ export default function Home() {
         draft.filters.guestExcludedTags = [];
         draft.filters.guestHasNotes = false;
         draft.filters.guestAttendedGreaterThan = "";
+        draft.filters.guestAnswerQuestion = "";
+        draft.filters.guestAnswer = "";
+        draft.filters.guestAnswerKey = "";
       }
     });
     if (eventChanged && !preserveProfile) setProfilePanelOpen(false);
@@ -1412,7 +1402,7 @@ export default function Home() {
       setGuestStatusRules(value === "all" ? [] : [value], [], "any");
       return;
     }
-    if (["guestStatuses", "guestStatusMode", "guestExcludedStatuses", "guestSearch", "guestTags", "guestTagMode", "guestExcludedTags"].includes(key)) {
+    if (["guestStatuses", "guestStatusMode", "guestExcludedStatuses", "guestSearch", "guestTags", "guestTagMode", "guestExcludedTags", "guestAnswerQuestion", "guestAnswer", "guestAnswerKey"].includes(key)) {
       setGuestPageTarget(1);
       setAllMatchingGuestsSelected(false);
       setSelectedGuestIds(new Set());
@@ -1473,6 +1463,21 @@ export default function Home() {
       draft.filters.guestSearch = "";
       draft.filters.guestHasNotes = false;
       draft.filters.guestAttendedGreaterThan = "";
+      draft.filters.guestAnswerQuestion = "";
+      draft.filters.guestAnswer = "";
+      draft.filters.guestAnswerKey = "";
+    });
+  };
+
+  const clearGuestAnswerFilter = () => {
+    setGuestPageTarget(1);
+    setAllMatchingGuestsSelected(false);
+    setSelectedGuestIds(new Set());
+    lastSelectedGuestIdRef.current = "";
+    updateState((draft) => {
+      draft.filters.guestAnswerQuestion = "";
+      draft.filters.guestAnswer = "";
+      draft.filters.guestAnswerKey = "";
     });
   };
 
@@ -1499,10 +1504,13 @@ export default function Home() {
       excludedTags = state.filters.guestExcludedTags,
       hasNotes = state.filters.guestHasNotes,
       attendedGreaterThan = state.filters.guestAttendedGreaterThan,
+      answerQuestion = state.filters.guestAnswerQuestion,
+      answer = state.filters.guestAnswer,
+      answerKey = state.filters.guestAnswerKey,
       cursor = "",
       priority = false,
       background = false,
-    }: { force?: boolean; append?: boolean; status?: string; statuses?: string[]; statusMode?: "any" | "all"; excludedStatuses?: string[]; search?: string; tags?: string[]; tagMode?: "any" | "all"; excludedTags?: string[]; hasNotes?: boolean; attendedGreaterThan?: string; cursor?: string; priority?: boolean; background?: boolean } = {},
+    }: { force?: boolean; append?: boolean; status?: string; statuses?: string[]; statusMode?: "any" | "all"; excludedStatuses?: string[]; search?: string; tags?: string[]; tagMode?: "any" | "all"; excludedTags?: string[]; hasNotes?: boolean; attendedGreaterThan?: string; answerQuestion?: string; answer?: string; answerKey?: string; cursor?: string; priority?: boolean; background?: boolean } = {},
   ) => {
     const event = getEvent(state, eventId);
     if (!event) {
@@ -1529,6 +1537,9 @@ export default function Home() {
     if (search) params.set("guest_search", search);
     if (hasNotes) params.set("guest_has_notes", "1");
     if (attendedGreaterThan !== "") params.set("guest_attended_gt", attendedGreaterThan);
+    if (answerQuestion) params.set("guest_answer_question", answerQuestion);
+    if (answer) params.set("guest_answer", answer);
+    if (answerKey) params.set("guest_answer_key", answerKey);
     if (event.startsAt) params.set("event_starts_at", event.startsAt);
     if (event.date) params.set("event_date", String(event.date).slice(0, 10));
     tags.forEach((tag) => params.append("guest_tag", tag));
@@ -1744,8 +1755,11 @@ export default function Home() {
       excludedTags = state.filters.guestExcludedTags,
       hasNotes = state.filters.guestHasNotes,
       attendedGreaterThan = state.filters.guestAttendedGreaterThan,
+      answerQuestion = state.filters.guestAnswerQuestion,
+      answer = state.filters.guestAnswer,
+      answerKey = state.filters.guestAnswerKey,
       cursor = "",
-    }: { append?: boolean; status?: string; statuses?: string[]; statusMode?: "any" | "all"; excludedStatuses?: string[]; search?: string; tags?: string[]; tagMode?: "any" | "all"; excludedTags?: string[]; hasNotes?: boolean; attendedGreaterThan?: string; cursor?: string } = {},
+    }: { append?: boolean; status?: string; statuses?: string[]; statusMode?: "any" | "all"; excludedStatuses?: string[]; search?: string; tags?: string[]; tagMode?: "any" | "all"; excludedTags?: string[]; hasNotes?: boolean; attendedGreaterThan?: string; answerQuestion?: string; answer?: string; answerKey?: string; cursor?: string } = {},
   ) => {
     const eventIds = selectedWorkspaceEvents(state)
       .filter((event) => event.source === "luma")
@@ -1753,7 +1767,7 @@ export default function Home() {
     if (eventIds.length < 2) return;
 
     const includedStatuses = statuses.length ? statuses : status !== "all" ? [status] : [];
-    const queryKey = `${[...eventIds].sort().join("\u0000")}:${statusMode}:${includedStatuses.join("\u0000")}:${excludedStatuses.join("\u0000")}:${search}:${tagMode}:${tags.join("\u0000")}:${excludedTags.join("\u0000")}:${hasNotes ? 1 : 0}:${attendedGreaterThan}:${guestSortField}:${guestDateSortDirection}`;
+    const queryKey = `${[...eventIds].sort().join("\u0000")}:${statusMode}:${includedStatuses.join("\u0000")}:${excludedStatuses.join("\u0000")}:${search}:${tagMode}:${tags.join("\u0000")}:${excludedTags.join("\u0000")}:${hasNotes ? 1 : 0}:${attendedGreaterThan}:${answerQuestion}:${answerKey}:${answer}:${guestSortField}:${guestDateSortDirection}`;
     if (append && (multiEventGuestState.loading || !cursor || (multiEventGuestAbortRef.current && !multiEventGuestAbortRef.current.signal.aborted))) return;
     multiEventGuestAbortRef.current?.abort();
     const controller = new AbortController();
@@ -1774,6 +1788,9 @@ export default function Home() {
     if (search) params.set("guest_search", search);
     if (hasNotes) params.set("guest_has_notes", "1");
     if (attendedGreaterThan !== "") params.set("guest_attended_gt", attendedGreaterThan);
+    if (answerQuestion) params.set("guest_answer_question", answerQuestion);
+    if (answer) params.set("guest_answer", answer);
+    if (answerKey) params.set("guest_answer_key", answerKey);
     tags.forEach((tag) => params.append("guest_tag", tag));
     if (tagMode === "all") params.set("guest_tag_mode", "all");
     excludedTags.forEach((tag) => params.append("guest_tag_not", tag));
@@ -1851,6 +1868,7 @@ export default function Home() {
           ...item,
           guestStats: data.stats || item.guestStats,
           guestAnalyticsQuestions: data.analyticsQuestions || item.guestAnalyticsQuestions || [],
+          guestAnalyticsAllQuestions: data.analyticsAllQuestions || item.guestAnalyticsAllQuestions || [],
           analyticsLoaded: true,
           analyticsLoading: false,
         } : item),
@@ -1973,7 +1991,7 @@ export default function Home() {
     setSelectedGuestIds(new Set());
     setAllMatchingGuestsSelected(false);
     lastSelectedGuestIdRef.current = "";
-  }, [selectedEventIdsKey, guestStatusFilterKey, debouncedGuestSearch, guestTagFilterKey, state.filters.guestHasNotes, state.filters.guestAttendedGreaterThan]);
+  }, [selectedEventIdsKey, guestStatusFilterKey, debouncedGuestSearch, guestTagFilterKey, state.filters.guestHasNotes, state.filters.guestAttendedGreaterThan, guestAnswerFilterKey]);
 
   // EVENT_SWITCH_DIAGNOSTICS: records the first React commit containing the newly selected event shell.
   useLayoutEffect(() => {
@@ -1998,7 +2016,7 @@ export default function Home() {
         priority: !event.guestsLoaded,
       });
     });
-  }, [sessionStatus, selectedEventIdsKey, activeEventTab, guestStatusFilterKey, debouncedGuestSearch, guestTagFilterKey, state.filters.guestHasNotes, state.filters.guestAttendedGreaterThan, guestSortField, guestDateSortDirection]);
+  }, [sessionStatus, selectedEventIdsKey, activeEventTab, guestStatusFilterKey, debouncedGuestSearch, guestTagFilterKey, state.filters.guestHasNotes, state.filters.guestAttendedGreaterThan, guestAnswerFilterKey, guestSortField, guestDateSortDirection]);
 
   useEffect(() => {
     if (sessionStatus !== "ready" || activeEventTab !== "overview") return;
@@ -2020,7 +2038,7 @@ export default function Home() {
     if (activeEventTab !== "overview" || pending.some((event) => !event.guestsLoaded || event.guestQueryLoading || event.guestHistoryLoading || event.guestHistoryLoaded === false)) return;
     const timer = window.setTimeout(() => pending.forEach((event) => void loadEventAnalytics(event.id)), 120);
     return () => window.clearTimeout(timer);
-  }, [sessionStatus, selectedEventIdsKey, selectedEvents.map((event) => `${event.analyticsLoaded}:${event.analyticsLoading}:${event.guestsLoaded}:${event.guestQueryLoading}:${event.guestHistoryLoaded}:${event.guestHistoryLoading}`).join("|"), activeEventTab]);
+  }, [sessionStatus, selectedEventIdsKey, selectedEvents.map((event) => `${event.analyticsLoaded}:${event.analyticsLoading}:${Array.isArray(event.guestAnalyticsQuestions)}:${Array.isArray(event.guestAnalyticsAllQuestions)}:${event.guestsLoaded}:${event.guestQueryLoading}:${event.guestHistoryLoaded}:${event.guestHistoryLoading}`).join("|"), activeEventTab]);
 
   useEffect(() => {
     if (sessionStatus !== "ready") return;
@@ -2043,7 +2061,7 @@ export default function Home() {
         }));
     }, 220);
     return () => window.clearTimeout(timer);
-  }, [sessionStatus, selectedEventIdsKey, selectedEvents.map((event) => `${event.analyticsLoaded}:${event.guestSnapshotReady}:${event.guestSnapshotWarming}`).join("|"), guestStatusFilterKey, debouncedGuestSearch, guestTagFilterKey, state.filters.guestHasNotes, state.filters.guestAttendedGreaterThan]);
+  }, [sessionStatus, selectedEventIdsKey, selectedEvents.map((event) => `${event.analyticsLoaded}:${event.guestSnapshotReady}:${event.guestSnapshotWarming}`).join("|"), guestStatusFilterKey, debouncedGuestSearch, guestTagFilterKey, state.filters.guestHasNotes, state.filters.guestAttendedGreaterThan, guestAnswerFilterKey]);
 
   // EVENT_SWITCH_DIAGNOSTICS: completes after the active tab's data has committed and reached a paint frame.
   useEffect(() => {
@@ -2132,6 +2150,9 @@ export default function Home() {
       draft.filters.guestTags = [];
       draft.filters.guestTagMode = "any";
       draft.filters.guestExcludedTags = [];
+      draft.filters.guestAnswerQuestion = "";
+      draft.filters.guestAnswer = "";
+      draft.filters.guestAnswerKey = "";
     });
     setActiveEventTab("overview");
   };
@@ -2755,6 +2776,9 @@ export default function Home() {
     guestAttendedGreaterThan: state.filters.guestAttendedGreaterThan === ""
       ? null
       : Number(state.filters.guestAttendedGreaterThan),
+    guestAnswerQuestion: state.filters.guestAnswerQuestion,
+    guestAnswer: state.filters.guestAnswer,
+    guestAnswerKey: state.filters.guestAnswerKey,
   });
 
   const requestBulkGuestStatus = (status: string, label: string) => {
@@ -2842,6 +2866,9 @@ export default function Home() {
             guestExcludedTags: selection?.guestExcludedTags,
             guestHasNotes: selection?.guestHasNotes,
             guestAttendedGreaterThan: selection?.guestAttendedGreaterThan,
+            guestAnswerQuestion: selection?.guestAnswerQuestion,
+            guestAnswer: selection?.guestAnswer,
+            guestAnswerKey: selection?.guestAnswerKey,
           } : {
             guests: operation.guests.map((guest) => ({ lumaGuestId: guest.lumaGuestId })),
           }),
@@ -2978,6 +3005,9 @@ export default function Home() {
           guestExcludedTags: selection?.guestExcludedTags,
           guestHasNotes: selection?.guestHasNotes,
           guestAttendedGreaterThan: selection?.guestAttendedGreaterThan,
+          guestAnswerQuestion: selection?.guestAnswerQuestion,
+          guestAnswer: selection?.guestAnswer,
+          guestAnswerKey: selection?.guestAnswerKey,
           tagIds,
           removed,
         } : { bulk: true, people, tagIds, removed }),
@@ -3969,6 +3999,17 @@ export default function Home() {
                         Clear filters
                       </button>
                     ) : null}
+                    {state.filters.guestAnswerQuestion ? (
+                      <div className="guest-answer-filter" title={state.filters.guestAnswerQuestion}>
+                        <span>
+                          <small>Registration answer</small>
+                          <strong>{state.filters.guestAnswer || `Answered “${state.filters.guestAnswerQuestion}”`}</strong>
+                        </span>
+                        <button type="button" aria-label="Clear registration answer filter" onClick={clearGuestAnswerFilter}>
+                          <X size={13} aria-hidden="true" />
+                        </button>
+                      </div>
+                    ) : null}
                     <StatusFilter
                       options={guestFilterOptions}
                       included={state.filters.guestStatuses}
@@ -4299,8 +4340,13 @@ export default function Home() {
               analytics={selectedEventAnalytics}
               loading={selectedEvents.some((event) => event.source === "luma" && !eventAnalyticsReady(event))}
               uniquePeople={multiEventMode}
+              cohort={analyticsCohort}
+              onCohortChange={(cohort) => {
+                if (cohort !== analyticsCohort) workspaceUrlModeRef.current = "push";
+                setAnalyticsCohort(cohort);
+              }}
               onOpenPerson={openAnalyticsResponsePerson}
-              onOpenRespondents={openAnalyticsRespondents}
+              onOpenRespondents={(question, option) => openAnalyticsRespondents(question, option, analyticsCohort)}
               onFilter={openAnalyticsGuestFilter}
             />
           ) : activeEventTab === "feedback" ? (
@@ -4399,23 +4445,6 @@ export default function Home() {
 
       {avatarPreview ? (
         <AvatarPhotoViewer preview={avatarPreview} onClose={() => setAvatarPreview(null)} />
-      ) : null}
-
-      {analyticsRespondentDialog ? (
-        <AnalyticsRespondentsDialog
-          draft={analyticsRespondentDialog}
-          onClose={() => setAnalyticsRespondentDialog(null)}
-          onAvatarClick={setAvatarPreview}
-          onLoadMore={() => {
-            const current = analyticsRespondentDialog;
-            if (!current || current.loading) return;
-            void loadAnalyticsRespondents(current, { append: current.respondents.length > 0 });
-          }}
-          onOpenPerson={(personId) => {
-            setAnalyticsRespondentDialog(null);
-            void openAnalyticsResponsePerson(personId);
-          }}
-        />
       ) : null}
 
       {eventDraft ? (
@@ -7571,7 +7600,7 @@ function RulePicker({ label, options, selected, onAdd, onChange }) {
   );
 }
 
-function AnalyticsTab({ event, analytics, loading = false, uniquePeople = false, onOpenPerson, onOpenRespondents, onFilter }) {
+function AnalyticsTab({ event, analytics, loading = false, uniquePeople = false, cohort = "all", onCohortChange, onOpenPerson, onOpenRespondents, onFilter }) {
   if (!event) return <section className="analytics-tab panel"><div className="empty-state">Select an event to view analytics.</div></section>;
   if (loading) {
     return (
@@ -7638,6 +7667,26 @@ function AnalyticsTab({ event, analytics, loading = false, uniquePeople = false,
         <div><p className="eyebrow">Event analytics</p><h2>{event.title}</h2></div>
         <span className="analytics-sample">{analytics.registrations} {uniquePeople ? "unique registrants" : "registrations"}</span>
       </header>
+      <div className="event-tabs analytics-cohort-tabs" role="tablist" aria-label="Analytics cohort">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={cohort === "all"}
+          className={`event-tab${cohort === "all" ? " active" : ""}`}
+          onClick={() => onCohortChange("all")}
+        >
+          All responses
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={cohort === "first_registers"}
+          className={`event-tab${cohort === "first_registers" ? " active" : ""}`}
+          onClick={() => onCohortChange("first_registers")}
+        >
+          First registers
+        </button>
+      </div>
 
       <div className="analytics-overview-grid">
         <article className="analytics-card invitation-funnel-card">
@@ -7710,14 +7759,14 @@ function AnalyticsTab({ event, analytics, loading = false, uniquePeople = false,
 
       <section className="answer-analytics">
         <div className="event-tab-heading compact">
-          <div><p className="eyebrow">First Registers</p><h2>Registration answers</h2></div>
-          <span className="analytics-sample">{analytics.newRegistrations} first registers</span>
+          <div><p className="eyebrow">{cohort === "all" ? "All responses" : "First registers"}</p><h2>Registration answers</h2></div>
+          <span className="analytics-sample">{cohort === "all" ? analytics.registrations : analytics.newRegistrations} {cohort === "all" ? (uniquePeople ? "unique registrants" : "registrations") : "first registers"}</span>
         </div>
         {analytics.questions.length ? (
           <div className="question-grid">
             {analytics.questions.map((question) => (
               <article className="question-chart" key={question.id}>
-                {question.kind === "categorical" ? (
+                {question.kind !== "text" ? (
                   <button
                     className="question-chart-head question-chart-head-button"
                     type="button"
@@ -7730,14 +7779,14 @@ function AnalyticsTab({ event, analytics, loading = false, uniquePeople = false,
                 ) : (
                   <div className="question-chart-head"><h3>{question.label}</h3><span>{question.responseCount} responses</span></div>
                 )}
-                {question.kind === "categorical" ? (
-                  <div className="bar-chart">
+                {question.kind !== "text" ? (
+                  <div className={`bar-chart${question.kind === "aggregated" ? " bar-chart-aggregated" : ""}`}>
                     {question.options.map((option) => (
                       <button
                         className="bar-row"
                         type="button"
                         aria-label={`View ${option.count} respondents who selected ${option.label}`}
-                        key={option.label}
+                        key={option.answerKey || option.label}
                         onClick={() => onOpenRespondents(question, option)}
                       >
                         <span title={option.label}>{option.label}</span>
@@ -7747,12 +7796,19 @@ function AnalyticsTab({ event, analytics, loading = false, uniquePeople = false,
                     ))}
                   </div>
                 ) : (
-                  <InfiniteQuestionResponses question={question} onOpenPerson={onOpenPerson} />
+                  <InfiniteQuestionResponses
+                    question={question}
+                    onOpenResponse={(response) => onOpenRespondents(question, {
+                      label: response.value,
+                      answerKey: normalizeRegistrationAnswer(response.value),
+                      count: 1,
+                    })}
+                  />
                 )}
               </article>
             ))}
           </div>
-        ) : <div className="empty-state">No registration answers from first registers are available for this event.</div>}
+        ) : <div className="empty-state">No registration answers are available for this cohort.</div>}
       </section>
     </section>
   );
@@ -7963,7 +8019,7 @@ function FeedbackTab({ events, feedback, people, onRefresh, onLoad, onOpenPerson
   );
 }
 
-function InfiniteQuestionResponses({ question, onOpenPerson }) {
+function InfiniteQuestionResponses({ question, onOpenResponse }) {
   const responses = Array.isArray(question.responses) ? question.responses : [];
   const responseKey = responses.map((response) => response.id).join("\u0000");
   const paginationKey = `${question.id}\u0000${responseKey}`;
@@ -7997,9 +8053,9 @@ function InfiniteQuestionResponses({ question, onOpenPerson }) {
         <button
           className="text-response-item"
           type="button"
-          aria-label={`Open guest who answered: ${response.value}`}
+          aria-label={`Filter guests who answered: ${response.value}`}
           key={response.id}
-          onClick={() => onOpenPerson(response.personId)}
+          onClick={() => onOpenResponse(response)}
         >
           <span>{response.value}</span>
           <Eye size={14} aria-hidden="true" />
@@ -9155,6 +9211,7 @@ function mergeLumaGuests(current, lumaData, { append = false, preserveView = fal
           guestLoadTruncated: preserveView ? event.guestLoadTruncated : lumaData.truncated,
           guestStats: lumaData.stats || event.guestStats,
           guestAnalyticsQuestions: lumaData.analyticsQuestions || event.guestAnalyticsQuestions || [],
+          guestAnalyticsAllQuestions: lumaData.analyticsAllQuestions || event.guestAnalyticsAllQuestions || [],
           guestSnapshotReady: lumaData.snapshotReady ?? event.guestSnapshotReady ?? false,
           guestSnapshotWarming: false,
           guestHistoryLoaded: preserveView ? event.guestHistoryLoaded : guests.every((guest: any) => Boolean(guest.eventCounts)),
@@ -9293,6 +9350,7 @@ function mergeIndexedEventState(existing, incoming) {
     "guestLoadTruncated",
     "guestStats",
     "guestAnalyticsQuestions",
+    "guestAnalyticsAllQuestions",
     "analyticsLoaded",
     "analyticsLoading",
     "guestSnapshotReady",
@@ -9941,7 +9999,7 @@ function hasProfileContent(state, person) {
   );
 }
 
-function buildEventAnalytics(state, event) {
+function buildEventAnalytics(state, event, cohort: "all" | "first_registers" = "all") {
   const empty = {
     registrations: 0,
     returningAccepted: 0,
@@ -10007,9 +10065,11 @@ function buildEventAnalytics(state, event) {
   const width = (value) => registrations ? Math.max(value ? 18 : 0, Math.round((value / registrations) * 100)) : 0;
   const subsetWidth = (value, parent) => parent ? Math.min(100, Math.max(value ? 24 : 0, Math.round((value / parent) * 100))) : 0;
 
-  const questions = Array.isArray(event.guestAnalyticsQuestions)
-    ? event.guestAnalyticsQuestions
-    : buildRegistrationQuestionAnalytics(firstRegisterRows.map(({ guest, person }) => ({
+  const indexedQuestions = cohort === "all" ? event.guestAnalyticsAllQuestions : event.guestAnalyticsQuestions;
+  const questionRows = cohort === "all" ? registrationRows : firstRegisterRows;
+  const questions = Array.isArray(indexedQuestions)
+    ? indexedQuestions
+    : buildRegistrationQuestionAnalytics(questionRows.map(({ guest, person }) => ({
         personId: person.id,
         registrationAnswers: guest.registrationAnswers,
       })));
@@ -10053,7 +10113,12 @@ function buildEventAnalytics(state, event) {
 }
 
 function eventAnalyticsReady(event) {
-  return Boolean(event?.analyticsLoaded && event?.guestStats);
+  return Boolean(
+    event?.analyticsLoaded
+      && event?.guestStats
+      && Array.isArray(event?.guestAnalyticsQuestions)
+      && Array.isArray(event?.guestAnalyticsAllQuestions),
+  );
 }
 
 function eventHeaderStatsReady(event) {
@@ -10076,9 +10141,9 @@ function eventHeaderStatsReady(event) {
   ].every((value) => Number.isFinite(Number(value)));
 }
 
-function buildWorkspaceAnalytics(state, events, uniqueStats = null) {
-  if (events.length <= 1) return buildEventAnalytics(state, events[0]);
-  const analytics = events.map((event) => buildEventAnalytics(state, event));
+function buildWorkspaceAnalytics(state, events, uniqueStats = null, cohort: "all" | "first_registers" = "all") {
+  if (events.length <= 1) return buildEventAnalytics(state, events[0], cohort);
+  const analytics = events.map((event) => buildEventAnalytics(state, event, cohort));
   const sum = (key) => analytics.reduce((total, item) => total + (Number(item[key]) || 0), 0);
   const registrations = uniqueStats ? Number(uniqueStats.registered) || 0 : sum("registrations");
   const firstRegisters = uniqueStats ? Number(uniqueStats.firstRegisters) || 0 : sum("firstRegisters");
@@ -10157,34 +10222,56 @@ function sumInvitationOutcome(analytics, key) {
 function mergeWorkspaceAnalyticsQuestions(questions) {
   const grouped = new Map();
   questions.forEach((question, questionIndex) => {
-    const key = `${question.kind}:${question.label}`;
+    const key = question.label.toLocaleLowerCase().trim();
     const current = grouped.get(key) || {
       ...question,
       id: key,
       responseCount: 0,
       options: [],
       responses: [],
+      _categorical: false,
     };
+    if (question.kind === "categorical") current._categorical = true;
     current.responseCount += Number(question.responseCount) || 0;
-    if (question.kind === "categorical") {
-      const counts = new Map(current.options.map((option) => [option.label, option.count]));
-      (question.options || []).forEach((option) => counts.set(option.label, (counts.get(option.label) || 0) + option.count));
-      current.options = [...counts.entries()].map(([label, count]) => ({ label, count, percent: 0 }));
-    } else {
+    const counts = new Map<string, any>(current.options.map((option) => [
+      option.answerKey || normalizeRegistrationAnswer(option.label),
+      { ...option },
+    ]));
+    if (question.kind === "text") {
       current.responses.push(...(question.responses || []).map((response, responseIndex) => ({
         ...response,
         id: `${questionIndex}-${responseIndex}-${response.id || "response"}`,
       })));
+      (question.responses || []).forEach((response) => {
+        const answerKey = normalizeRegistrationAnswer(response.value);
+        const existing = counts.get(answerKey);
+        counts.set(answerKey, existing
+          ? { ...existing, count: existing.count + 1 }
+          : { label: response.value, answerKey, count: 1, percent: 0 });
+      });
+    } else {
+      (question.options || []).forEach((option) => {
+        const answerKey = option.answerKey || normalizeRegistrationAnswer(option.label);
+        const existing = counts.get(answerKey);
+        counts.set(answerKey, existing
+          ? { ...existing, count: existing.count + option.count }
+          : { ...option, answerKey });
+      });
     }
+    current.options = [...counts.values()].map((option) => ({ ...option, percent: 0 }));
     grouped.set(key, current);
   });
   return [...grouped.values()].map((question) => {
-    if (question.kind !== "categorical") return question;
-    const total = question.options.reduce((sum, option) => sum + option.count, 0);
+    const maxCount = Math.max(...question.options.map((option) => option.count));
+    const kind = question._categorical ? "categorical" : maxCount > 3 ? "aggregated" : "text";
+    const { _categorical, ...result } = question;
+    if (kind === "text") return { ...result, kind, options: [] };
     return {
-      ...question,
+      ...result,
+      kind,
+      responses: [],
       options: sortRegistrationQuestionOptions(question.options
-        .map((option) => ({ ...option, percent: total ? Math.round((option.count / total) * 100) : 0 }))),
+        .map((option) => ({ ...option, percent: maxCount ? Math.round((option.count / maxCount) * 100) : 0 }))),
     };
   });
 }

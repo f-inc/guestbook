@@ -130,7 +130,7 @@ test("aggregates registration answers independently of guest-list filters", () =
   ]);
 });
 
-test("retains all free-text responses for incremental rendering", () => {
+test("keeps free-text responses as a list when no answer repeats more than three times", () => {
   const questions = buildRegistrationQuestionAnalytics(Array.from({ length: 12 }, (_, index) => ({
     personId: `person-${index}`,
     registrationAnswers: [{ id: "intro", label: "What are you building?", value: `Distinct response ${index}` }],
@@ -138,7 +138,35 @@ test("retains all free-text responses for incremental rendering", () => {
 
   assert.equal(questions[0].kind, "text");
   assert.equal(questions[0].responseCount, 12);
+  assert.equal(questions[0].options.length, 0);
   assert.equal(questions[0].responses.length, 12);
+});
+
+test("shows a free-text aggregate chart once a grouped answer repeats four times", () => {
+  const values = ["Repeated answer", "repeated-answer", "REPEATED ANSWER", "repeatedanswer", ...Array.from({ length: 9 }, (_, index) => `Distinct ${index}`)];
+  const questions = buildRegistrationQuestionAnalytics(values.map((value, index) => ({
+    personId: `person-${index}`,
+    registrationAnswers: [{ id: "intro", label: "What are you building?", value }],
+  })));
+
+  assert.equal(questions[0].kind, "aggregated");
+  assert.equal(questions[0].options[0].count, 4);
+  assert.equal(questions[0].options[0].percent, 100);
+  assert.equal(questions[0].responses.length, 0);
+});
+
+test("groups free-text answers that differ only by case, spacing, or punctuation", () => {
+  const values = ["Hasnain Baig", "hasnainbaig", " HASNAIN  BAIG ", "Hasnain-Baig", "Someone Else"];
+  const questions = buildRegistrationQuestionAnalytics(values.map((value, index) => ({
+    personId: `person-${index}`,
+    registrationAnswers: [{ id: "referrer", label: "Who referred you?", value }],
+  })));
+
+  assert.deepEqual(questions[0].options.map(({ label, answerKey, count }) => ({ label, answerKey, count })), [
+    { label: "Hasnain Baig", answerKey: "hasnainbaig", count: 4 },
+    { label: "Someone Else", answerKey: "someoneelse", count: 1 },
+  ]);
+  assert.deepEqual(questions[0].options.map(({ percent }) => percent), [100, 25]);
 });
 
 test("orders founder-stage answers by progression instead of popularity", () => {

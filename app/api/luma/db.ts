@@ -1610,8 +1610,9 @@ export async function listIndexedEventGuests(
 
   let stats = null;
   let analyticsQuestions = null;
+  let analyticsAllQuestions = null;
   if (includeSummary) {
-    ({ stats, analyticsQuestions } = await indexedEventAnalytics(db, eventId, eventBoundary, firstRegisterWhere, diagnosticReporter));
+    ({ stats, analyticsQuestions, analyticsAllQuestions } = await indexedEventAnalytics(db, eventId, eventBoundary, firstRegisterWhere, diagnosticReporter));
   }
 
   const personIds = [...new Set<string>((rows as any[]).map((row) => String(row.personId)))];
@@ -1660,7 +1661,7 @@ export async function listIndexedEventGuests(
     loadedAt: new Date().toISOString(),
     indexed: true,
     indexHasGuests: includeSummary ? Boolean(stats?.total) : true,
-    ...(stats ? { stats, analyticsQuestions } : {}),
+    ...(stats ? { stats, analyticsQuestions, analyticsAllQuestions } : {}),
     pageInfo: {
       total: filteredCount,
       pageSize: query.pageSize,
@@ -2017,6 +2018,9 @@ function indexedMultiEventGuestPageWhereSql(query: GuestListQuery) {
     ) > ${query.attendedGreaterThan}`);
   }
 
+  const answerPredicate = indexedRegistrationAnswerPredicateSql(query);
+  if (answerPredicate) predicates.push(answerPredicate);
+
   return predicates.length ? Prisma.sql`WHERE ${Prisma.join(predicates, " AND ")}` : Prisma.empty;
 }
 
@@ -2104,7 +2108,32 @@ function indexedGuestPageWhereSql(
     ) > ${query.attendedGreaterThan}`);
   }
 
+
+  const answerPredicate = indexedRegistrationAnswerPredicateSql(query);
+  if (answerPredicate) predicates.push(answerPredicate);
+
   return Prisma.sql`WHERE ${Prisma.join(predicates, " AND ")}`;
+}
+
+function indexedRegistrationAnswerPredicateSql(query: GuestListQuery): Prisma.Sql | null {
+  if (!query.answerQuestion) return null;
+  const valuePredicate = query.answerKey
+    ? Prisma.sql`AND LOWER(REGEXP_REPLACE(BTRIM(answer.item ->> 'value'), '[^[:alnum:]]+', '', 'g')) = ${query.answerKey}`
+    : query.answer
+      ? Prisma.sql`AND BTRIM(answer.item ->> 'value') = ${query.answer}`
+      : Prisma.empty;
+  return Prisma.sql`EXISTS (
+    SELECT 1
+    FROM JSONB_ARRAY_ELEMENTS(
+      CASE
+        WHEN JSONB_TYPEOF(guest.registration_answers) = 'array' THEN guest.registration_answers
+        ELSE '[]'::jsonb
+      END
+    ) AS answer(item)
+    WHERE LOWER(BTRIM(answer.item ->> 'label')) = LOWER(${query.answerQuestion})
+      AND BTRIM(answer.item ->> 'value') <> ''
+      ${valuePredicate}
+  )`;
 }
 
 function appendIndexedStatusRules(
@@ -2616,7 +2645,9 @@ export async function listIndexedAnalyticsRespondents(query: AnalyticsRespondent
     };
   }
 
-  const answerFilter = query.answer
+  const answerFilter = query.answerKey
+    ? Prisma.sql`AND LOWER(REGEXP_REPLACE(BTRIM(response.item ->> 'value'), '[^[:alnum:]]+', '', 'g')) = ${query.answerKey}`
+    : query.answer
     ? Prisma.sql`AND BTRIM(response.item ->> 'value') = ${query.answer}`
     : Prisma.empty;
   const pageRows = await prisma().$queryRaw<Array<{
@@ -2740,7 +2771,8 @@ async function indexedEventAnalytics(
   diagnosticReporter?: EventSwitchDiagnosticReporter,
 ) {
   const diagnosticStartedAt = Date.now();
-  const [summaryRows, analyticsQuestionRows] = await db.$transaction([
+  const analyticsQuestionLimit = safeInt("LUMA_ANALYTICS_MAX_NEW_FACES", 1000, 1, 5000);
+  const [summaryRows, analyticsQuestionRows, analyticsAllQuestionRows] = await db.$transaction([
     db.$queryRaw<Array<{ total: number; checkedIn: number; accepted: number; registered: number; pending: number; declined: number; invited: number; waitlisted: number; toDecide: number; firstRegisters: number; newRegistrations: number; newFaces: number; referredRegistrations: number; newReferrals: number; referredAccepted: number; referredCheckedIn: number; referredFirstRegisters: number; referredReturning: number; invitationTotal: number; invitedGoing: number; invitedCheckedIn: number; invitedNoShow: number; invitedNoResponse: number; invitedDeclined: number; invitedReferralTotal: number; invitedReferralGoing: number; invitedReferralCheckedIn: number; invitedReferralNoShow: number; invitedReferralNoResponse: number; invitedReferralDeclined: number }>>(Prisma.sql`
       WITH guest_cohort AS MATERIALIZED (
         SELECT guest.*
@@ -2848,16 +2880,30 @@ async function indexedEventAnalytics(
         ...(firstRegisterWhere ? { AND: [firstRegisterWhere] } : {}),
       },
       select: { personId: true, registrationAnswers: true },
-      take: safeInt("LUMA_ANALYTICS_MAX_NEW_FACES", 1000, 1, 5000),
+      take: analyticsQuestionLimit,
+      orderBy: [{ registeredAt: "desc" }, { createdAt: "desc" }, { lastSeenAt: "desc" }],
+    }),
+    db.lumaEventGuest.findMany({
+      where: {
+        eventId,
+        OR: [
+          { status: { in: [...GUEST_REGISTERED_STATUSES] } },
+          { status: "declined", registeredAt: { not: null } },
+        ],
+      },
+      select: { personId: true, registrationAnswers: true },
+      take: analyticsQuestionLimit,
       orderBy: [{ registeredAt: "desc" }, { createdAt: "desc" }, { lastSeenAt: "desc" }],
     }),
   ]);
   diagnosticReporter?.("analytics_queries", Date.now() - diagnosticStartedAt, {
     answerRowCount: analyticsQuestionRows.length,
+    allAnswerRowCount: analyticsAllQuestionRows.length,
   });
   return {
     stats: summaryRows[0] || { total: 0, checkedIn: 0, accepted: 0, registered: 0, pending: 0, declined: 0, invited: 0, waitlisted: 0, toDecide: 0, firstRegisters: 0, newRegistrations: 0, newFaces: 0, referredRegistrations: 0, newReferrals: 0, referredAccepted: 0, referredCheckedIn: 0, referredFirstRegisters: 0, referredReturning: 0, invitationTotal: 0, invitedGoing: 0, invitedCheckedIn: 0, invitedNoShow: 0, invitedNoResponse: 0, invitedDeclined: 0, invitedReferralTotal: 0, invitedReferralGoing: 0, invitedReferralCheckedIn: 0, invitedReferralNoShow: 0, invitedReferralNoResponse: 0, invitedReferralDeclined: 0 },
     analyticsQuestions: buildRegistrationQuestionAnalytics(analyticsQuestionRows),
+    analyticsAllQuestions: buildRegistrationQuestionAnalytics(analyticsAllQuestionRows),
   };
 }
 

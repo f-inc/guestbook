@@ -37,6 +37,7 @@ export type WorkspaceUrlState = {
   eventSort?: EventDirectorySortKey;
   eventSortDirection?: "asc" | "desc";
   tab: "overview" | "invite" | "analytics" | "feedback";
+  analyticsCohort?: "all" | "first_registers";
   guestStatus: string;
   guestStatuses?: string[];
   guestStatusMode?: "any" | "all";
@@ -47,6 +48,9 @@ export type WorkspaceUrlState = {
   guestExcludedTags?: string[];
   guestHasNotes?: boolean;
   guestAttendedGreaterThan?: number | null;
+  guestAnswerQuestion?: string;
+  guestAnswer?: string;
+  guestAnswerKey?: string;
   guestPage: number;
   profileId: string;
 };
@@ -86,6 +90,7 @@ const WORKSPACE_PARAMS = [
   "sort",
   "direction",
   "tab",
+  "analytics_cohort",
   "guest_status",
   "guest_status_mode",
   "guest_status_not",
@@ -95,6 +100,9 @@ const WORKSPACE_PARAMS = [
   "guest_tag_not",
   "guest_has_notes",
   "guest_attended_gt",
+  "guest_answer_question",
+  "guest_answer",
+  "guest_answer_key",
   "guest_page",
   "profile",
 ];
@@ -115,6 +123,7 @@ export function parseWorkspaceUrl(search: string): WorkspaceUrlState {
 
   const guestHasNotes = params.get("guest_has_notes") === "1";
   const guestAttendedGreaterThan = boundedOptionalInteger(params.get("guest_attended_gt"), 0, 10_000);
+  const guestAnswerQuestion = boundedText(params.get("guest_answer_question"), 500);
   return {
     eventId: eventIds.at(-1) || "",
     eventIds,
@@ -122,6 +131,7 @@ export function parseWorkspaceUrl(search: string): WorkspaceUrlState {
     eventSearch: boundedText(params.get("event_search"), 120),
     ...(eventSort ? { eventSort, eventSortDirection } : {}),
     tab: EVENT_TABS.has(tab) ? tab as WorkspaceUrlState["tab"] : "overview",
+    analyticsCohort: params.get("analytics_cohort") === "first_registers" ? "first_registers" : "all",
     guestStatus: guestStatuses[0] || "all",
     guestStatuses,
     guestStatusMode: params.get("guest_status_mode") === "all" ? "all" : "any",
@@ -132,6 +142,11 @@ export function parseWorkspaceUrl(search: string): WorkspaceUrlState {
     guestExcludedTags: unique(params.getAll("guest_tag_not").map((tag) => boundedText(tag, 40)).filter(Boolean)).slice(0, 20),
     ...(guestHasNotes ? { guestHasNotes: true } : {}),
     ...(guestAttendedGreaterThan === null ? {} : { guestAttendedGreaterThan }),
+    ...(guestAnswerQuestion ? {
+      guestAnswerQuestion,
+      guestAnswer: boundedText(params.get("guest_answer"), 500),
+      guestAnswerKey: boundedText(params.get("guest_answer_key"), 500),
+    } : {}),
     guestPage: Number.isFinite(requestedPage) ? Math.min(100, Math.max(1, requestedPage)) : 1,
     profileId: boundedText(params.get("profile"), 160),
   };
@@ -152,6 +167,7 @@ export function buildWorkspaceUrlSearch(currentSearch: string, state: WorkspaceU
     params.set("direction", eventSortDirection);
   }
   if (state.tab !== "overview") params.set("tab", state.tab);
+  if (state.analyticsCohort === "first_registers") params.set("analytics_cohort", "first_registers");
   const guestStatuses = unique(state.guestStatuses?.length
     ? state.guestStatuses
     : state.guestStatus !== "all"
@@ -168,6 +184,9 @@ export function buildWorkspaceUrlSearch(currentSearch: string, state: WorkspaceU
   unique(state.guestExcludedTags || []).forEach((tag) => params.append("guest_tag_not", tag));
   if (state.guestHasNotes) params.set("guest_has_notes", "1");
   if (state.guestAttendedGreaterThan != null) params.set("guest_attended_gt", String(state.guestAttendedGreaterThan));
+  if (state.guestAnswerQuestion) params.set("guest_answer_question", state.guestAnswerQuestion);
+  if (state.guestAnswer) params.set("guest_answer", state.guestAnswer);
+  if (state.guestAnswerKey) params.set("guest_answer_key", state.guestAnswerKey);
   if (state.guestPage > 1) params.set("guest_page", String(Math.floor(state.guestPage)));
   if (state.profileId) params.set("profile", state.profileId);
 

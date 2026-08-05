@@ -815,6 +815,26 @@
     @apply h-10 min-h-10 whitespace-nowrap text-muted hover:bg-danger-soft hover:text-danger;
   }
 
+  .guest-answer-filter {
+    @apply flex h-10 max-w-56 items-center gap-2 rounded-md border border-brand/30 bg-brand-soft/30 px-2.5 text-left;
+  }
+
+  .guest-answer-filter > span {
+    @apply grid min-w-0 flex-1;
+  }
+
+  .guest-answer-filter small {
+    @apply text-[9px] font-bold uppercase tracking-wide text-brand;
+  }
+
+  .guest-answer-filter strong {
+    @apply truncate text-xs font-semibold text-ink;
+  }
+
+  .guest-answer-filter button {
+    @apply grid size-6 shrink-0 place-items-center rounded-full border-0 bg-transparent text-muted hover:bg-surface hover:text-ink;
+  }
+
   .tag-filter-control {
     @apply relative grid min-w-40 gap-1 text-[11px] font-semibold text-muted;
   }
@@ -1644,6 +1664,18 @@
 
   .event-tab-heading h2 {
     @apply mt-1 text-xl font-bold;
+  }
+
+  .analytics-cohort-tabs {
+    @apply mb-5 inline-flex items-center gap-1 rounded-lg border border-border bg-subtle p-1;
+  }
+
+  .analytics-cohort-tabs button {
+    @apply min-h-9 rounded-md border-0 bg-transparent px-4 text-sm font-semibold text-muted transition hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/20;
+  }
+
+  .analytics-cohort-tabs button.active {
+    @apply bg-white text-brand shadow-sm;
   }
 
   .invite-send-summary {
@@ -3126,9 +3158,17 @@
     @apply mt-4 grid gap-3;
   }
 
+  .bar-chart-aggregated {
+    @apply max-h-64 overflow-y-auto pr-1;
+  }
+
   .bar-row {
     @apply grid w-full cursor-pointer items-center gap-2 rounded-md border-0 bg-transparent p-1.5 text-left text-xs transition hover:bg-warning-soft/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warning/30;
-    grid-template-columns: minmax(90px, 0.9fr) minmax(100px, 1.4fr) 24px;
+    grid-template-columns: minmax(110px, 1fr) minmax(24px, 180px) 28px;
+  }
+
+  .bar-chart-aggregated .bar-row {
+    grid-template-columns: minmax(110px, 1fr) minmax(24px, 120px) 28px;
   }
 
   .bar-row > span {

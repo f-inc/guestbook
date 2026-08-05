@@ -173,22 +173,49 @@ export function buildRegistrationQuestionAnalytics(rows: RegistrationAnswerRow[]
 
   return [...answerGroups.values()]
     .map((question) => {
-      const counts = new Map<string, number>();
-      question.responses.forEach((response) => counts.set(response.value, (counts.get(response.value) || 0) + 1));
-      const options = [...counts.entries()]
-        .map(([label, count]) => ({ label, count, percent: Math.round((count / question.responses.length) * 100) }));
+      const groups = new Map<string, { answerKey: string; count: number; variants: Map<string, number> }>();
+      question.responses.forEach((response) => {
+        const answerKey = normalizeRegistrationAnswer(response.value);
+        const group = groups.get(answerKey) || { answerKey, count: 0, variants: new Map<string, number>() };
+        group.count += 1;
+        group.variants.set(response.value, (group.variants.get(response.value) || 0) + 1);
+        groups.set(answerKey, group);
+      });
+      const maxCount = Math.max(...[...groups.values()].map((group) => group.count));
+      const options = [...groups.values()].map((group) => {
+        const label = [...group.variants.entries()]
+          .sort((left, right) => right[1] - left[1] || registrationAnswerLabelScore(right[0]) - registrationAnswerLabelScore(left[0]))[0][0];
+        return {
+          label,
+          answerKey: group.answerKey,
+          count: group.count,
+          percent: maxCount ? Math.round((group.count / maxCount) * 100) : 0,
+        };
+      });
       sortRegistrationQuestionOptions(options);
       const categorical = (options.length <= 8 || isFounderStageQuestion(options))
         && options.every((option) => option.label.length <= 64);
+      const aggregate = !categorical && maxCount > 3;
       return {
         ...question,
         responseCount: question.responses.length,
-        kind: categorical ? "categorical" : "text",
-        options: categorical ? options : [],
-        responses: categorical ? [] : question.responses,
+        kind: categorical ? "categorical" : aggregate ? "aggregated" : "text",
+        options: categorical || aggregate ? options : [],
+        responses: categorical || aggregate ? [] : question.responses,
       };
     })
     .sort((left, right) => right.responseCount - left.responseCount || left.label.localeCompare(right.label));
+}
+
+export function normalizeRegistrationAnswer(value: string): string {
+  const normalized = String(value).normalize("NFKC").toLocaleLowerCase().trim();
+  return normalized.replace(/[^\p{L}\p{N}]+/gu, "") || normalized;
+}
+
+function registrationAnswerLabelScore(label: string): number {
+  const hasReadableWordBreak = /[\p{L}\p{N}]\s+[\p{L}\p{N}]/u.test(label);
+  const hasNaturalCapitalization = /\p{Lu}/u.test(label) && /\p{Ll}/u.test(label);
+  return Number(hasReadableWordBreak) * 2 + Number(hasNaturalCapitalization);
 }
 
 export function sortRegistrationQuestionOptions<T extends { label: string; count: number }>(options: T[]): T[] {

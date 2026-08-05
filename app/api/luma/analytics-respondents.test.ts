@@ -9,12 +9,14 @@ test("parses a bounded analytics respondent page", () => {
   params.append("event_id", "evt-1");
   params.set("question", "  Where are you at?  ");
   params.set("answer", "  Shipped Prototype  ");
+  params.set("answer_key", "shippedprototype");
   params.set("respondent_cursor", "20");
 
   assert.deepEqual(parseAnalyticsRespondentQuery(params), {
     eventIds: ["evt-1", "evt-2"],
     question: "Where are you at?",
     answer: "Shipped Prototype",
+    answerKey: "shippedprototype",
     cursor: 20,
     pageSize: ANALYTICS_RESPONDENT_PAGE_SIZE,
   });

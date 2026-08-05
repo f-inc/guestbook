@@ -26,6 +26,7 @@ test("parses workspace navigation state from the URL", () => {
     eventView: "past",
     eventSearch: "",
     tab: "analytics",
+    analyticsCohort: "all",
     guestStatus: "accepted",
     guestStatuses: ["accepted"],
     guestStatusMode: "any",
@@ -43,6 +44,12 @@ test("preserves the feedback event tab in workspace URLs", () => {
   const state = parseWorkspaceUrl("?event=evt-1&tab=feedback");
   assert.equal(state.tab, "feedback");
   assert.match(buildWorkspaceUrlSearch("", state), /tab=feedback/);
+});
+
+test("round-trips the first-register analytics cohort", () => {
+  const state = parseWorkspaceUrl("?event=evt-1&tab=analytics&analytics_cohort=first_registers");
+  assert.equal(state.analyticsCohort, "first_registers");
+  assert.match(buildWorkspaceUrlSearch("", state), /analytics_cohort=first_registers/);
 });
 
 test("round-trips included, excluded, and ALL status rules", () => {
@@ -88,6 +95,16 @@ test("persists guest note and attendance filters", () => {
   assert.equal(state.guestAttendedGreaterThan, 4);
   assert.match(buildWorkspaceUrlSearch("", state), /guest_has_notes=1/);
   assert.match(buildWorkspaceUrlSearch("", state), /guest_attended_gt=4/);
+});
+
+test("persists registration-answer guest filters", () => {
+  const state = parseWorkspaceUrl("?guest_answer_question=Who+referred+you%3F&guest_answer=Mike+Shin&guest_answer_key=mikeshin");
+  assert.equal(state.guestAnswerQuestion, "Who referred you?");
+  assert.equal(state.guestAnswer, "Mike Shin");
+  assert.equal(state.guestAnswerKey, "mikeshin");
+  const search = buildWorkspaceUrlSearch("", state);
+  assert.match(search, /guest_answer_question=Who\+referred\+you%3F/);
+  assert.match(search, /guest_answer_key=mikeshin/);
 });
 
 test("serializes non-default workspace state and preserves unrelated params", () => {

@@ -12,6 +12,9 @@ type AllMatchingGuestQueryInput = {
   guestExcludedTags?: unknown;
   guestHasNotes?: unknown;
   guestAttendedGreaterThan?: unknown;
+  guestAnswerQuestion?: unknown;
+  guestAnswer?: unknown;
+  guestAnswerKey?: unknown;
 };
 
 export function parseAllMatchingGuestQuery(input: AllMatchingGuestQueryInput = {}): GuestListQuery {
@@ -59,6 +62,13 @@ export function parseAllMatchingGuestQuery(input: AllMatchingGuestQueryInput = {
     && (!Number.isInteger(input.guestAttendedGreaterThan) || Number(input.guestAttendedGreaterThan) < 0)) {
     throw badRequest("Events attended filter must be a non-negative integer.");
   }
+  for (const [value, label] of [
+    [input.guestAnswerQuestion, "Guest answer question"],
+    [input.guestAnswer, "Guest answer"],
+    [input.guestAnswerKey, "Guest answer key"],
+  ] as const) {
+    if (value !== undefined && typeof value !== "string") throw badRequest(`${label} must be a string.`);
+  }
 
   const params = new URLSearchParams({
     guest_search: typeof input.guestSearch === "string" ? input.guestSearch : "",
@@ -84,6 +94,9 @@ export function parseAllMatchingGuestQuery(input: AllMatchingGuestQueryInput = {
   if (input.guestAttendedGreaterThan !== undefined && input.guestAttendedGreaterThan !== null) {
     params.set("guest_attended_gt", String(input.guestAttendedGreaterThan));
   }
+  if (typeof input.guestAnswerQuestion === "string" && input.guestAnswerQuestion) params.set("guest_answer_question", input.guestAnswerQuestion);
+  if (typeof input.guestAnswer === "string" && input.guestAnswer) params.set("guest_answer", input.guestAnswer);
+  if (typeof input.guestAnswerKey === "string" && input.guestAnswerKey) params.set("guest_answer_key", input.guestAnswerKey);
   return parseGuestListQuery(params);
 }
 

@@ -118,6 +118,18 @@ test("parses note and lifetime attendance filters through the indexed query", ()
   assert.equal(guestQueryRequiresIndex(query), true);
 });
 
+test("parses registration-answer filters through the indexed query", () => {
+  const query = parseGuestListQuery(new URLSearchParams({
+    guest_answer_question: "Who referred or invited you?",
+    guest_answer: "Mike Shin",
+    guest_answer_key: "mikeshin",
+  }));
+  assert.equal(query.answerQuestion, "Who referred or invited you?");
+  assert.equal(query.answer, "Mike Shin");
+  assert.equal(query.answerKey, "mikeshin");
+  assert.equal(guestQueryRequiresIndex(query), true);
+});
+
 test("filters guests with comments through the comment relation", () => {
   const query = parseGuestListQuery(new URLSearchParams({ guest_has_notes: "1" }));
   assert.deepEqual(eventGuestWhere("event-1", query), {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { MAX_SELECTED_EVENT_IDS } from "../../event-selection";
-import { buildWorkspaceUrlSearch, isEventDirectoryPath, parseWorkspaceUrl, workspacePathname } from "../../workspace-url";
+import { buildWorkspaceUrlSearch, isEventDirectoryPath, parseWorkspaceUrl, workspaceHistoryStateWithScroll, workspacePathname, workspaceScrollTopFromHistoryState } from "../../workspace-url";
 
 test("uses a dedicated path for the event directory", () => {
   assert.equal(workspacePathname(true), "/events");
@@ -11,12 +11,31 @@ test("uses a dedicated path for the event directory", () => {
   assert.equal(isEventDirectoryPath("/"), false);
 });
 
+test("stores workspace scroll position without discarding browser history state", () => {
+  const state = workspaceHistoryStateWithScroll({ router: "preserved" }, 742.4);
+  assert.deepEqual(state, { router: "preserved", guestbookWorkspaceScrollTop: 742 });
+  assert.equal(workspaceScrollTopFromHistoryState(state), 742);
+});
+
+test("rejects invalid workspace scroll history values", () => {
+  assert.equal(workspaceScrollTopFromHistoryState(null), null);
+  assert.equal(workspaceScrollTopFromHistoryState({ guestbookWorkspaceScrollTop: -1 }), null);
+  assert.equal(workspaceScrollTopFromHistoryState({ guestbookWorkspaceScrollTop: "nope" }), null);
+});
+
 test("round-trips event directory sorting", () => {
   const state = parseWorkspaceUrl("?sort=average_rating&direction=asc");
   assert.equal(state.eventSort, "averageRating");
   assert.equal(state.eventSortDirection, "asc");
   assert.match(buildWorkspaceUrlSearch("", state), /sort=average_rating/);
   assert.match(buildWorkspaceUrlSearch("", state), /direction=asc/);
+});
+
+test("round-trips show-rate event directory sorting", () => {
+  const state = parseWorkspaceUrl("?sort=show_rate&direction=desc");
+  assert.equal(state.eventSort, "showRate");
+  assert.equal(state.eventSortDirection, "desc");
+  assert.match(buildWorkspaceUrlSearch("", state), /sort=show_rate/);
 });
 
 test("parses workspace navigation state from the URL", () => {

@@ -65,7 +65,7 @@ import {
   EVENT_SWITCH_DIAGNOSTICS_PARAM,
 } from "./event-switch-diagnostics";
 import { aggregateEventFeedback } from "./api/luma/event-feedback";
-import { buildWorkspaceUrlSearch, isEventDirectoryPath, parseWorkspaceUrl, workspacePathname, type EventDirectorySortKey, type WorkspaceUrlState } from "./workspace-url";
+import { buildWorkspaceUrlSearch, isEventDirectoryPath, parseWorkspaceUrl, workspaceHistoryStateWithScroll, workspacePathname, workspaceScrollTopFromHistoryState, type EventDirectorySortKey, type WorkspaceUrlState } from "./workspace-url";
 
 const statusLabels = {
   registered: "Registered",
@@ -246,6 +246,9 @@ export default function Home() {
   const [workspaceUrlReady, setWorkspaceUrlReady] = useState(false);
   const [guestPageTarget, setGuestPageTarget] = useState(1);
   const workspaceUrlModeRef = useRef<"push" | "replace">("replace");
+  const mainStackRef = useRef<HTMLElement | null>(null);
+  const pendingWorkspaceScrollRef = useRef<number | null>(null);
+  const [workspaceScrollRestoreVersion, setWorkspaceScrollRestoreVersion] = useState(0);
   const pendingProfileIdRef = useRef("");
   const [apiState, setApiStateValue] = useState({ status: "loading", message: "Checking Luma API" });
   const [toastSequence, setToastSequence] = useState(0);
@@ -349,6 +352,15 @@ export default function Home() {
 
   const invalidateMultiEventStats = () => setMultiEventStatsByKey({});
 
+  const rememberWorkspaceScroll = () => {
+    const scrollTop = mainStackRef.current?.scrollTop ?? window.scrollY;
+    window.history.replaceState(
+      workspaceHistoryStateWithScroll(window.history.state, scrollTop),
+      "",
+      window.location.href,
+    );
+  };
+
   const applyWorkspaceUrlState = (urlState: WorkspaceUrlState) => {
     workspaceUrlModeRef.current = "replace";
     pendingProfileIdRef.current = urlState.profileId;
@@ -394,9 +406,11 @@ export default function Home() {
     applyWorkspaceUrlState(parseWorkspaceUrl(window.location.search));
     setEventDirectoryOpen(isEventDirectoryPath(window.location.pathname));
     setWorkspaceUrlReady(true);
-    const handlePopState = () => {
+    const handlePopState = (event: PopStateEvent) => {
+      pendingWorkspaceScrollRef.current = workspaceScrollTopFromHistoryState(event.state);
       applyWorkspaceUrlState(parseWorkspaceUrl(window.location.search));
       setEventDirectoryOpen(isEventDirectoryPath(window.location.pathname));
+      setWorkspaceScrollRestoreVersion((current) => current + 1);
     };
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
@@ -899,6 +913,30 @@ export default function Home() {
     () => buildWorkspaceAnalytics(state, selectedEvents, uniqueWorkspaceStats, analyticsCohort),
     [state, selectedEventIdsKey, uniqueWorkspaceStats, analyticsCohort],
   );
+
+  useLayoutEffect(() => {
+    const targetScrollTop = pendingWorkspaceScrollRef.current;
+    if (targetScrollTop === null) return;
+    let animationFrame = 0;
+    const startedAt = window.performance.now();
+    const restore = () => {
+      const scrollPane = mainStackRef.current;
+      if (!scrollPane) {
+        if (window.performance.now() - startedAt < 10_000) animationFrame = window.requestAnimationFrame(restore);
+        return;
+      }
+      const maximumScrollTop = Math.max(0, scrollPane.scrollHeight - scrollPane.clientHeight);
+      scrollPane.scrollTop = Math.min(targetScrollTop, maximumScrollTop);
+      if (maximumScrollTop + 1 >= targetScrollTop || window.performance.now() - startedAt >= 10_000) {
+        pendingWorkspaceScrollRef.current = null;
+        return;
+      }
+      animationFrame = window.requestAnimationFrame(restore);
+    };
+    animationFrame = window.requestAnimationFrame(restore);
+    return () => window.cancelAnimationFrame(animationFrame);
+  }, [workspaceScrollRestoreVersion, activeEventTab, analyticsCohort, selectedEventIdsKey]);
+
   const filteredEvents = useMemo(() => visibleEvents(state, lifecycleNow), [state, lifecycleNow]);
   const eventSearchActive = Boolean(state.filters.globalSearch.trim());
   const allFilteredEventsSelected = filteredEvents.length > 0
@@ -1021,7 +1059,10 @@ export default function Home() {
     const nextUrl = new URL(window.location.href);
     nextUrl.pathname = nextPathname;
     nextUrl.search = nextSearch;
-    window.history[mode === "push" ? "pushState" : "replaceState"]({}, "", nextUrl);
+    const nextHistoryState = mode === "push"
+      ? workspaceHistoryStateWithScroll(window.history.state, 0)
+      : window.history.state;
+    window.history[mode === "push" ? "pushState" : "replaceState"](nextHistoryState, "", nextUrl);
   }, [
     workspaceUrlReady,
     state.events.length,
@@ -1293,6 +1334,7 @@ export default function Home() {
   };
 
   const openAnalyticsRespondents = (question, option = null, cohort: "all" | "first_registers" = "all") => {
+    rememberWorkspaceScroll();
     workspaceUrlModeRef.current = "push";
     setGuestPageTarget(1);
     setDebouncedGuestSearch("");
@@ -2128,6 +2170,10 @@ export default function Home() {
   };
 
   const selectGuestFilter = (filter) => {
+    if (activeEventTab === "analytics") {
+      rememberWorkspaceScroll();
+      workspaceUrlModeRef.current = "push";
+    }
     const selected = state.filters.guestStatuses.length === 1
       && state.filters.guestStatuses[0] === filter
       && state.filters.guestExcludedStatuses.length === 0;
@@ -2136,6 +2182,8 @@ export default function Home() {
   };
 
   const openAnalyticsGuestFilter = (filter) => {
+    rememberWorkspaceScroll();
+    workspaceUrlModeRef.current = "push";
     setGuestPageTarget(1);
     setDebouncedGuestSearch("");
     setAllMatchingGuestsSelected(false);
@@ -3834,7 +3882,7 @@ export default function Home() {
           </div>
         </aside>
 
-        <section className="main-stack">
+        <section className="main-stack" ref={mainStackRef}>
           {eventDirectoryOpen ? (
             <EventDirectory
               events={eventDirectoryState.events}
@@ -3971,6 +4019,7 @@ export default function Home() {
                     onPointerEnter={() => tab.id === "invite" && void loadInviteMetadata("tags").catch(() => {})}
                     onFocus={() => tab.id === "invite" && void loadInviteMetadata("tags").catch(() => {})}
                     onClick={() => {
+                      if (activeEventTab === "analytics" && tab.id === "overview") rememberWorkspaceScroll();
                       if (tab.id !== activeEventTab) workspaceUrlModeRef.current = "push";
                       setActiveEventTab(tab.id);
                       pendingProfileIdRef.current = "";
@@ -4562,12 +4611,15 @@ export default function Home() {
   );
 }
 
+const eventDirectoryShowRateFormatter = new Intl.NumberFormat(undefined, { style: "percent", maximumFractionDigits: 1 });
+
 const eventDirectoryColumns = [
   { key: "title", label: "Event", kind: "text" },
   { key: "date", label: "Date", kind: "date" },
   { key: "newFaces", label: "New faces", kind: "number" },
   { key: "newReferrals", label: "New referrals", kind: "number" },
   { key: "checkedIn", label: "Check-ins", kind: "number" },
+  { key: "showRate", label: "Show rate", kind: "number" },
   { key: "firstRegisters", label: "First registers", kind: "number" },
   { key: "accepted", label: "Accepted", kind: "number" },
   { key: "registered", label: "Registered", kind: "number" },
@@ -4580,14 +4632,20 @@ const eventDirectoryColumns = [
 function EventDirectory({ events, eventFeedbackById, sort, status, error, onOpenEvent, onRetry, onRefresh, onSortChange }) {
   const rows = useMemo(() => events.map((event) => {
     const feedback = eventFeedbackById[event.id];
+    const accepted = Math.max(0, Number(event.accepted) || 0);
+    const checkedIn = Math.max(0, Number(event.checkedIn) || 0);
+    const eventWithShowRate = {
+      ...event,
+      showRate: accepted > 0 ? checkedIn / accepted : null,
+    };
     return feedback?.status === "ready"
       ? {
-          ...event,
+          ...eventWithShowRate,
           averageRating: feedback.averageRating,
           ratingCount: Object.values(feedback.ratingCounts || {})
             .reduce<number>((sum, count) => sum + Math.max(0, Number(count) || 0), 0),
         }
-      : event;
+      : eventWithShowRate;
   }), [events, eventFeedbackById]);
   const ratingsLoading = events.some((event) => eventFeedbackById[event.id]?.status === "loading");
   const sortedRows = useMemo(() => {
@@ -4682,6 +4740,9 @@ function EventDirectory({ events, eventFeedbackById, sort, status, error, onOpen
                     <td>{Number(event.newFaces).toLocaleString()}</td>
                     <td>{Number(event.newReferrals).toLocaleString()}</td>
                     <td>{Number(event.checkedIn).toLocaleString()}</td>
+                    <td title={event.showRate == null ? "No accepted guests" : `${Number(event.checkedIn).toLocaleString()} check-ins / ${Number(event.accepted).toLocaleString()} accepted`}>
+                      {event.showRate == null ? "—" : eventDirectoryShowRateFormatter.format(event.showRate)}
+                    </td>
                     <td>{Number(event.firstRegisters).toLocaleString()}</td>
                     <td>{Number(event.accepted).toLocaleString()}</td>
                     <td>{Number(event.registered).toLocaleString()}</td>

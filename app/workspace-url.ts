@@ -1,7 +1,8 @@
 import { MAX_SELECTED_EVENT_IDS } from "./event-selection";
 
 export const EVENT_DIRECTORY_PATH = "/events";
-export type EventDirectorySortKey = "title" | "date" | "newFaces" | "newReferrals" | "checkedIn" | "firstRegisters" | "accepted" | "registered" | "invited" | "waitlisted" | "averageRating" | "modifiedAt";
+export const WORKSPACE_SCROLL_HISTORY_KEY = "guestbookWorkspaceScrollTop";
+export type EventDirectorySortKey = "title" | "date" | "newFaces" | "newReferrals" | "checkedIn" | "showRate" | "firstRegisters" | "accepted" | "registered" | "invited" | "waitlisted" | "averageRating" | "modifiedAt";
 
 const EVENT_DIRECTORY_SORT_PARAMS: Record<EventDirectorySortKey, string> = {
   title: "title",
@@ -9,6 +10,7 @@ const EVENT_DIRECTORY_SORT_PARAMS: Record<EventDirectorySortKey, string> = {
   newFaces: "new_faces",
   newReferrals: "new_referrals",
   checkedIn: "check_ins",
+  showRate: "show_rate",
   firstRegisters: "first_registers",
   accepted: "accepted",
   registered: "registered",
@@ -27,6 +29,20 @@ export function isEventDirectoryPath(pathname: string) {
 
 export function workspacePathname(eventDirectoryOpen: boolean) {
   return eventDirectoryOpen ? EVENT_DIRECTORY_PATH : "/";
+}
+
+export function workspaceHistoryStateWithScroll(currentState: unknown, scrollTop: number) {
+  const state = currentState && typeof currentState === "object" && !Array.isArray(currentState)
+    ? currentState as Record<string, unknown>
+    : {};
+  const normalizedScrollTop = Number.isFinite(scrollTop) ? Math.max(0, Math.round(scrollTop)) : 0;
+  return { ...state, [WORKSPACE_SCROLL_HISTORY_KEY]: normalizedScrollTop };
+}
+
+export function workspaceScrollTopFromHistoryState(state: unknown): number | null {
+  if (!state || typeof state !== "object" || Array.isArray(state)) return null;
+  const value = Number((state as Record<string, unknown>)[WORKSPACE_SCROLL_HISTORY_KEY]);
+  return Number.isFinite(value) && value >= 0 ? value : null;
 }
 
 export type WorkspaceUrlState = {

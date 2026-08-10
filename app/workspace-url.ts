@@ -3,6 +3,8 @@ import { MAX_SELECTED_EVENT_IDS } from "./event-selection";
 export const EVENT_DIRECTORY_PATH = "/events";
 export const WORKSPACE_SCROLL_HISTORY_KEY = "guestbookWorkspaceScrollTop";
 export type EventDirectorySortKey = "title" | "date" | "newFaces" | "newReferrals" | "checkedIn" | "showRate" | "firstRegisters" | "accepted" | "registered" | "invited" | "waitlisted" | "averageRating" | "modifiedAt";
+export type EventDirectoryMetricKey = "newFaces" | "newReferrals" | "checkedIn" | "showRate" | "firstRegisters" | "accepted" | "registered" | "invited" | "waitlisted";
+export type EventDirectoryMetricFilter = { key: EventDirectoryMetricKey; operator: "gte" | "lte"; value: number };
 
 const EVENT_DIRECTORY_SORT_PARAMS: Record<EventDirectorySortKey, string> = {
   title: "title",
@@ -22,6 +24,17 @@ const EVENT_DIRECTORY_SORT_PARAMS: Record<EventDirectorySortKey, string> = {
 const EVENT_DIRECTORY_SORT_KEYS = new Map(
   Object.entries(EVENT_DIRECTORY_SORT_PARAMS).map(([key, value]) => [value, key as EventDirectorySortKey]),
 );
+const EVENT_DIRECTORY_METRIC_KEYS = new Set<EventDirectoryMetricKey>([
+  "newFaces",
+  "newReferrals",
+  "checkedIn",
+  "showRate",
+  "firstRegisters",
+  "accepted",
+  "registered",
+  "invited",
+  "waitlisted",
+]);
 
 export function isEventDirectoryPath(pathname: string) {
   return pathname === EVENT_DIRECTORY_PATH || pathname === `${EVENT_DIRECTORY_PATH}/`;
@@ -52,6 +65,9 @@ export type WorkspaceUrlState = {
   eventSearch: string;
   eventSort?: EventDirectorySortKey;
   eventSortDirection?: "asc" | "desc";
+  eventTitleIncludes?: string;
+  eventTitleExcludes?: string;
+  eventMetricFilters?: EventDirectoryMetricFilter[];
   tab: "overview" | "invite" | "analytics" | "feedback";
   analyticsCohort?: "all" | "first_registers";
   guestStatus: string;
@@ -105,6 +121,9 @@ const WORKSPACE_PARAMS = [
   "event_search",
   "sort",
   "direction",
+  "event_title_includes",
+  "event_title_excludes",
+  "event_metric",
   "tab",
   "analytics_cohort",
   "guest_status",
@@ -136,6 +155,12 @@ export function parseWorkspaceUrl(search: string): WorkspaceUrlState {
     .slice(0, MAX_SELECTED_EVENT_IDS);
   const eventSort = EVENT_DIRECTORY_SORT_KEYS.get(params.get("sort") || "");
   const eventSortDirection = params.get("direction") === "asc" ? "asc" : "desc";
+  const eventMetricFilters = params.getAll("event_metric")
+    .map(parseEventDirectoryMetricFilter)
+    .filter((filter): filter is EventDirectoryMetricFilter => Boolean(filter))
+    .slice(0, 12);
+  const eventTitleIncludes = boundedText(params.get("event_title_includes"), 240);
+  const eventTitleExcludes = boundedText(params.get("event_title_excludes"), 240);
 
   const guestHasNotes = params.get("guest_has_notes") === "1";
   const guestAttendedGreaterThan = boundedOptionalInteger(params.get("guest_attended_gt"), 0, 10_000);
@@ -146,6 +171,9 @@ export function parseWorkspaceUrl(search: string): WorkspaceUrlState {
     eventView: EVENT_VIEWS.has(eventView) ? eventView as WorkspaceUrlState["eventView"] : "upcoming",
     eventSearch: boundedText(params.get("event_search"), 120),
     ...(eventSort ? { eventSort, eventSortDirection } : {}),
+    ...(eventTitleIncludes ? { eventTitleIncludes } : {}),
+    ...(eventTitleExcludes ? { eventTitleExcludes } : {}),
+    ...(eventMetricFilters.length ? { eventMetricFilters } : {}),
     tab: EVENT_TABS.has(tab) ? tab as WorkspaceUrlState["tab"] : "overview",
     analyticsCohort: params.get("analytics_cohort") === "first_registers" ? "first_registers" : "all",
     guestStatus: guestStatuses[0] || "all",
@@ -182,6 +210,12 @@ export function buildWorkspaceUrlSearch(currentSearch: string, state: WorkspaceU
     params.set("sort", EVENT_DIRECTORY_SORT_PARAMS[eventSort]);
     params.set("direction", eventSortDirection);
   }
+  if (state.eventTitleIncludes) params.set("event_title_includes", state.eventTitleIncludes);
+  if (state.eventTitleExcludes) params.set("event_title_excludes", state.eventTitleExcludes);
+  (state.eventMetricFilters || []).slice(0, 12).forEach((filter) => {
+    if (!EVENT_DIRECTORY_METRIC_KEYS.has(filter.key) || !["gte", "lte"].includes(filter.operator) || !Number.isFinite(filter.value) || filter.value < 0) return;
+    params.append("event_metric", `${filter.key}:${filter.operator}:${filter.value}`);
+  });
   if (state.tab !== "overview") params.set("tab", state.tab);
   if (state.analyticsCohort === "first_registers") params.set("analytics_cohort", "first_registers");
   const guestStatuses = unique(state.guestStatuses?.length
@@ -217,6 +251,14 @@ function boundedOptionalInteger(value: string | null, minimum: number, maximum: 
   if (value === null || value.trim() === "") return null;
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? Math.min(maximum, Math.max(minimum, parsed)) : null;
+}
+
+function parseEventDirectoryMetricFilter(value: string): EventDirectoryMetricFilter | null {
+  const [key, operator, rawValue, ...rest] = value.split(":");
+  if (rest.length || !EVENT_DIRECTORY_METRIC_KEYS.has(key as EventDirectoryMetricKey) || !["gte", "lte"].includes(operator)) return null;
+  const numericValue = Number(rawValue);
+  if (!Number.isFinite(numericValue) || numericValue < 0 || numericValue > 1_000_000_000) return null;
+  return { key: key as EventDirectoryMetricKey, operator: operator as "gte" | "lte", value: numericValue };
 }
 
 function unique(values: string[]) {

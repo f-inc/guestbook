@@ -65,7 +65,7 @@ import {
   EVENT_SWITCH_DIAGNOSTICS_PARAM,
 } from "./event-switch-diagnostics";
 import { aggregateEventFeedback } from "./api/luma/event-feedback";
-import { buildWorkspaceUrlSearch, isEventDirectoryPath, parseWorkspaceUrl, workspaceHistoryStateWithScroll, workspacePathname, workspaceScrollTopFromHistoryState, type EventDirectorySortKey, type WorkspaceUrlState } from "./workspace-url";
+import { buildWorkspaceUrlSearch, isEventDirectoryPath, parseWorkspaceUrl, workspaceHistoryStateWithScroll, workspacePathname, workspaceScrollTopFromHistoryState, type EventDirectoryMetricFilter, type EventDirectorySortKey, type WorkspaceUrlState } from "./workspace-url";
 
 const statusLabels = {
   registered: "Registered",
@@ -334,6 +334,11 @@ export default function Home() {
     key: "date",
     direction: "desc",
   });
+  const [eventDirectoryFilters, setEventDirectoryFilters] = useState<{
+    titleIncludes: string;
+    titleExcludes: string;
+    metrics: EventDirectoryMetricFilter[];
+  }>({ titleIncludes: "", titleExcludes: "", metrics: [] });
   const [eventDirectoryState, setEventDirectoryState] = useState<{ status: "idle" | "loading" | "ready" | "error"; events: any[]; error: string }>({
     status: "idle",
     events: [],
@@ -370,6 +375,11 @@ export default function Home() {
     setEventDirectorySort({
       key: urlState.eventSort || "date",
       direction: urlState.eventSortDirection || "desc",
+    });
+    setEventDirectoryFilters({
+      titleIncludes: urlState.eventTitleIncludes || "",
+      titleExcludes: urlState.eventTitleExcludes || "",
+      metrics: urlState.eventMetricFilters || [],
     });
     setProfilePanelOpen(Boolean(urlState.profileId));
     setState((current) => ({
@@ -1031,6 +1041,9 @@ export default function Home() {
       eventSearch: state.filters.globalSearch.trim(),
       eventSort: eventDirectoryOpen ? eventDirectorySort.key : undefined,
       eventSortDirection: eventDirectoryOpen ? eventDirectorySort.direction : undefined,
+      eventTitleIncludes: eventDirectoryOpen ? eventDirectoryFilters.titleIncludes.trim() : "",
+      eventTitleExcludes: eventDirectoryOpen ? eventDirectoryFilters.titleExcludes.trim() : "",
+      eventMetricFilters: eventDirectoryOpen ? eventDirectoryFilters.metrics : [],
       tab: activeEventTab as WorkspaceUrlState["tab"],
       analyticsCohort,
       guestStatus: state.filters.guestStatus,
@@ -1071,6 +1084,9 @@ export default function Home() {
     eventDirectoryOpen,
     eventDirectorySort.key,
     eventDirectorySort.direction,
+    eventDirectoryFilters.titleIncludes,
+    eventDirectoryFilters.titleExcludes,
+    eventDirectoryFilters.metrics,
     activeEventTab,
     analyticsCohort,
     profilePanelOpen,
@@ -3888,6 +3904,7 @@ export default function Home() {
               events={eventDirectoryState.events}
               eventFeedbackById={eventFeedbackById}
               sort={eventDirectorySort}
+              filters={eventDirectoryFilters}
               status={eventDirectoryState.status}
               error={eventDirectoryState.error}
               onOpenEvent={(eventId) => selectEvent(eventId)}
@@ -3896,6 +3913,10 @@ export default function Home() {
               onSortChange={(sort) => {
                 workspaceUrlModeRef.current = "push";
                 setEventDirectorySort(sort);
+              }}
+              onFiltersChange={(filters) => {
+                workspaceUrlModeRef.current = "replace";
+                setEventDirectoryFilters(filters);
               }}
             />
           ) : (
@@ -4612,6 +4633,17 @@ export default function Home() {
 }
 
 const eventDirectoryShowRateFormatter = new Intl.NumberFormat(undefined, { style: "percent", maximumFractionDigits: 1 });
+const eventDirectoryMetricOptions = [
+  { key: "checkedIn", label: "Check-ins" },
+  { key: "accepted", label: "Accepted" },
+  { key: "registered", label: "Registered" },
+  { key: "waitlisted", label: "Waitlist" },
+  { key: "invited", label: "Invited" },
+  { key: "firstRegisters", label: "First registers" },
+  { key: "newFaces", label: "New faces" },
+  { key: "newReferrals", label: "New referrals" },
+  { key: "showRate", label: "Show rate (%)" },
+] as const;
 
 const eventDirectoryColumns = [
   { key: "title", label: "Event", kind: "text" },
@@ -4629,7 +4661,7 @@ const eventDirectoryColumns = [
   { key: "modifiedAt", label: "Date modified", kind: "date" },
 ] as const;
 
-function EventDirectory({ events, eventFeedbackById, sort, status, error, onOpenEvent, onRetry, onRefresh, onSortChange }) {
+function EventDirectory({ events, eventFeedbackById, sort, filters, status, error, onOpenEvent, onRetry, onRefresh, onSortChange, onFiltersChange }) {
   const rows = useMemo(() => events.map((event) => {
     const feedback = eventFeedbackById[event.id];
     const accepted = Math.max(0, Number(event.accepted) || 0);
@@ -4648,10 +4680,26 @@ function EventDirectory({ events, eventFeedbackById, sort, status, error, onOpen
       : eventWithShowRate;
   }), [events, eventFeedbackById]);
   const ratingsLoading = events.some((event) => eventFeedbackById[event.id]?.status === "loading");
+  const filteredRows = useMemo(() => {
+    const includedPhrases = eventDirectoryTitlePhrases(filters.titleIncludes);
+    const excludedPhrases = eventDirectoryTitlePhrases(filters.titleExcludes);
+    return rows.filter((event) => {
+      const title = String(event.title || "").toLocaleLowerCase();
+      if (includedPhrases.length && !includedPhrases.some((phrase) => title.includes(phrase))) return false;
+      if (excludedPhrases.some((phrase) => title.includes(phrase))) return false;
+      return filters.metrics.every((filter) => {
+        const rawValue = filter.key === "showRate"
+          ? event.showRate == null ? null : Number(event.showRate) * 100
+          : Number(event[filter.key]);
+        if (rawValue == null || !Number.isFinite(rawValue)) return false;
+        return filter.operator === "gte" ? rawValue >= filter.value : rawValue <= filter.value;
+      });
+    });
+  }, [rows, filters]);
   const sortedRows = useMemo(() => {
     const column = eventDirectoryColumns.find((item) => item.key === sort.key);
     const direction = sort.direction === "asc" ? 1 : -1;
-    return [...rows].sort((left, right) => {
+    return [...filteredRows].sort((left, right) => {
       const leftValue = left[sort.key];
       const rightValue = right[sort.key];
       if (leftValue == null && rightValue == null) return String(left.title).localeCompare(String(right.title));
@@ -4666,7 +4714,15 @@ function EventDirectory({ events, eventFeedbackById, sort, status, error, onOpen
         ? String(left.title).localeCompare(String(right.title), undefined, { sensitivity: "base" })
         : comparison * direction;
     });
-  }, [rows, sort]);
+  }, [filteredRows, sort]);
+
+  const hasFilters = Boolean(filters.titleIncludes.trim() || filters.titleExcludes.trim() || filters.metrics.length);
+  const updateMetricFilter = (index: number, patch: Partial<EventDirectoryMetricFilter>) => {
+    onFiltersChange({
+      ...filters,
+      metrics: filters.metrics.map((filter, filterIndex) => filterIndex === index ? { ...filter, ...patch } : filter),
+    });
+  };
 
   const setSortKey = (key: typeof eventDirectoryColumns[number]["key"]) => {
     onSortChange(sort.key === key
@@ -4683,13 +4739,81 @@ function EventDirectory({ events, eventFeedbackById, sort, status, error, onOpen
           <p>Click a column heading to sort; click it again to reverse the order.</p>
         </div>
         <div className="event-directory-header-actions">
-          {status === "ready" ? <span className="count-pill">{rows.length}</span> : null}
+          {status === "ready" ? <span className="count-pill">{hasFilters ? `${filteredRows.length} / ${rows.length}` : rows.length}</span> : null}
           <button className="button secondary" type="button" disabled={status === "loading" || ratingsLoading} onClick={onRefresh}>
             <RefreshCw className={status === "loading" || ratingsLoading ? "animate-spin" : ""} size={15} aria-hidden="true" />
             Refresh ratings
           </button>
         </div>
       </header>
+
+      <section className="event-directory-filters" aria-label="Event filters">
+        <div className="event-directory-filter-bar">
+          <span className="event-directory-filter-label"><ListFilter size={14} aria-hidden="true" /> Filters</span>
+          <label className="event-directory-title-filter">
+            <Search size={14} aria-hidden="true" />
+            <span>Includes</span>
+            <input
+              type="search"
+              aria-label="Title includes"
+              placeholder="festival, founders…"
+              value={filters.titleIncludes}
+              onChange={(event) => onFiltersChange({ ...filters, titleIncludes: event.target.value })}
+            />
+          </label>
+          <label className="event-directory-title-filter event-directory-title-filter-excludes">
+            <CircleX size={14} aria-hidden="true" />
+            <span>Excludes</span>
+            <input
+              type="search"
+              aria-label="Title excludes"
+              placeholder="virtual, test…"
+              value={filters.titleExcludes}
+              onChange={(event) => onFiltersChange({ ...filters, titleExcludes: event.target.value })}
+            />
+          </label>
+          <button
+            className="event-directory-add-filter"
+            type="button"
+            onClick={() => onFiltersChange({
+              ...filters,
+              metrics: [...filters.metrics, { key: "checkedIn", operator: "gte", value: 1 }],
+            })}
+          >
+            <Plus size={14} aria-hidden="true" /> Metric
+          </button>
+          {hasFilters ? (
+            <button className="event-directory-clear-filters" type="button" onClick={() => onFiltersChange({ titleIncludes: "", titleExcludes: "", metrics: [] })}>
+              Clear
+            </button>
+          ) : null}
+        </div>
+        {filters.metrics.length ? <div className="event-directory-active-rules">
+          {filters.metrics.map((filter, index) => (
+            <div className="event-directory-metric-rule" key={`${index}-${filter.key}-${filter.operator}`}>
+              <select aria-label={`Metric for rule ${index + 1}`} value={filter.key} onChange={(event) => updateMetricFilter(index, { key: event.target.value as EventDirectoryMetricFilter["key"] })}>
+                {eventDirectoryMetricOptions.map((option) => <option value={option.key} key={option.key}>{option.label}</option>)}
+              </select>
+              <select aria-label={`Comparison for rule ${index + 1}`} value={filter.operator} onChange={(event) => updateMetricFilter(index, { operator: event.target.value as EventDirectoryMetricFilter["operator"] })}>
+                <option value="gte">At least</option>
+                <option value="lte">At most</option>
+              </select>
+              <input
+                type="number"
+                aria-label={`Value for rule ${index + 1}`}
+                min="0"
+                step={filter.key === "showRate" ? "0.1" : "1"}
+                value={filter.value}
+                onChange={(event) => updateMetricFilter(index, { value: Math.max(0, Number(event.target.value) || 0) })}
+              />
+              {filter.key === "showRate" ? <span className="event-directory-rule-suffix">%</span> : null}
+              <button type="button" aria-label={`Remove metric rule ${index + 1}`} onClick={() => onFiltersChange({ ...filters, metrics: filters.metrics.filter((_, filterIndex) => filterIndex !== index) })}>
+                <X size={13} aria-hidden="true" />
+              </button>
+            </div>
+          ))}
+        </div> : null}
+      </section>
 
       {status === "loading" && !rows.length ? (
         <div className="event-directory-state" role="status">
@@ -4764,11 +4888,15 @@ function EventDirectory({ events, eventFeedbackById, sort, status, error, onOpen
               </tbody>
             </table>
           </div>
-          {!sortedRows.length ? <div className="event-directory-state">No indexed events were found.</div> : null}
+          {!sortedRows.length ? <div className="event-directory-state">{hasFilters ? "No events match these filters." : "No indexed events were found."}</div> : null}
         </>
       )}
     </section>
   );
+}
+
+function eventDirectoryTitlePhrases(value: string) {
+  return [...new Set(value.split(",").map((phrase) => phrase.trim().toLocaleLowerCase()).filter(Boolean))];
 }
 
 function SessionKeyGate({ value, error, checking, onChange, onSubmit }) {

@@ -53,6 +53,8 @@ type InvitationGuest = {
 type RegistrationAnswerRow = {
   personId: string;
   registrationAnswers?: unknown;
+  checkedInAt?: unknown;
+  status?: unknown;
 };
 
 export const REFERRED_PERSON_TAG = "\u{1f48e} Referred";
@@ -158,8 +160,8 @@ export function eventWideAnalyticsCounts(stats: GuestStats | null | undefined, f
 }
 
 export function buildRegistrationQuestionAnalytics(rows: RegistrationAnswerRow[]) {
-  const answerGroups = new Map<string, { id: string; label: string; responses: Array<{ id: string; value: string; personId: string }> }>();
-  rows.forEach(({ personId, registrationAnswers }) => {
+  const answerGroups = new Map<string, { id: string; label: string; responses: Array<{ id: string; value: string; personId: string; checkedIn: boolean }> }>();
+  rows.forEach(({ personId, registrationAnswers, checkedInAt, status }) => {
     if (!Array.isArray(registrationAnswers)) return;
     registrationAnswers.forEach((answer: any) => {
       const label = String(answer?.label || "Question").trim();
@@ -167,17 +169,23 @@ export function buildRegistrationQuestionAnalytics(rows: RegistrationAnswerRow[]
       if (!value || !isAnalyticQuestion(label)) return;
       const id = label.toLocaleLowerCase();
       if (!answerGroups.has(id)) answerGroups.set(id, { id, label, responses: [] });
-      answerGroups.get(id)?.responses.push({ id: `${personId}:${answer?.id || label}`, value, personId });
+      answerGroups.get(id)?.responses.push({
+        id: `${personId}:${answer?.id || label}`,
+        value,
+        personId,
+        checkedIn: Boolean(checkedInAt) || status === "checked_in",
+      });
     });
   });
 
   return [...answerGroups.values()]
     .map((question) => {
-      const groups = new Map<string, { answerKey: string; count: number; variants: Map<string, number> }>();
+      const groups = new Map<string, { answerKey: string; count: number; checkedInCount: number; variants: Map<string, number> }>();
       question.responses.forEach((response) => {
         const answerKey = normalizeRegistrationAnswer(response.value);
-        const group = groups.get(answerKey) || { answerKey, count: 0, variants: new Map<string, number>() };
+        const group = groups.get(answerKey) || { answerKey, count: 0, checkedInCount: 0, variants: new Map<string, number>() };
         group.count += 1;
+        if (response.checkedIn) group.checkedInCount += 1;
         group.variants.set(response.value, (group.variants.get(response.value) || 0) + 1);
         groups.set(answerKey, group);
       });
@@ -189,7 +197,10 @@ export function buildRegistrationQuestionAnalytics(rows: RegistrationAnswerRow[]
           label,
           answerKey: group.answerKey,
           count: group.count,
-          percent: maxCount ? Math.round((group.count / maxCount) * 100) : 0,
+          checkedInCount: group.checkedInCount,
+          percent: maxCount ? Math.max(1, Math.round((group.count / maxCount) * 100)) : 0,
+          checkedInPercent: maxCount && group.checkedInCount ? Math.max(1, Math.round((group.checkedInCount / maxCount) * 100)) : 0,
+          attendanceRate: group.count ? Math.round((group.checkedInCount / group.count) * 100) : 0,
         };
       });
       sortRegistrationQuestionOptions(options);

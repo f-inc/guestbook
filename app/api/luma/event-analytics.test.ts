@@ -130,6 +130,20 @@ test("aggregates registration answers independently of guest-list filters", () =
   ]);
 });
 
+test("counts checked-in respondents and scales the attendance overlay against the chart maximum", () => {
+  const questions = buildRegistrationQuestionAnalytics([
+    { personId: "person-1", status: "checked_in", registrationAnswers: [{ label: "Role", value: "Founder" }] },
+    { personId: "person-2", checkedInAt: "2026-08-01T01:00:00.000Z", registrationAnswers: [{ label: "Role", value: "Founder" }] },
+    { personId: "person-3", status: "going", registrationAnswers: [{ label: "Role", value: "Founder" }] },
+    { personId: "person-4", status: "checked_in", registrationAnswers: [{ label: "Role", value: "Investor" }] },
+  ]);
+
+  assert.deepEqual(questions[0].options.map(({ label, count, checkedInCount, checkedInPercent, attendanceRate }) => ({ label, count, checkedInCount, checkedInPercent, attendanceRate })), [
+    { label: "Founder", count: 3, checkedInCount: 2, checkedInPercent: 67, attendanceRate: 67 },
+    { label: "Investor", count: 1, checkedInCount: 1, checkedInPercent: 33, attendanceRate: 100 },
+  ]);
+});
+
 test("keeps free-text responses as a list when no answer repeats more than three times", () => {
   const questions = buildRegistrationQuestionAnalytics(Array.from({ length: 12 }, (_, index) => ({
     personId: `person-${index}`,

@@ -2116,12 +2116,28 @@ function indexedGuestPageWhereSql(
 }
 
 function indexedRegistrationAnswerPredicateSql(query: GuestListQuery): Prisma.Sql | null {
+  if (query.answerGroups?.length) {
+    const predicates = query.answerGroups.map((group) => indexedRegistrationAnswerGroupPredicateSql(group));
+    return Prisma.sql`(${Prisma.join(predicates.map((predicate) => Prisma.sql`(${predicate})`), " OR ")})`;
+  }
   if (!query.answerQuestion) return null;
-  const valuePredicate = query.answerKey
-    ? Prisma.sql`AND LOWER(REGEXP_REPLACE(BTRIM(answer.item ->> 'value'), '[^[:alnum:]]+', '', 'g')) = ${query.answerKey}`
-    : query.answer
-      ? Prisma.sql`AND BTRIM(answer.item ->> 'value') = ${query.answer}`
+  return indexedRegistrationAnswerGroupPredicateSql({
+    question: query.answerQuestion,
+    answer: query.answer || "",
+    answerKey: query.answerKey || "",
+    checkedInOnly: false,
+  });
+}
+
+function indexedRegistrationAnswerGroupPredicateSql(group: { question: string; answer: string; answerKey: string; checkedInOnly: boolean }): Prisma.Sql {
+  const valuePredicate = group.answerKey
+    ? Prisma.sql`AND LOWER(REGEXP_REPLACE(BTRIM(answer.item ->> 'value'), '[^[:alnum:]]+', '', 'g')) = ${group.answerKey}`
+    : group.answer
+      ? Prisma.sql`AND BTRIM(answer.item ->> 'value') = ${group.answer}`
       : Prisma.empty;
+  const checkedInPredicate = group.checkedInOnly
+    ? Prisma.sql`AND (guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')`
+    : Prisma.empty;
   return Prisma.sql`EXISTS (
     SELECT 1
     FROM JSONB_ARRAY_ELEMENTS(
@@ -2130,9 +2146,10 @@ function indexedRegistrationAnswerPredicateSql(query: GuestListQuery): Prisma.Sq
         ELSE '[]'::jsonb
       END
     ) AS answer(item)
-    WHERE LOWER(BTRIM(answer.item ->> 'label')) = LOWER(${query.answerQuestion})
+    WHERE LOWER(BTRIM(answer.item ->> 'label')) = LOWER(${group.question})
       AND BTRIM(answer.item ->> 'value') <> ''
       ${valuePredicate}
+      ${checkedInPredicate}
   )`;
 }
 
@@ -2879,7 +2896,7 @@ async function indexedEventAnalytics(
         eventId,
         ...(firstRegisterWhere ? { AND: [firstRegisterWhere] } : {}),
       },
-      select: { personId: true, registrationAnswers: true },
+      select: { personId: true, registrationAnswers: true, checkedInAt: true, status: true },
       take: analyticsQuestionLimit,
       orderBy: [{ registeredAt: "desc" }, { createdAt: "desc" }, { lastSeenAt: "desc" }],
     }),
@@ -2891,7 +2908,7 @@ async function indexedEventAnalytics(
           { status: "declined", registeredAt: { not: null } },
         ],
       },
-      select: { personId: true, registrationAnswers: true },
+      select: { personId: true, registrationAnswers: true, checkedInAt: true, status: true },
       take: analyticsQuestionLimit,
       orderBy: [{ registeredAt: "desc" }, { createdAt: "desc" }, { lastSeenAt: "desc" }],
     }),

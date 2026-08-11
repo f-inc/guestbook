@@ -3232,7 +3232,7 @@
   }
 
   .bar-row {
-    @apply grid w-full cursor-pointer items-center gap-2 rounded-md border-0 bg-transparent p-1.5 text-left text-xs transition hover:bg-warning-soft/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warning/30;
+    @apply grid w-full items-center gap-2 rounded-md border-0 bg-transparent p-1.5 text-left text-xs transition hover:bg-warning-soft/40;
     grid-template-columns: minmax(110px, 1fr) minmax(24px, 180px) 28px;
   }
 
@@ -3240,25 +3240,105 @@
     grid-template-columns: minmax(110px, 1fr) minmax(24px, 120px) 28px;
   }
 
-  .bar-row > span {
-    @apply truncate text-muted;
+  .bar-row.selected {
+    @apply bg-brand-soft/60 ring-1 ring-inset ring-brand/20;
   }
 
-  .bar-row > div {
-    @apply h-2 overflow-hidden rounded-full bg-subtle;
+  .answer-bar-label {
+    @apply truncate border-0 bg-transparent p-0 text-left text-muted transition hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warning/30;
   }
 
-  .bar-row i {
-    @apply block h-full rounded-full bg-warning;
+  .answer-bar-track {
+    @apply relative h-3 rounded-full bg-subtle;
   }
 
-  .bar-row strong {
-    @apply text-right tabular-nums;
+  .answer-bar-total,
+  .answer-bar-checked {
+    @apply absolute inset-y-0 left-0 min-w-0 cursor-pointer border-0 p-0 transition-[filter,opacity,box-shadow,transform] focus-visible:z-20 focus-visible:outline-none;
+    transform-origin: center;
   }
 
-  .bar-row:hover > span,
-  .bar-row:focus-visible > span {
-    @apply text-ink;
+  .answer-bar-total {
+    @apply z-0 rounded-full bg-warning;
+  }
+
+  .answer-bar-checked {
+    @apply z-10 rounded-full bg-brand;
+    box-shadow: 1px 0 0 rgb(255 255 255 / 70%);
+  }
+
+  .answer-bar-checked:hover,
+  .answer-bar-checked:focus-visible {
+    @apply z-20 brightness-125;
+    box-shadow: 0 0 0 2px rgb(29 79 71 / 30%), 0 3px 8px rgb(13 55 49 / 30%);
+    transform: scaleY(1.45);
+  }
+
+  .answer-bar-total.selected,
+  .answer-bar-checked.selected {
+    @apply ring-2 ring-ink/60 ring-offset-1;
+  }
+
+  .answer-bar-count {
+    @apply border-0 bg-transparent p-0 text-right font-bold text-ink hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/30;
+  }
+
+  .answer-bar-tooltip {
+    @apply pointer-events-none absolute bottom-[calc(100%+7px)] z-30 whitespace-nowrap rounded-md bg-ink px-2 py-1 text-[10px] font-semibold text-white opacity-0 shadow-lg;
+    left: var(--checked-width);
+    transform: translateX(-50%);
+    transition: none;
+  }
+
+  .answer-bar-tooltip::after {
+    @apply absolute left-1/2 top-full -translate-x-1/2 border-4 border-transparent;
+    content: "";
+    border-top-color: var(--color-ink);
+  }
+
+  .bar-row:first-child .answer-bar-tooltip {
+    bottom: auto;
+    top: calc(100% + 7px);
+  }
+
+  .bar-row:first-child .answer-bar-tooltip::after {
+    bottom: 100%;
+    top: auto;
+    border-bottom-color: var(--color-ink);
+    border-top-color: transparent;
+  }
+
+  .answer-bar-checked:hover ~ .answer-bar-tooltip,
+  .answer-bar-checked:focus-visible ~ .answer-bar-tooltip {
+    @apply opacity-100;
+  }
+
+  .answer-analytics-meta {
+    @apply flex flex-wrap items-center justify-end gap-3;
+  }
+
+  .answer-bar-legend {
+    @apply flex items-center gap-1.5 text-[11px] font-semibold text-muted;
+  }
+
+  .answer-bar-legend i {
+    @apply inline-block h-2 w-3 rounded-full;
+  }
+
+  .answer-legend-total {
+    @apply bg-warning;
+  }
+
+  .answer-legend-checked {
+    @apply ml-1 bg-brand;
+  }
+
+  .answer-selection-tray {
+    @apply mb-4 flex items-center justify-between gap-3 rounded-xl border border-brand/20 bg-brand-soft px-3 py-2 text-xs text-brand;
+  }
+
+  .answer-selection-tray > span {
+    @apply flex items-center gap-2;
   }
 
   .text-response-list {
@@ -5019,7 +5099,8 @@
   .stacked-returning,
   .stacked-new,
   .funnel-chart li > span,
-  .bar-row i {
+  .answer-bar-total,
+  .answer-bar-checked {
     transition:
       width 560ms var(--motion-ease),
       flex-basis 560ms var(--motion-ease),

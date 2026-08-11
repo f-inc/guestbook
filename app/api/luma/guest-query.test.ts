@@ -130,6 +130,18 @@ test("parses registration-answer filters through the indexed query", () => {
   assert.equal(guestQueryRequiresIndex(query), true);
 });
 
+test("parses multiple registration-answer groups as a union with per-group attendance", () => {
+  const params = new URLSearchParams();
+  params.append("guest_answer_group", JSON.stringify({ question: "Role", answer: "Founder", answerKey: "founder", checkedInOnly: false }));
+  params.append("guest_answer_group", JSON.stringify({ question: "Goal", answer: "Fundraise", answerKey: "fundraise", checkedInOnly: true }));
+  const query = parseGuestListQuery(params);
+  assert.deepEqual(query.answerGroups, [
+    { question: "Role", answer: "Founder", answerKey: "founder", checkedInOnly: false },
+    { question: "Goal", answer: "Fundraise", answerKey: "fundraise", checkedInOnly: true },
+  ]);
+  assert.equal(guestQueryRequiresIndex(query), true);
+});
+
 test("filters guests with comments through the comment relation", () => {
   const query = parseGuestListQuery(new URLSearchParams({ guest_has_notes: "1" }));
   assert.deepEqual(eventGuestWhere("event-1", query), {

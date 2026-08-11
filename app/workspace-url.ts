@@ -5,6 +5,7 @@ export const WORKSPACE_SCROLL_HISTORY_KEY = "guestbookWorkspaceScrollTop";
 export type EventDirectorySortKey = "title" | "date" | "newFaces" | "newReferrals" | "checkedIn" | "showRate" | "firstRegisters" | "accepted" | "registered" | "invited" | "waitlisted" | "averageRating" | "modifiedAt";
 export type EventDirectoryMetricKey = "newFaces" | "newReferrals" | "checkedIn" | "showRate" | "firstRegisters" | "accepted" | "registered" | "invited" | "waitlisted";
 export type EventDirectoryMetricFilter = { key: EventDirectoryMetricKey; operator: "gte" | "lte"; value: number };
+export type WorkspaceGuestAnswerGroup = { question: string; answer: string; answerKey: string; checkedInOnly: boolean };
 
 const EVENT_DIRECTORY_SORT_PARAMS: Record<EventDirectorySortKey, string> = {
   title: "title",
@@ -83,6 +84,7 @@ export type WorkspaceUrlState = {
   guestAnswerQuestion?: string;
   guestAnswer?: string;
   guestAnswerKey?: string;
+  guestAnswerGroups?: WorkspaceGuestAnswerGroup[];
   guestPage: number;
   profileId: string;
 };
@@ -138,6 +140,7 @@ const WORKSPACE_PARAMS = [
   "guest_answer_question",
   "guest_answer",
   "guest_answer_key",
+  "guest_answer_group",
   "guest_page",
   "profile",
 ];
@@ -165,6 +168,10 @@ export function parseWorkspaceUrl(search: string): WorkspaceUrlState {
   const guestHasNotes = params.get("guest_has_notes") === "1";
   const guestAttendedGreaterThan = boundedOptionalInteger(params.get("guest_attended_gt"), 0, 10_000);
   const guestAnswerQuestion = boundedText(params.get("guest_answer_question"), 500);
+  const guestAnswerGroups = params.getAll("guest_answer_group")
+    .map(parseWorkspaceGuestAnswerGroup)
+    .filter((group): group is WorkspaceGuestAnswerGroup => Boolean(group))
+    .slice(0, 40);
   return {
     eventId: eventIds.at(-1) || "",
     eventIds,
@@ -186,7 +193,7 @@ export function parseWorkspaceUrl(search: string): WorkspaceUrlState {
     guestExcludedTags: unique(params.getAll("guest_tag_not").map((tag) => boundedText(tag, 40)).filter(Boolean)).slice(0, 20),
     ...(guestHasNotes ? { guestHasNotes: true } : {}),
     ...(guestAttendedGreaterThan === null ? {} : { guestAttendedGreaterThan }),
-    ...(guestAnswerQuestion ? {
+    ...(guestAnswerGroups.length ? { guestAnswerGroups } : guestAnswerQuestion ? {
       guestAnswerQuestion,
       guestAnswer: boundedText(params.get("guest_answer"), 500),
       guestAnswerKey: boundedText(params.get("guest_answer_key"), 500),
@@ -234,9 +241,13 @@ export function buildWorkspaceUrlSearch(currentSearch: string, state: WorkspaceU
   unique(state.guestExcludedTags || []).forEach((tag) => params.append("guest_tag_not", tag));
   if (state.guestHasNotes) params.set("guest_has_notes", "1");
   if (state.guestAttendedGreaterThan != null) params.set("guest_attended_gt", String(state.guestAttendedGreaterThan));
-  if (state.guestAnswerQuestion) params.set("guest_answer_question", state.guestAnswerQuestion);
-  if (state.guestAnswer) params.set("guest_answer", state.guestAnswer);
-  if (state.guestAnswerKey) params.set("guest_answer_key", state.guestAnswerKey);
+  if (state.guestAnswerGroups?.length) {
+    state.guestAnswerGroups.slice(0, 40).forEach((group) => params.append("guest_answer_group", JSON.stringify(group)));
+  } else {
+    if (state.guestAnswerQuestion) params.set("guest_answer_question", state.guestAnswerQuestion);
+    if (state.guestAnswer) params.set("guest_answer", state.guestAnswer);
+    if (state.guestAnswerKey) params.set("guest_answer_key", state.guestAnswerKey);
+  }
   if (state.guestPage > 1) params.set("guest_page", String(Math.floor(state.guestPage)));
   if (state.profileId) params.set("profile", state.profileId);
 
@@ -251,6 +262,22 @@ function boundedOptionalInteger(value: string | null, minimum: number, maximum: 
   if (value === null || value.trim() === "") return null;
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? Math.min(maximum, Math.max(minimum, parsed)) : null;
+}
+
+function parseWorkspaceGuestAnswerGroup(value: string): WorkspaceGuestAnswerGroup | null {
+  try {
+    const candidate = JSON.parse(value);
+    const question = boundedText(candidate?.question, 500);
+    if (!question) return null;
+    return {
+      question,
+      answer: boundedText(candidate?.answer, 500),
+      answerKey: boundedText(candidate?.answerKey, 500),
+      checkedInOnly: candidate?.checkedInOnly === true,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function parseEventDirectoryMetricFilter(value: string): EventDirectoryMetricFilter | null {

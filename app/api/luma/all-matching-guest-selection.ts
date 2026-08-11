@@ -15,6 +15,7 @@ type AllMatchingGuestQueryInput = {
   guestAnswerQuestion?: unknown;
   guestAnswer?: unknown;
   guestAnswerKey?: unknown;
+  guestAnswerGroups?: unknown;
 };
 
 export function parseAllMatchingGuestQuery(input: AllMatchingGuestQueryInput = {}): GuestListQuery {
@@ -69,6 +70,18 @@ export function parseAllMatchingGuestQuery(input: AllMatchingGuestQueryInput = {
   ] as const) {
     if (value !== undefined && typeof value !== "string") throw badRequest(`${label} must be a string.`);
   }
+  if (input.guestAnswerGroups !== undefined && !Array.isArray(input.guestAnswerGroups)) {
+    throw badRequest("Guest answer groups must be an array.");
+  }
+  if (Array.isArray(input.guestAnswerGroups) && input.guestAnswerGroups.some((group) => (
+    !group || typeof group !== "object" || Array.isArray(group)
+    || typeof group.question !== "string"
+    || typeof group.answer !== "string"
+    || typeof group.answerKey !== "string"
+    || typeof group.checkedInOnly !== "boolean"
+  ))) {
+    throw badRequest("Every guest answer group must be valid.");
+  }
 
   const params = new URLSearchParams({
     guest_search: typeof input.guestSearch === "string" ? input.guestSearch : "",
@@ -97,6 +110,9 @@ export function parseAllMatchingGuestQuery(input: AllMatchingGuestQueryInput = {
   if (typeof input.guestAnswerQuestion === "string" && input.guestAnswerQuestion) params.set("guest_answer_question", input.guestAnswerQuestion);
   if (typeof input.guestAnswer === "string" && input.guestAnswer) params.set("guest_answer", input.guestAnswer);
   if (typeof input.guestAnswerKey === "string" && input.guestAnswerKey) params.set("guest_answer_key", input.guestAnswerKey);
+  for (const group of Array.isArray(input.guestAnswerGroups) ? input.guestAnswerGroups.slice(0, 40) : []) {
+    params.append("guest_answer_group", JSON.stringify(group));
+  }
   return parseGuestListQuery(params);
 }
 

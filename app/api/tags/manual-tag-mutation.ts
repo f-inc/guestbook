@@ -24,6 +24,7 @@ type BulkManualTagMutationInput = {
   guestAnswerQuestion?: unknown;
   guestAnswer?: unknown;
   guestAnswerKey?: unknown;
+  guestAnswerGroups?: unknown;
   people?: unknown;
   tagIds?: unknown;
   removed?: unknown;

@@ -41,6 +41,13 @@ const INDEXED_ONLY_GUEST_FILTERS = new Set<GuestFilter>([
 
 export type GuestFilter = (typeof GUEST_FILTER_VALUES)[number];
 
+export type GuestAnswerGroup = {
+  question: string;
+  answer: string;
+  answerKey: string;
+  checkedInOnly: boolean;
+};
+
 export type GuestListQuery = {
   filter: GuestFilter;
   filters?: GuestFilter[];
@@ -57,6 +64,7 @@ export type GuestListQuery = {
   answerQuestion?: string;
   answer?: string;
   answerKey?: string;
+  answerGroups?: GuestAnswerGroup[];
   cursor: number;
   pageSize: number;
   includeSummary?: boolean;
@@ -78,6 +86,7 @@ export function parseGuestListQuery(params: URLSearchParams): GuestListQuery {
   const answerQuestion = (params.get("guest_answer_question") || "").trim().slice(0, 500);
   const answer = (params.get("guest_answer") || "").trim().slice(0, 500);
   const answerKey = (params.get("guest_answer_key") || "").trim().slice(0, 500);
+  const answerGroups = parseGuestAnswerGroups(params.getAll("guest_answer_group"));
   return {
     filter,
     filters,
@@ -93,7 +102,9 @@ export function parseGuestListQuery(params: URLSearchParams): GuestListQuery {
     sortDirection: params.get("guest_sort") === "asc" ? "asc" : "desc",
     ...(hasNotes ? { hasNotes: true } : {}),
     ...(attendedGreaterThan === null ? {} : { attendedGreaterThan }),
-    ...(answerQuestion ? { answerQuestion, answer, answerKey } : {}),
+    ...(answerGroups.length
+      ? { answerGroups }
+      : answerQuestion ? { answerQuestion, answer, answerKey } : {}),
     cursor: boundedInteger(params.get("guest_cursor"), 0, 0, 1_000_000),
     pageSize: boundedInteger(params.get("guest_limit"), 50, 10, 100),
     includeSummary: params.get("guest_summary") !== "0",
@@ -111,7 +122,30 @@ export function guestQueryRequiresIndex(query: GuestListQuery): boolean {
     || query.sortDirection === "asc"
     || Boolean(query.hasNotes)
     || query.attendedGreaterThan != null
-    || Boolean(query.answerQuestion);
+    || Boolean(query.answerQuestion)
+    || Boolean(query.answerGroups?.length);
+}
+
+export function parseGuestAnswerGroups(values: string[]): GuestAnswerGroup[] {
+  const groups: GuestAnswerGroup[] = [];
+  const seen = new Set<string>();
+  for (const value of values.slice(0, 40)) {
+    try {
+      const candidate = JSON.parse(value);
+      const question = String(candidate?.question || "").trim().slice(0, 500);
+      const answer = String(candidate?.answer || "").trim().slice(0, 500);
+      const answerKey = String(candidate?.answerKey || "").trim().slice(0, 500);
+      if (!question) continue;
+      const group = { question, answer, answerKey, checkedInOnly: candidate?.checkedInOnly === true };
+      const key = `${question}\u0000${answerKey}\u0000${answer}\u0000${group.checkedInOnly ? 1 : 0}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      groups.push(group);
+    } catch {
+      // Ignore malformed URL values rather than invalidating the rest of the query.
+    }
+  }
+  return groups;
 }
 
 export function eventGuestWhere(

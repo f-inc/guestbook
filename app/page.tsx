@@ -65,7 +65,7 @@ import {
   EVENT_SWITCH_DIAGNOSTICS_PARAM,
 } from "./event-switch-diagnostics";
 import { aggregateEventFeedback } from "./api/luma/event-feedback";
-import { buildWorkspaceUrlSearch, isEventDirectoryPath, parseWorkspaceUrl, workspaceHistoryStateWithScroll, workspacePathname, workspaceScrollTopFromHistoryState, type EventDirectoryMetricFilter, type EventDirectorySortKey, type WorkspaceUrlState } from "./workspace-url";
+import { buildWorkspaceUrlSearch, isEventDirectoryPath, parseWorkspaceUrl, workspaceHistoryStateWithScroll, workspacePathname, workspaceScrollTopFromHistoryState, type EventDirectoryMetricFilter, type EventDirectorySortKey, type WorkspaceGuestAnswerGroup, type WorkspaceUrlState } from "./workspace-url";
 
 const statusLabels = {
   registered: "Registered",
@@ -214,6 +214,7 @@ const initialState = {
     guestAnswerQuestion: "",
     guestAnswer: "",
     guestAnswerKey: "",
+    guestAnswerGroups: [] as WorkspaceGuestAnswerGroup[],
     globalSearch: "",
     memberSearch: "",
   },
@@ -404,6 +405,7 @@ export default function Home() {
         guestAnswerQuestion: urlState.guestAnswerQuestion || "",
         guestAnswer: urlState.guestAnswer || "",
         guestAnswerKey: urlState.guestAnswerKey || "",
+        guestAnswerGroups: urlState.guestAnswerGroups || [],
       },
       invite: {
         ...current.invite,
@@ -962,7 +964,9 @@ export default function Home() {
   );
   const guestTagFilterKey = `${state.filters.guestTagMode}:${state.filters.guestTags.join("\u0000")}:${state.filters.guestExcludedTags.join("\u0000")}`;
   const guestStatusFilterKey = `${state.filters.guestStatusMode}:${state.filters.guestStatuses.join("\u0000")}:${state.filters.guestExcludedStatuses.join("\u0000")}`;
-  const guestAnswerFilterKey = `${state.filters.guestAnswerQuestion}:${state.filters.guestAnswerKey}:${state.filters.guestAnswer}`;
+  const guestAnswerFilterKey = state.filters.guestAnswerGroups.length
+    ? state.filters.guestAnswerGroups.map(guestAnswerGroupKey).join("\u0001")
+    : `${state.filters.guestAnswerQuestion}:${state.filters.guestAnswerKey}:${state.filters.guestAnswer}`;
   const multiEventGuestQueryKey = `${multiEventStatsKey}:${guestStatusFilterKey}:${debouncedGuestSearch}:${guestTagFilterKey}:${state.filters.guestHasNotes ? 1 : 0}:${state.filters.guestAttendedGreaterThan}:${guestAnswerFilterKey}:${guestSortField}:${guestDateSortDirection}`;
   const normalizedUniversalQuery = universalQuery.trim().toLocaleLowerCase();
   const universalPeopleRequestKey = `${normalizedUniversalQuery}\u0000${universalPeopleFiltersKey}`;
@@ -989,6 +993,7 @@ export default function Home() {
     || state.filters.guestHasNotes
     || state.filters.guestAttendedGreaterThan !== ""
     || Boolean(state.filters.guestAnswerQuestion)
+    || state.filters.guestAnswerGroups.length > 0
     || Boolean(state.filters.guestSearch.trim());
   const inviteTargetEvent = getEvent(state, state.invite.targetEventId);
   const inviteTargetEvents = selectedEvents.length ? selectedEvents : inviteTargetEvent ? [inviteTargetEvent] : [];
@@ -1061,6 +1066,7 @@ export default function Home() {
       guestAnswerQuestion: state.filters.guestAnswerQuestion,
       guestAnswer: state.filters.guestAnswer,
       guestAnswerKey: state.filters.guestAnswerKey,
+      guestAnswerGroups: state.filters.guestAnswerGroups,
       guestPage: Math.max(guestPageTarget, loadedGuestPage),
       profileId,
     });
@@ -1349,7 +1355,12 @@ export default function Home() {
     }
   };
 
-  const openAnalyticsRespondents = (question, option = null, cohort: "all" | "first_registers" = "all") => {
+  const openAnalyticsRespondents = (
+    question,
+    option = null,
+    cohort: "all" | "first_registers" = "all",
+    { checkedInOnly = false, additive = false }: { checkedInOnly?: boolean; additive?: boolean } = {},
+  ) => {
     rememberWorkspaceScroll();
     workspaceUrlModeRef.current = "push";
     setGuestPageTarget(1);
@@ -1357,7 +1368,20 @@ export default function Home() {
     setAllMatchingGuestsSelected(false);
     setSelectedGuestIds(new Set());
     lastSelectedGuestIdRef.current = "";
+    const group: WorkspaceGuestAnswerGroup = {
+      question: question.label,
+      answer: option?.label || "",
+      answerKey: option?.answerKey || "",
+      checkedInOnly,
+    };
     updateState((draft) => {
+      const currentGroups = draft.filters.guestAnswerGroups || [];
+      const selected = currentGroups.some((candidate) => guestAnswerGroupKey(candidate) === guestAnswerGroupKey(group));
+      const nextGroups = additive
+        ? selected
+          ? currentGroups.filter((candidate) => guestAnswerGroupKey(candidate) !== guestAnswerGroupKey(group))
+          : [...currentGroups, group]
+        : [group];
       draft.filters.guestStatus = cohort === "first_registers" ? "first_registers" : "all";
       draft.filters.guestStatuses = cohort === "first_registers" ? ["first_registers"] : [];
       draft.filters.guestStatusMode = "any";
@@ -1368,10 +1392,18 @@ export default function Home() {
       draft.filters.guestExcludedTags = [];
       draft.filters.guestHasNotes = false;
       draft.filters.guestAttendedGreaterThan = "";
-      draft.filters.guestAnswerQuestion = question.label;
-      draft.filters.guestAnswer = option?.label || "";
-      draft.filters.guestAnswerKey = option?.answerKey || "";
+      draft.filters.guestAnswerQuestion = "";
+      draft.filters.guestAnswer = "";
+      draft.filters.guestAnswerKey = "";
+      draft.filters.guestAnswerGroups = nextGroups;
     });
+    if (!additive) setActiveEventTab("overview");
+  };
+
+  const viewSelectedAnalyticsRespondents = () => {
+    if (!state.filters.guestAnswerGroups.length) return;
+    rememberWorkspaceScroll();
+    workspaceUrlModeRef.current = "push";
     setActiveEventTab("overview");
   };
 
@@ -1413,6 +1445,7 @@ export default function Home() {
         draft.filters.guestAnswerQuestion = "";
         draft.filters.guestAnswer = "";
         draft.filters.guestAnswerKey = "";
+        draft.filters.guestAnswerGroups = [];
       }
     });
     if (eventChanged && !preserveProfile) setProfilePanelOpen(false);
@@ -1524,6 +1557,7 @@ export default function Home() {
       draft.filters.guestAnswerQuestion = "";
       draft.filters.guestAnswer = "";
       draft.filters.guestAnswerKey = "";
+      draft.filters.guestAnswerGroups = [];
     });
   };
 
@@ -1536,6 +1570,7 @@ export default function Home() {
       draft.filters.guestAnswerQuestion = "";
       draft.filters.guestAnswer = "";
       draft.filters.guestAnswerKey = "";
+      draft.filters.guestAnswerGroups = [];
     });
   };
 
@@ -1565,10 +1600,11 @@ export default function Home() {
       answerQuestion = state.filters.guestAnswerQuestion,
       answer = state.filters.guestAnswer,
       answerKey = state.filters.guestAnswerKey,
+      answerGroups = state.filters.guestAnswerGroups,
       cursor = "",
       priority = false,
       background = false,
-    }: { force?: boolean; append?: boolean; status?: string; statuses?: string[]; statusMode?: "any" | "all"; excludedStatuses?: string[]; search?: string; tags?: string[]; tagMode?: "any" | "all"; excludedTags?: string[]; hasNotes?: boolean; attendedGreaterThan?: string; answerQuestion?: string; answer?: string; answerKey?: string; cursor?: string; priority?: boolean; background?: boolean } = {},
+    }: { force?: boolean; append?: boolean; status?: string; statuses?: string[]; statusMode?: "any" | "all"; excludedStatuses?: string[]; search?: string; tags?: string[]; tagMode?: "any" | "all"; excludedTags?: string[]; hasNotes?: boolean; attendedGreaterThan?: string; answerQuestion?: string; answer?: string; answerKey?: string; answerGroups?: WorkspaceGuestAnswerGroup[]; cursor?: string; priority?: boolean; background?: boolean } = {},
   ) => {
     const event = getEvent(state, eventId);
     if (!event) {
@@ -1598,6 +1634,7 @@ export default function Home() {
     if (answerQuestion) params.set("guest_answer_question", answerQuestion);
     if (answer) params.set("guest_answer", answer);
     if (answerKey) params.set("guest_answer_key", answerKey);
+    answerGroups.forEach((group) => params.append("guest_answer_group", JSON.stringify(group)));
     if (event.startsAt) params.set("event_starts_at", event.startsAt);
     if (event.date) params.set("event_date", String(event.date).slice(0, 10));
     tags.forEach((tag) => params.append("guest_tag", tag));
@@ -1816,8 +1853,9 @@ export default function Home() {
       answerQuestion = state.filters.guestAnswerQuestion,
       answer = state.filters.guestAnswer,
       answerKey = state.filters.guestAnswerKey,
+      answerGroups = state.filters.guestAnswerGroups,
       cursor = "",
-    }: { append?: boolean; status?: string; statuses?: string[]; statusMode?: "any" | "all"; excludedStatuses?: string[]; search?: string; tags?: string[]; tagMode?: "any" | "all"; excludedTags?: string[]; hasNotes?: boolean; attendedGreaterThan?: string; answerQuestion?: string; answer?: string; answerKey?: string; cursor?: string } = {},
+    }: { append?: boolean; status?: string; statuses?: string[]; statusMode?: "any" | "all"; excludedStatuses?: string[]; search?: string; tags?: string[]; tagMode?: "any" | "all"; excludedTags?: string[]; hasNotes?: boolean; attendedGreaterThan?: string; answerQuestion?: string; answer?: string; answerKey?: string; answerGroups?: WorkspaceGuestAnswerGroup[]; cursor?: string } = {},
   ) => {
     const eventIds = selectedWorkspaceEvents(state)
       .filter((event) => event.source === "luma")
@@ -1825,7 +1863,7 @@ export default function Home() {
     if (eventIds.length < 2) return;
 
     const includedStatuses = statuses.length ? statuses : status !== "all" ? [status] : [];
-    const queryKey = `${[...eventIds].sort().join("\u0000")}:${statusMode}:${includedStatuses.join("\u0000")}:${excludedStatuses.join("\u0000")}:${search}:${tagMode}:${tags.join("\u0000")}:${excludedTags.join("\u0000")}:${hasNotes ? 1 : 0}:${attendedGreaterThan}:${answerQuestion}:${answerKey}:${answer}:${guestSortField}:${guestDateSortDirection}`;
+    const queryKey = `${[...eventIds].sort().join("\u0000")}:${statusMode}:${includedStatuses.join("\u0000")}:${excludedStatuses.join("\u0000")}:${search}:${tagMode}:${tags.join("\u0000")}:${excludedTags.join("\u0000")}:${hasNotes ? 1 : 0}:${attendedGreaterThan}:${answerQuestion}:${answerKey}:${answer}:${answerGroups.map(guestAnswerGroupKey).join("\u0001")}:${guestSortField}:${guestDateSortDirection}`;
     if (append && (multiEventGuestState.loading || !cursor || (multiEventGuestAbortRef.current && !multiEventGuestAbortRef.current.signal.aborted))) return;
     multiEventGuestAbortRef.current?.abort();
     const controller = new AbortController();
@@ -1849,6 +1887,7 @@ export default function Home() {
     if (answerQuestion) params.set("guest_answer_question", answerQuestion);
     if (answer) params.set("guest_answer", answer);
     if (answerKey) params.set("guest_answer_key", answerKey);
+    answerGroups.forEach((group) => params.append("guest_answer_group", JSON.stringify(group)));
     tags.forEach((tag) => params.append("guest_tag", tag));
     if (tagMode === "all") params.set("guest_tag_mode", "all");
     excludedTags.forEach((tag) => params.append("guest_tag_not", tag));
@@ -2217,6 +2256,7 @@ export default function Home() {
       draft.filters.guestAnswerQuestion = "";
       draft.filters.guestAnswer = "";
       draft.filters.guestAnswerKey = "";
+      draft.filters.guestAnswerGroups = [];
     });
     setActiveEventTab("overview");
   };
@@ -2843,6 +2883,7 @@ export default function Home() {
     guestAnswerQuestion: state.filters.guestAnswerQuestion,
     guestAnswer: state.filters.guestAnswer,
     guestAnswerKey: state.filters.guestAnswerKey,
+    guestAnswerGroups: state.filters.guestAnswerGroups.map((group) => ({ ...group })),
   });
 
   const requestBulkGuestStatus = (status: string, label: string) => {
@@ -2933,6 +2974,7 @@ export default function Home() {
             guestAnswerQuestion: selection?.guestAnswerQuestion,
             guestAnswer: selection?.guestAnswer,
             guestAnswerKey: selection?.guestAnswerKey,
+            guestAnswerGroups: selection?.guestAnswerGroups,
           } : {
             guests: operation.guests.map((guest) => ({ lumaGuestId: guest.lumaGuestId })),
           }),
@@ -3072,6 +3114,7 @@ export default function Home() {
           guestAnswerQuestion: selection?.guestAnswerQuestion,
           guestAnswer: selection?.guestAnswer,
           guestAnswerKey: selection?.guestAnswerKey,
+          guestAnswerGroups: selection?.guestAnswerGroups,
           tagIds,
           removed,
         } : { bulk: true, people, tagIds, removed }),
@@ -4069,11 +4112,15 @@ export default function Home() {
                         Clear filters
                       </button>
                     ) : null}
-                    {state.filters.guestAnswerQuestion ? (
-                      <div className="guest-answer-filter" title={state.filters.guestAnswerQuestion}>
+                    {state.filters.guestAnswerGroups.length || state.filters.guestAnswerQuestion ? (
+                      <div className="guest-answer-filter" title={state.filters.guestAnswerQuestion || `${state.filters.guestAnswerGroups.length} selected answer groups`}>
                         <span>
                           <small>Registration answer</small>
-                          <strong>{state.filters.guestAnswer || `Answered “${state.filters.guestAnswerQuestion}”`}</strong>
+                          <strong>{state.filters.guestAnswerGroups.length
+                            ? state.filters.guestAnswerGroups.length === 1
+                              ? `${state.filters.guestAnswerGroups[0].answer || `Answered “${state.filters.guestAnswerGroups[0].question}”`}${state.filters.guestAnswerGroups[0].checkedInOnly ? " · checked in" : ""}`
+                              : `${state.filters.guestAnswerGroups.length} groups · any match`
+                            : state.filters.guestAnswer || `Answered “${state.filters.guestAnswerQuestion}”`}</strong>
                         </span>
                         <button type="button" aria-label="Clear registration answer filter" onClick={clearGuestAnswerFilter}>
                           <X size={13} aria-hidden="true" />
@@ -4416,7 +4463,10 @@ export default function Home() {
                 setAnalyticsCohort(cohort);
               }}
               onOpenPerson={openAnalyticsResponsePerson}
-              onOpenRespondents={(question, option) => openAnalyticsRespondents(question, option, analyticsCohort)}
+              selectedAnswerGroups={state.filters.guestAnswerGroups}
+              onOpenRespondents={(question, option, options) => openAnalyticsRespondents(question, option, analyticsCohort, options)}
+              onViewSelectedRespondents={viewSelectedAnalyticsRespondents}
+              onClearSelectedRespondents={clearGuestAnswerFilter}
               onFilter={openAnalyticsGuestFilter}
             />
           ) : activeEventTab === "feedback" ? (
@@ -7789,7 +7839,11 @@ function RulePicker({ label, options, selected, onAdd, onChange }) {
   );
 }
 
-function AnalyticsTab({ event, analytics, loading = false, uniquePeople = false, cohort = "all", onCohortChange, onOpenPerson, onOpenRespondents, onFilter }) {
+function guestAnswerGroupKey(group: Partial<WorkspaceGuestAnswerGroup>) {
+  return `${group.question || ""}\u0000${group.answerKey || ""}\u0000${group.answer || ""}\u0000${group.checkedInOnly ? 1 : 0}`;
+}
+
+function AnalyticsTab({ event, analytics, loading = false, uniquePeople = false, cohort = "all", onCohortChange, onOpenPerson, selectedAnswerGroups = [], onOpenRespondents, onViewSelectedRespondents, onClearSelectedRespondents, onFilter }) {
   if (!event) return <section className="analytics-tab panel"><div className="empty-state">Select an event to view analytics.</div></section>;
   if (loading) {
     return (
@@ -7949,8 +8003,20 @@ function AnalyticsTab({ event, analytics, loading = false, uniquePeople = false,
       <section className="answer-analytics">
         <div className="event-tab-heading compact">
           <div><p className="eyebrow">{cohort === "all" ? "All responses" : "First registers"}</p><h2>Registration answers</h2></div>
-          <span className="analytics-sample">{cohort === "all" ? analytics.registrations : analytics.newRegistrations} {cohort === "all" ? (uniquePeople ? "unique registrants" : "registrations") : "first registers"}</span>
+          <div className="answer-analytics-meta">
+            <span className="answer-bar-legend"><i className="answer-legend-total" /> Responses <i className="answer-legend-checked" /> Checked in</span>
+            <span className="analytics-sample">{cohort === "all" ? analytics.registrations : analytics.newRegistrations} {cohort === "all" ? (uniquePeople ? "unique registrants" : "registrations") : "first registers"}</span>
+          </div>
         </div>
+        {selectedAnswerGroups.length ? (
+          <div className="answer-selection-tray" role="status">
+            <span><strong>{selectedAnswerGroups.length}</strong> {selectedAnswerGroups.length === 1 ? "group" : "groups"} selected · Cmd-click to add or remove</span>
+            <span>
+              <button className="button ghost compact" type="button" onClick={onClearSelectedRespondents}>Clear</button>
+              <button className="button primary compact" type="button" onClick={onViewSelectedRespondents}>View union</button>
+            </span>
+          </div>
+        ) : null}
         {analytics.questions.length ? (
           <div className="question-grid">
             {analytics.questions.map((question) => (
@@ -7960,7 +8026,7 @@ function AnalyticsTab({ event, analytics, loading = false, uniquePeople = false,
                     className="question-chart-head question-chart-head-button"
                     type="button"
                     aria-label={`View all ${question.responseCount} respondents for ${question.label}`}
-                    onClick={() => onOpenRespondents(question)}
+                    onClick={(event) => onOpenRespondents(question, null, { additive: event.metaKey || event.ctrlKey })}
                   >
                     <h3>{question.label}</h3>
                     <span><Users size={14} aria-hidden="true" />{question.responseCount} responses</span>
@@ -7970,19 +8036,55 @@ function AnalyticsTab({ event, analytics, loading = false, uniquePeople = false,
                 )}
                 {question.kind !== "text" ? (
                   <div className={`bar-chart${question.kind === "aggregated" ? " bar-chart-aggregated" : ""}`}>
-                    {question.options.map((option) => (
-                      <button
-                        className="bar-row"
-                        type="button"
-                        aria-label={`View ${option.count} respondents who selected ${option.label}`}
-                        key={option.answerKey || option.label}
-                        onClick={() => onOpenRespondents(question, option)}
-                      >
-                        <span title={option.label}>{option.label}</span>
-                        <div><i style={{ width: `${option.percent}%` }} /></div>
-                        <strong>{option.count}</strong>
-                      </button>
-                    ))}
+                    {question.options.map((option) => {
+                      const totalGroup = { question: question.label, answer: option.label, answerKey: option.answerKey || "", checkedInOnly: false };
+                      const checkedGroup = { ...totalGroup, checkedInOnly: true };
+                      const totalSelected = selectedAnswerGroups.some((group) => guestAnswerGroupKey(group) === guestAnswerGroupKey(totalGroup));
+                      const checkedSelected = selectedAnswerGroups.some((group) => guestAnswerGroupKey(group) === guestAnswerGroupKey(checkedGroup));
+                      return (
+                        <div className={`bar-row${totalSelected || checkedSelected ? " selected" : ""}`} key={option.answerKey || option.label}>
+                          <button
+                            className="answer-bar-label"
+                            type="button"
+                            aria-label={`View ${option.count} respondents who selected ${option.label}`}
+                            title={option.label}
+                            onClick={(event) => onOpenRespondents(question, option, { additive: event.metaKey || event.ctrlKey })}
+                          >
+                            {option.label}
+                          </button>
+                          <div
+                            className="answer-bar-track"
+                            style={{ "--checked-width": `${option.checkedInPercent}%` } as CSSProperties}
+                          >
+                            <button
+                              className={`answer-bar-total${totalSelected ? " selected" : ""}`}
+                              type="button"
+                              style={{ width: `${option.percent}%` }}
+                              aria-label={`View all ${option.count} respondents who selected ${option.label}`}
+                              onClick={(event) => onOpenRespondents(question, option, { additive: event.metaKey || event.ctrlKey })}
+                            />
+                            {option.checkedInCount ? (
+                              <button
+                                className={`answer-bar-checked${checkedSelected ? " selected" : ""}`}
+                                type="button"
+                                style={{ width: `${option.checkedInPercent}%` }}
+                                aria-label={`View ${option.checkedInCount} checked-in respondents who selected ${option.label}`}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  onOpenRespondents(question, option, { checkedInOnly: true, additive: event.metaKey || event.ctrlKey });
+                                }}
+                              />
+                            ) : null}
+                            {option.checkedInCount ? (
+                              <span className="answer-bar-tooltip" role="tooltip">
+                                {option.checkedInCount} checked in · {option.attendanceRate}%
+                              </span>
+                            ) : null}
+                          </div>
+                          <button className="answer-bar-count" type="button" onClick={(event) => onOpenRespondents(question, option, { additive: event.metaKey || event.ctrlKey })}>{option.count}</button>
+                        </div>
+                      );
+                    })}
                   </div>
                 ) : (
                   <InfiniteQuestionResponses
@@ -10435,15 +10537,15 @@ function mergeWorkspaceAnalyticsQuestions(questions) {
         const answerKey = normalizeRegistrationAnswer(response.value);
         const existing = counts.get(answerKey);
         counts.set(answerKey, existing
-          ? { ...existing, count: existing.count + 1 }
-          : { label: response.value, answerKey, count: 1, percent: 0 });
+          ? { ...existing, count: existing.count + 1, checkedInCount: (existing.checkedInCount || 0) + Number(Boolean(response.checkedIn)) }
+          : { label: response.value, answerKey, count: 1, checkedInCount: Number(Boolean(response.checkedIn)), percent: 0 });
       });
     } else {
       (question.options || []).forEach((option) => {
         const answerKey = option.answerKey || normalizeRegistrationAnswer(option.label);
         const existing = counts.get(answerKey);
         counts.set(answerKey, existing
-          ? { ...existing, count: existing.count + option.count }
+          ? { ...existing, count: existing.count + option.count, checkedInCount: (existing.checkedInCount || 0) + (option.checkedInCount || 0) }
           : { ...option, answerKey });
       });
     }
@@ -10460,7 +10562,13 @@ function mergeWorkspaceAnalyticsQuestions(questions) {
       kind,
       responses: [],
       options: sortRegistrationQuestionOptions(question.options
-        .map((option) => ({ ...option, percent: maxCount ? Math.round((option.count / maxCount) * 100) : 0 }))),
+        .map((option) => ({
+          ...option,
+          checkedInCount: option.checkedInCount || 0,
+          percent: maxCount ? Math.max(1, Math.round((option.count / maxCount) * 100)) : 0,
+          checkedInPercent: maxCount && option.checkedInCount ? Math.max(1, Math.round((option.checkedInCount / maxCount) * 100)) : 0,
+          attendanceRate: option.count ? Math.round(((option.checkedInCount || 0) / option.count) * 100) : 0,
+        }))),
     };
   });
 }

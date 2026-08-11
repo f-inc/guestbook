@@ -146,6 +146,24 @@ test("persists registration-answer guest filters", () => {
   assert.match(search, /guest_answer_key=mikeshin/);
 });
 
+test("persists a union of registration-answer groups", () => {
+  const group = { question: "Role", answer: "Founder", answerKey: "founder", checkedInOnly: true };
+  const search = buildWorkspaceUrlSearch("", {
+    eventId: "evt-1",
+    eventIds: ["evt-1"],
+    eventView: "upcoming",
+    eventSearch: "",
+    tab: "overview",
+    guestStatus: "all",
+    guestSearch: "",
+    guestTags: [],
+    guestAnswerGroups: [group],
+    guestPage: 1,
+    profileId: "",
+  });
+  assert.deepEqual(parseWorkspaceUrl(search).guestAnswerGroups, [group]);
+});
+
 test("serializes non-default workspace state and preserves unrelated params", () => {
   const search = buildWorkspaceUrlSearch("?debug=1&event=old", {
     eventId: "evt-2",

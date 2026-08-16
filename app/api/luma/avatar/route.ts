@@ -1,6 +1,6 @@
 import { getIndexedPersonAvatarSource, updateIndexedPersonAvatar } from "../db";
 import { avatarSource } from "../../../avatar-order";
-import { requireSessionKey } from "../../session-auth";
+import { requireGuestbookKey } from "../../session-auth";
 
 export const runtime = "nodejs";
 
@@ -11,10 +11,10 @@ const FETCH_TIMEOUT_MS = 5000;
 
 export async function GET(request: Request) {
   try {
-    requireSessionKey(request);
+    requireGuestbookKey(request);
   } catch (error: any) {
     return Response.json(
-      { ok: false, error: error.message || "Unable to validate the session key." },
+      { ok: false, error: error.message || "Unable to validate the Guestbook key." },
       {
         status: error.status || 500,
         headers: { "cache-control": "private, no-store" },

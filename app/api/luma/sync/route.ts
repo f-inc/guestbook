@@ -7,15 +7,26 @@ import { createSyncRun, finishSyncRun, getEventSyncStates, getIndexStats, hasLum
 import { lumaEventDate } from "../event-date";
 import { requestedEventIds, shouldRefreshEventGuests } from "../sync-policy";
 import { orderAvatarCandidates } from "../../../avatar-order";
-import { requireSessionKey } from "../../session-auth";
+import { requireGuestbookKey } from "../../session-auth";
 import { extractLumaReferrer } from "../referrer";
 import { extractGuestPhoneNumber } from "../guest-phone";
+import {
+  lumaApiKeys,
+  lumaSessionTokens,
+} from "../api-keys";
+import { createLumaClient, sessionEventFromAdmin } from "../luma-client";
 
 export const runtime = "nodejs";
 
-const LUMA_BASE_URL = "https://public-api.luma.com";
 const DEFAULT_DEBUG_LOG_PATH = nodePath.join(/*turbopackIgnore: true*/ process.cwd(), ".debug", "luma-api.log");
 const SYNC_IN_FLIGHT_KEY = "__guestbookLumaSyncInFlight";
+const lumaClient = createLumaClient({ logger: debugLog, beforeRequest: throttleSyncRequest, logPrefix: "sync " });
+const fetchBounded = lumaClient.fetchBounded;
+const fetchEventsAcrossCredentials = lumaClient.fetchEventsAcrossCredentials;
+const fetchSessionGuestsBounded = lumaClient.fetchSessionGuestsBounded;
+const lumaFetch = lumaClient.publicRequest;
+const lumaPrivateGet = lumaClient.privateGet;
+const resolveLumaEventReadCredential = lumaClient.resolveEventReadCredential;
 
 const approvalToStatus = {
   approved: "going",
@@ -32,7 +43,7 @@ export async function GET(request: Request) {
 
   const requestId = createRequestId();
   try {
-    requireSessionKey(request);
+    requireGuestbookKey(request);
     if (!hasLumaDb()) {
       return Response.json({ ok: false, error: "Missing DB_URL.", requestId }, { status: 503 });
     }
@@ -60,14 +71,15 @@ async function runSync(request: Request) {
   let guestCount = 0;
   const people = new Set();
   let failedEventCount = 0;
+  let credentialFailureCount = 0;
   let truncatedGuestEventCount = 0;
   let automaticTags = null;
   let syncLockAcquired = false;
   const overviewStatsEventIds: string[] = [];
 
   try {
-    requireSessionKey(request);
-    assertApiKey();
+    requireGuestbookKey(request);
+    assertReadCredential();
     assertDb();
 
     const body = request.method === "POST" ? await readJsonBody(request) : {};
@@ -125,6 +137,7 @@ async function runSync(request: Request) {
 
     syncRun = await createSyncRun({ requestId, limits });
     const rawEvents = await loadSyncEvents({ requestId, body: syncBody, limits });
+    credentialFailureCount = rawEvents.credentialFailures?.length || 0;
     for (const failure of rawEvents.failures || []) {
       eventCount += 1;
       failedEventCount += 1;
@@ -165,17 +178,28 @@ async function runSync(request: Request) {
         }
 
         await debugLog(requestId, "luma sync event guests start", { eventId: event.id, maxGuestsPerEvent: limits.maxGuestsPerEvent });
-        const rawGuests = await fetchBounded("/v1/events/guests/list", {
-          requestId,
-          params: {
-            event_id: event.id,
-            pagination_limit: String(limits.guestPageSize),
-            sort_column: "registered_at",
-            sort_direction: "desc nulls last",
-          },
-          maxEntries: limits.maxGuestsPerEvent,
-          maxPages: limits.maxGuestPagesPerEvent,
-        });
+        const credential = await resolveLumaEventReadCredential(event.id, requestId);
+        const rawGuests = credential.type === "api-key"
+          ? await fetchBounded("/v1/events/guests/list", {
+              requestId,
+              apiKey: credential.value,
+              params: {
+                event_id: event.id,
+                pagination_limit: String(limits.guestPageSize),
+                sort_column: "registered_at",
+                sort_direction: "desc nulls last",
+              },
+              maxEntries: limits.maxGuestsPerEvent,
+              maxPages: limits.maxGuestPagesPerEvent,
+            })
+          : await fetchSessionGuestsBounded({
+              requestId,
+              sessionToken: credential.value,
+              eventId: event.id,
+              pageSize: limits.guestPageSize,
+              maxEntries: limits.maxGuestsPerEvent,
+              maxPages: limits.maxGuestPagesPerEvent,
+            });
 
         const guests = rawGuests.entries.map((guest) => normalizeGuest(rawEvent, guest));
         guests.forEach((guest) => {
@@ -226,14 +250,18 @@ async function runSync(request: Request) {
       personIds: [...people],
     });
     if (overviewStatsEventIds.length) await refreshIndexedEventOverviewStats(overviewStatsEventIds);
-    const status = failedEventCount ? "partial_error" : "success";
+    const status = failedEventCount || credentialFailureCount ? "partial_error" : "success";
+    const failureSummary = [
+      failedEventCount ? `${failedEventCount} event(s) failed` : "",
+      credentialFailureCount ? `${credentialFailureCount} credential(s) failed` : "",
+    ].filter(Boolean).join("; ");
     if (syncRun) {
       await finishSyncRun(syncRun.id, {
         status,
         eventCount,
         guestCount,
         personCount: people.size,
-        error: failedEventCount ? failedEventCount + " event(s) failed. Check .debug/luma-api.log for requestId " + requestId + "." : null,
+        error: failureSummary ? `${failureSummary}. Check .debug/luma-api.log for requestId ${requestId}.` : null,
       });
     }
 
@@ -246,6 +274,7 @@ async function runSync(request: Request) {
       guestCount,
       personCount: people.size,
       failedEventCount,
+      credentialFailureCount,
       eventListTruncated: rawEvents.truncated,
       guestListsTruncated: truncatedGuestEventCount > 0,
       truncatedGuestEventCount,
@@ -253,7 +282,7 @@ async function runSync(request: Request) {
     });
 
     return Response.json({
-      ok: failedEventCount === 0,
+      ok: failedEventCount === 0 && credentialFailureCount === 0,
       status,
       requestId,
       eventCount,
@@ -262,6 +291,7 @@ async function runSync(request: Request) {
       guestCount,
       personCount: people.size,
       failedEventCount,
+      credentialFailureCount,
       truncated: rawEvents.truncated || truncatedGuestEventCount > 0,
       eventListTruncated: rawEvents.truncated,
       guestListsTruncated: truncatedGuestEventCount > 0,
@@ -326,10 +356,20 @@ async function loadSyncEvents({ requestId, body, limits }: AnyRecord) {
     const failures = [];
     for (const eventId of eventIds) {
       try {
-        entries.push(await lumaFetch("/v1/events/get", {
-          requestId,
-          params: { event_id: eventId },
-        }));
+        const credential = await resolveLumaEventReadCredential(eventId, requestId);
+        entries.push(credential.type === "api-key"
+          ? await lumaFetch("/v1/events/get", {
+              requestId,
+              params: { event_id: eventId },
+              apiKey: credential.value,
+            })
+          : sessionEventFromAdmin(await lumaPrivateGet({
+              requestId,
+              sessionToken: credential.value,
+              path: "/event/admin/get",
+              params: { event_api_id: eventId },
+              operation: `event details (${credential.value.envName})`,
+            })));
       } catch (error) {
         if (error.status !== 404) throw error;
         failures.push({
@@ -339,10 +379,10 @@ async function loadSyncEvents({ requestId, body, limits }: AnyRecord) {
         });
       }
     }
-    return { entries, failures, truncated: body.eventIds.length > eventIds.length };
+    return { entries, failures, credentialFailures: [], truncated: body.eventIds.length > eventIds.length };
   }
 
-  return fetchBounded("/v1/calendars/events/list", {
+  return fetchEventsAcrossCredentials({
     requestId,
     params: {
       pagination_limit: String(limits.eventPageSize),
@@ -366,67 +406,6 @@ function syncLimits(body: AnyRecord = {}) {
     staleAfterMinutes: boundedBodyInt(body.staleAfterMinutes, "LUMA_SYNC_STALE_AFTER_MINUTES", 60, 0, 60 * 24 * 14),
     requestDelayMs: boundedBodyInt(body.requestDelayMs, "LUMA_SYNC_REQUEST_DELAY_MS", 350, 0, 5000),
   };
-}
-
-async function fetchBounded(path: string, { params = {}, maxEntries, maxPages, requestId }: AnyRecord): Promise<any> {
-  const entries = [];
-  let cursor = null;
-  let pages = 0;
-  do {
-    await debugLog(requestId, "sync bounded fetch page start", { path, page: pages + 1, maxPages, maxEntries, hasCursor: Boolean(cursor) });
-    const page = await lumaFetch(path, {
-      requestId,
-      params: {
-        ...params,
-        ...(cursor ? { pagination_cursor: cursor } : {}),
-      },
-    });
-    pages += 1;
-    entries.push(...(page.entries || []));
-    cursor = page.next_cursor || null;
-    await debugLog(requestId, "sync bounded fetch page success", { path, page: pages, pageEntries: page.entries?.length || 0, totalEntries: entries.length, hasMore: Boolean(cursor) });
-  } while (cursor && entries.length < maxEntries && pages < maxPages);
-
-  const truncated = Boolean(cursor || entries.length > maxEntries);
-  await debugLog(requestId, "sync bounded fetch complete", { path, pages, entries: Math.min(entries.length, maxEntries), truncated });
-  return {
-    entries: entries.slice(0, maxEntries),
-    truncated,
-  };
-}
-
-async function lumaFetch(path: string, { method = "GET", params = {}, body, requestId }: AnyRecord = {}): Promise<any> {
-  await throttleSyncRequest();
-  const url = new URL(path, LUMA_BASE_URL);
-  Object.entries(params).forEach(([key, value]) => {
-    if (Array.isArray(value)) value.forEach((item) => url.searchParams.append(key, item));
-    else if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
-  });
-
-  const startedAt = Date.now();
-  const logDetails = { method, path, params: safeLogObject(params) };
-  await debugLog(requestId, "sync luma fetch start", logDetails);
-  const response = await fetch(url, {
-    method,
-    headers: {
-      "content-type": "application/json",
-      "x-luma-api-key": process.env.LUMA_API_KEY,
-    },
-    body: body ? JSON.stringify(body) : undefined,
-    cache: "no-store",
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    await debugLog(requestId, "sync luma fetch error", { ...logDetails, status: response.status, response: text, durationMs: Date.now() - startedAt }, "error");
-    const error = new Error("Luma API " + response.status + ": " + (text || response.statusText)) as HttpError;
-    error.status = response.status;
-    throw error;
-  }
-
-  await debugLog(requestId, "sync luma fetch success", { ...logDetails, status: response.status, durationMs: Date.now() - startedAt });
-  if (response.status === 204) return {};
-  return response.json();
 }
 
 function shouldForceRefresh(request: Request, body: AnyRecord = {}) {
@@ -855,9 +834,9 @@ function requireSyncAuth(request, { allowSessionOnly = false } = {}) {
   throw error;
 }
 
-function assertApiKey() {
-  if (!process.env.LUMA_API_KEY) {
-    const error = new Error("Missing LUMA_API_KEY. Add it before syncing live Luma data.") as HttpError;
+function assertReadCredential() {
+  if (!lumaApiKeys().length && !lumaSessionTokens().length) {
+    const error = new Error("Missing Luma credentials. Add LUMA_API_KEY, LUMA_SESSION_TOKEN, or a numbered variant before syncing live Luma data.") as HttpError;
     error.status = 503;
     throw error;
   }

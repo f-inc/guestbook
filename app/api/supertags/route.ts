@@ -1,5 +1,5 @@
 import { hasLumaDb, listIndexedSuperTags, syncIndexedSuperTags } from "../luma/db";
-import { requireSessionKey } from "../session-auth";
+import { requireGuestbookKey } from "../session-auth";
 
 type HttpError = Error & { status?: number };
 
@@ -7,7 +7,7 @@ export const runtime = "nodejs";
 
 export async function GET(request: Request) {
   try {
-    requireSessionKey(request);
+    requireGuestbookKey(request);
     if (!hasLumaDb()) return Response.json({ error: "Supertags require DB_URL." }, { status: 503 });
     return Response.json({ superTags: await listIndexedSuperTags() });
   } catch (error) {
@@ -17,7 +17,7 @@ export async function GET(request: Request) {
 
 export async function PUT(request: Request) {
   try {
-    requireSessionKey(request);
+    requireGuestbookKey(request);
     if (!hasLumaDb()) return Response.json({ error: "Supertags require DB_URL." }, { status: 503 });
     const body = await request.json() as { superTags?: unknown };
     return Response.json({ superTags: await syncIndexedSuperTags(body.superTags) });

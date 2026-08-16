@@ -1,5 +1,5 @@
 import { createIndexedTagDefinition, hasLumaDb, listIndexedEventGuestMutationTargets, listIndexedTagDefinitions, mutateIndexedPeopleTags, mutateIndexedPersonTag, updateIndexedTagDefinition } from "../luma/db";
-import { requireSessionKey } from "../session-auth";
+import { requireGuestbookKey } from "../session-auth";
 import { MAX_ALL_MATCHING_TAG_MUTATIONS, MAX_ALL_MATCHING_TAG_PEOPLE, parseBulkManualTagMutation, parseManualTagMutation } from "./manual-tag-mutation";
 
 type HttpError = Error & { code?: string; status?: number };
@@ -8,7 +8,7 @@ export const runtime = "nodejs";
 
 export async function GET(request: Request) {
   try {
-    requireSessionKey(request);
+    requireGuestbookKey(request);
     requireDatabase();
     return Response.json({ tags: await listIndexedTagDefinitions() });
   } catch (error) {
@@ -18,7 +18,7 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    requireSessionKey(request);
+    requireGuestbookKey(request);
     requireDatabase();
     const body = await request.json() as { name?: unknown; color?: unknown };
     const tag = await createIndexedTagDefinition(body);
@@ -31,7 +31,7 @@ export async function POST(request: Request) {
 
 export async function PUT(request: Request) {
   try {
-    requireSessionKey(request);
+    requireGuestbookKey(request);
     requireDatabase();
     const body = await request.json() as { id?: unknown; name?: unknown; color?: unknown };
     const tag = await updateIndexedTagDefinition(body.id, body);
@@ -44,7 +44,7 @@ export async function PUT(request: Request) {
 
 export async function PATCH(request: Request) {
   try {
-    requireSessionKey(request);
+    requireGuestbookKey(request);
     requireDatabase();
     const body = await request.json() as Record<string, unknown>;
     if (body.bulk === true) {

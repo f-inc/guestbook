@@ -5,7 +5,7 @@ import {
   listIndexedPersonComments,
   updateIndexedPersonComment,
 } from "../luma/db";
-import { requireSessionKey } from "../session-auth";
+import { requireGuestbookKey } from "../session-auth";
 import { normalizeGuestComment, normalizeGuestCommentId } from "./guest-notes";
 
 type HttpError = Error & { code?: string; status?: number };
@@ -14,7 +14,7 @@ export const runtime = "nodejs";
 
 export async function GET(request: Request) {
   try {
-    requireSessionKey(request);
+    requireGuestbookKey(request);
     requireDatabase();
     const personId = new URL(request.url).searchParams.get("person_id")?.trim() || "";
     if (!personId) return Response.json({ error: "A person id is required." }, { status: 400 });
@@ -27,7 +27,7 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    requireSessionKey(request);
+    requireGuestbookKey(request);
     requireDatabase();
     const body = await request.json() as { personId?: unknown; comment?: unknown };
     const personId = typeof body.personId === "string" ? body.personId.trim() : "";
@@ -52,7 +52,7 @@ export async function POST(request: Request) {
 
 export async function PATCH(request: Request) {
   try {
-    requireSessionKey(request);
+    requireGuestbookKey(request);
     requireDatabase();
     const body = await request.json() as { personId?: unknown; commentId?: unknown; comment?: unknown };
     const personId = requiredPersonId(body.personId);
@@ -74,7 +74,7 @@ export async function PATCH(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
-    requireSessionKey(request);
+    requireGuestbookKey(request);
     requireDatabase();
     const body = await request.json() as { personId?: unknown; commentId?: unknown };
     const personId = requiredPersonId(body.personId);

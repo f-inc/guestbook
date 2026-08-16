@@ -1,5 +1,5 @@
 import { hasLumaDb, listIndexedAudienceTagGroups, listIndexedPeopleByTag } from "../../luma/db";
-import { requireSessionKey } from "../../session-auth";
+import { requireGuestbookKey } from "../../session-auth";
 
 type HttpError = Error & { status?: number };
 
@@ -7,7 +7,7 @@ export const runtime = "nodejs";
 
 export async function GET(request: Request) {
   try {
-    requireSessionKey(request);
+    requireGuestbookKey(request);
     if (!hasLumaDb()) return Response.json({ error: "Audience tags require DB_URL." }, { status: 503 });
     const url = new URL(request.url);
     const tag = (url.searchParams.get("tag") || "").trim();

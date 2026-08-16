@@ -1,5 +1,5 @@
 import { hasLumaDb, listIndexedAudienceSuperTagGroups, listIndexedAudienceTagGroups, listIndexedEventCohortCounts } from "../../luma/db";
-import { requireSessionKey } from "../../session-auth";
+import { requireGuestbookKey } from "../../session-auth";
 
 type HttpError = Error & { status?: number };
 
@@ -7,7 +7,7 @@ export const runtime = "nodejs";
 
 export async function GET(request: Request) {
   try {
-    requireSessionKey(request);
+    requireGuestbookKey(request);
     if (!hasLumaDb()) return Response.json({ error: "Invite metadata requires DB_URL." }, { status: 503 });
     const include = new URL(request.url).searchParams.get("include") || "all";
     if (!new Set(["tags", "events", "all"]).has(include)) {

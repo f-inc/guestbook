@@ -1,5 +1,5 @@
 import { countIndexedAudience, hasLumaDb, listIndexedAudiencePage, normalizeIndexedAudienceCriteria } from "../../luma/db";
-import { requireSessionKey } from "../../session-auth";
+import { requireGuestbookKey } from "../../session-auth";
 
 type HttpError = Error & { status?: number };
 
@@ -8,7 +8,7 @@ export const runtime = "nodejs";
 export async function POST(request: Request) {
   const startedAt = performance.now();
   try {
-    requireSessionKey(request);
+    requireGuestbookKey(request);
     if (!hasLumaDb()) return Response.json({ error: "Audience resolution requires DB_URL." }, { status: 503 });
     const body = await request.json() as Record<string, unknown>;
     const criteria = normalizeIndexedAudienceCriteria(body?.criteria);

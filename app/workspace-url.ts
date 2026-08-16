@@ -2,8 +2,8 @@ import { MAX_SELECTED_EVENT_IDS } from "./event-selection";
 
 export const EVENT_DIRECTORY_PATH = "/events";
 export const WORKSPACE_SCROLL_HISTORY_KEY = "guestbookWorkspaceScrollTop";
-export type EventDirectorySortKey = "title" | "date" | "newFaces" | "newReferrals" | "checkedIn" | "showRate" | "firstRegisters" | "accepted" | "registered" | "invited" | "waitlisted" | "averageRating" | "modifiedAt";
-export type EventDirectoryMetricKey = "newFaces" | "newReferrals" | "checkedIn" | "showRate" | "firstRegisters" | "accepted" | "registered" | "invited" | "waitlisted";
+export type EventDirectorySortKey = "title" | "date" | "newFaces" | "discoveryRate" | "newReferrals" | "checkedIn" | "showRate" | "firstRegisters" | "accepted" | "registered" | "invited" | "waitlisted" | "averageRating" | "modifiedAt";
+export type EventDirectoryMetricKey = "newFaces" | "discoveryRate" | "newReferrals" | "checkedIn" | "showRate" | "firstRegisters" | "accepted" | "registered" | "invited" | "waitlisted";
 export type EventDirectoryMetricFilter = { key: EventDirectoryMetricKey; operator: "gte" | "lte"; value: number };
 export type WorkspaceGuestAnswerGroup = { question: string; answer: string; answerKey: string; checkedInOnly: boolean };
 
@@ -11,6 +11,7 @@ const EVENT_DIRECTORY_SORT_PARAMS: Record<EventDirectorySortKey, string> = {
   title: "title",
   date: "date",
   newFaces: "new_faces",
+  discoveryRate: "discovery_rate",
   newReferrals: "new_referrals",
   checkedIn: "check_ins",
   showRate: "show_rate",
@@ -27,6 +28,7 @@ const EVENT_DIRECTORY_SORT_KEYS = new Map(
 );
 const EVENT_DIRECTORY_METRIC_KEYS = new Set<EventDirectoryMetricKey>([
   "newFaces",
+  "discoveryRate",
   "newReferrals",
   "checkedIn",
   "showRate",

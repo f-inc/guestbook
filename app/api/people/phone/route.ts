@@ -1,6 +1,6 @@
 import { hasLumaDb, updateIndexedPersonPhoneNumber } from "../../luma/db";
 import { normalizePersonPhoneNumber } from "../../luma/person-phone";
-import { requireSessionKey } from "../../session-auth";
+import { requireGuestbookKey } from "../../session-auth";
 
 type HttpError = Error & { status?: number };
 
@@ -8,7 +8,7 @@ export const runtime = "nodejs";
 
 export async function PATCH(request: Request) {
   try {
-    requireSessionKey(request);
+    requireGuestbookKey(request);
     if (!hasLumaDb()) throw httpError(503, "Phone updates require DB_URL to be configured.");
 
     const body = await request.json() as { personId?: unknown; phoneNumber?: unknown };

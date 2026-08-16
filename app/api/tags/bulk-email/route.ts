@@ -1,5 +1,5 @@
 import { hasLumaDb, matchIndexedPeopleByEmails, mutateIndexedPeopleTags } from "../../luma/db";
-import { requireSessionKey } from "../../session-auth";
+import { requireGuestbookKey } from "../../session-auth";
 import { parseBulkEmails } from "../bulk-email-tags";
 
 type HttpError = Error & { code?: string; status?: number };
@@ -8,7 +8,7 @@ export const runtime = "nodejs";
 
 export async function POST(request: Request) {
   try {
-    requireSessionKey(request);
+    requireGuestbookKey(request);
     requireDatabase();
     const body = await request.json() as Record<string, unknown>;
     const action = body.action === "apply" ? "apply" : "preview";

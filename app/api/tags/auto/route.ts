@@ -1,5 +1,5 @@
 import { getAutomaticTagStatus, hasLumaDb, runAutomaticTagClassifier } from "../../luma/db";
-import { requireSessionKey } from "../../session-auth";
+import { requireGuestbookKey } from "../../session-auth";
 
 type HttpError = Error & { status?: number };
 
@@ -7,7 +7,7 @@ export const runtime = "nodejs";
 
 export async function GET(request: Request) {
   try {
-    requireSessionKey(request);
+    requireGuestbookKey(request);
     requireDatabase();
     return Response.json({ ok: true, status: await getAutomaticTagStatus() });
   } catch (error) {
@@ -17,7 +17,7 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    requireSessionKey(request);
+    requireGuestbookKey(request);
     requireDatabase();
     const body = await request.json().catch(() => ({})) as {
       scope?: unknown;

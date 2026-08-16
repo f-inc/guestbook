@@ -32,10 +32,15 @@ Set the required values:
 
 ```bash
 LUMA_API_KEY=your_luma_calendar_api_key
+# Optional: add LUMA_API_KEY_2, LUMA_API_KEY_3, ... to aggregate managed events
+LUMA_SESSION_TOKEN=your_luma_auth_session_cookie_value
+# Optional: add LUMA_SESSION_TOKEN_2, LUMA_SESSION_TOKEN_3, ... as well
 DB_URL=your_postgres_connection_string
 GUESTBOOK_KEY=replace_with_private_guestbook_key
 GUESTBOOK_SYNC_SECRET=replace_with_random_sync_secret
 ```
+
+Guestbook merges and deduplicates managed events from every configured API key and signed-in session token. API-key access is preferred when both credential types can access the same event; session-only events use Luma's bounded signed-in manager endpoints for event details and guest loading.
 
 Install dependencies, prepare Prisma, and start the app:
 
@@ -59,7 +64,7 @@ The former hourly full-sync Worker is archived. The `/api/luma/sync` endpoint re
 
 ```bash
 curl -X POST http://localhost:3000/api/luma/sync \
-  -H "x-guestbook-session-key: $GUESTBOOK_KEY" \
+  -H "x-guestbook-key: $GUESTBOOK_KEY" \
   -H "Authorization: Bearer $GUESTBOOK_SYNC_SECRET"
 ```
 
@@ -75,7 +80,7 @@ Preview a full classification without writing assignments:
 
 ```bash
 curl -X POST http://localhost:3000/api/tags/auto \
-  -H "x-guestbook-session-key: $GUESTBOOK_KEY" \
+  -H "x-guestbook-key: $GUESTBOOK_KEY" \
   -H "Content-Type: application/json" \
   --data '{"scope":"all","dryRun":true}'
 ```

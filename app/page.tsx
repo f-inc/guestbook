@@ -151,10 +151,12 @@ const inviteMessageTemplates = [
   { id: "builder-community", label: "Builder community", message: (event) => `${event?.title || "This event"} felt relevant to what you're building. We'd be glad to have you there.` },
   { id: "personal-invite", label: "Personal invite", message: (event) => `I'd love for you to join us at ${event?.title || "this event"}. Let me know if you can make it.` },
 ];
-const SESSION_KEY_STORAGE_KEY = "guestbook.sessionKey";
+const GUESTBOOK_KEY_STORAGE_KEY = "guestbook.key";
+const LEGACY_SESSION_KEY_STORAGE_KEY = "guestbook.sessionKey";
 const LUMA_SESSION_TOKEN_STORAGE_KEY = "guestbook.lumaAuthSession";
-const SESSION_KEY_HEADER = "x-guestbook-session-key";
-const SESSION_KEY_COOKIE = "guestbook_session_key";
+const GUESTBOOK_KEY_HEADER = "x-guestbook-key";
+const GUESTBOOK_KEY_COOKIE = "guestbook_key";
+const LEGACY_SESSION_KEY_COOKIE = "guestbook_session_key";
 const UNIVERSAL_PEOPLE_SEARCH_DEBOUNCE_MS = 180;
 const UNIVERSAL_SEARCH_CACHE_TTL_MS = 60_000;
 const INVITE_METADATA_CLIENT_CACHE_MS = 120_000;
@@ -347,8 +349,8 @@ export default function Home() {
   });
   const [multiEventGuestState, setMultiEventGuestState] = useState<{ key: string; loading: boolean; pageInfo: any }>({ key: "", loading: false, pageInfo: null });
   const [sessionStatus, setSessionStatus] = useState("checking");
-  const [sessionKey, setSessionKey] = useState("");
-  const [sessionKeyDraft, setSessionKeyDraft] = useState("");
+  const [guestbookKey, setGuestbookKey] = useState("");
+  const [guestbookKeyDraft, setGuestbookKeyDraft] = useState("");
   const [sessionError, setSessionError] = useState("");
 
   const setApiState = (next) => {
@@ -446,9 +448,10 @@ export default function Home() {
   }, []);
 
   const lockSession = (message = "") => {
-    window.localStorage.removeItem(SESSION_KEY_STORAGE_KEY);
-    clearSessionCookie();
-    setSessionKey("");
+    window.localStorage.removeItem(GUESTBOOK_KEY_STORAGE_KEY);
+    window.localStorage.removeItem(LEGACY_SESSION_KEY_STORAGE_KEY);
+    clearGuestbookKeyCookies();
+    setGuestbookKey("");
     setSessionStatus("locked");
     setSessionError(message);
     setState(initialState);
@@ -463,8 +466,8 @@ export default function Home() {
   };
 
   const apiFetch = async (input: RequestInfo | URL, init: RequestInit = {}) => {
-    const response = await sessionFetch(sessionKey, input, init);
-    if (response.status === 401) lockSession("That session key is no longer valid.");
+    const response = await guestbookFetch(guestbookKey, input, init);
+    if (response.status === 401) lockSession("That Guestbook key is no longer valid.");
     return response;
   };
 
@@ -552,25 +555,30 @@ export default function Home() {
 
   useEffect(() => {
     let cancelled = false;
-    const storedKey = window.localStorage.getItem(SESSION_KEY_STORAGE_KEY) || "";
-    setSessionKeyDraft(storedKey);
+    const storedKey = window.localStorage.getItem(GUESTBOOK_KEY_STORAGE_KEY)
+      || window.localStorage.getItem(LEGACY_SESSION_KEY_STORAGE_KEY)
+      || "";
+    setGuestbookKeyDraft(storedKey);
     if (!storedKey) {
       setSessionStatus("locked");
       return;
     }
 
-    verifySessionKey(storedKey).then((result) => {
+    verifyGuestbookKey(storedKey).then((result) => {
       if (cancelled) return;
       if (result.ok) {
-        writeSessionCookie(storedKey);
-        setSessionKey(storedKey);
+        window.localStorage.setItem(GUESTBOOK_KEY_STORAGE_KEY, storedKey);
+        window.localStorage.removeItem(LEGACY_SESSION_KEY_STORAGE_KEY);
+        writeGuestbookKeyCookie(storedKey);
+        setGuestbookKey(storedKey);
         setSessionStatus("ready");
         setSessionError("");
         return;
       }
       if (result.status === 401) {
-        window.localStorage.removeItem(SESSION_KEY_STORAGE_KEY);
-        clearSessionCookie();
+        window.localStorage.removeItem(GUESTBOOK_KEY_STORAGE_KEY);
+        window.localStorage.removeItem(LEGACY_SESSION_KEY_STORAGE_KEY);
+        clearGuestbookKeyCookies();
       }
       setSessionStatus("locked");
       setSessionError(result.error);
@@ -581,26 +589,27 @@ export default function Home() {
     };
   }, []);
 
-  const submitSessionKey = async (event) => {
+  const submitGuestbookKey = async (event) => {
     event.preventDefault();
-    const nextKey = sessionKeyDraft.trim();
+    const nextKey = guestbookKeyDraft.trim();
     if (!nextKey) {
-      setSessionError("Enter a session key.");
+      setSessionError("Enter the Guestbook key.");
       return;
     }
 
     setSessionStatus("checking");
     setSessionError("");
-    const result = await verifySessionKey(nextKey);
+    const result = await verifyGuestbookKey(nextKey);
     if (!result.ok) {
       setSessionStatus("locked");
       setSessionError(result.error);
       return;
     }
 
-    window.localStorage.setItem(SESSION_KEY_STORAGE_KEY, nextKey);
-    writeSessionCookie(nextKey);
-    setSessionKey(nextKey);
+    window.localStorage.setItem(GUESTBOOK_KEY_STORAGE_KEY, nextKey);
+    window.localStorage.removeItem(LEGACY_SESSION_KEY_STORAGE_KEY);
+    writeGuestbookKeyCookie(nextKey);
+    setGuestbookKey(nextKey);
     setSessionStatus("ready");
   };
 
@@ -734,7 +743,7 @@ export default function Home() {
       window.clearTimeout(timeout);
       controller.abort();
     };
-  }, [searchOpen, universalQuery, universalPeopleFiltersKey, sessionKey]);
+  }, [searchOpen, universalQuery, universalPeopleFiltersKey, guestbookKey]);
 
   const loadMoreUniversalPeople = async () => {
     const query = universalQuery.trim().toLocaleLowerCase();
@@ -866,7 +875,7 @@ export default function Home() {
   };
 
   useEffect(() => {
-    if (!workspaceUrlReady || sessionStatus !== "ready" || !sessionKey) return;
+    if (!workspaceUrlReady || sessionStatus !== "ready" || !guestbookKey) return;
     let cancelled: boolean = false;
     loadLumaEvents({ cancelled: () => cancelled }).then(() => {
       if (!cancelled) void refreshLumaEventCatalog({ reason: "load" });
@@ -874,10 +883,10 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [workspaceUrlReady, sessionStatus, sessionKey]);
+  }, [workspaceUrlReady, sessionStatus, guestbookKey]);
 
   useEffect(() => {
-    if (sessionStatus !== "ready" || !sessionKey) return;
+    if (sessionStatus !== "ready" || !guestbookKey) return;
     const refreshIfVisible = () => {
       if (document.visibilityState === "visible") void refreshLumaEventCatalog({ reason: "tab_active" });
     };
@@ -887,18 +896,18 @@ export default function Home() {
       document.removeEventListener("visibilitychange", refreshIfVisible);
       window.removeEventListener("focus", refreshIfVisible);
     };
-  }, [sessionStatus, sessionKey]);
+  }, [sessionStatus, guestbookKey]);
 
   useEffect(() => {
-    if (sessionStatus !== "ready" || !sessionKey) return;
+    if (sessionStatus !== "ready" || !guestbookKey) return;
     void loadAvailableTags();
-  }, [sessionStatus, sessionKey]);
+  }, [sessionStatus, guestbookKey]);
 
   useEffect(() => {
-    if (sessionStatus !== "ready" || !sessionKey) return;
+    if (sessionStatus !== "ready" || !guestbookKey) return;
     const timeout = window.setTimeout(() => void loadInviteMetadata("tags").catch(() => {}), 250);
     return () => window.clearTimeout(timeout);
-  }, [sessionStatus, sessionKey]);
+  }, [sessionStatus, guestbookKey]);
 
   const selectedEvent = getEvent(state, state.selectedEventId);
   const selectedEvents = selectedWorkspaceEvents(state);
@@ -1754,7 +1763,7 @@ export default function Home() {
   reconcileActiveEventCountsRef.current = () => void reconcileActiveEventCounts();
 
   useEffect(() => {
-    if (sessionStatus !== "ready" || !sessionKey || !selectedEventIdsKey) return;
+    if (sessionStatus !== "ready" || !guestbookKey || !selectedEventIdsKey) return;
     const checkWhenActive = () => {
       if (document.visibilityState === "visible") reconcileActiveEventCountsRef.current();
     };
@@ -1765,7 +1774,7 @@ export default function Home() {
       document.removeEventListener("visibilitychange", checkWhenActive);
       window.removeEventListener("focus", checkWhenActive);
     };
-  }, [sessionStatus, sessionKey, selectedEventIdsKey, selectedEventCountReadinessKey]);
+  }, [sessionStatus, guestbookKey, selectedEventIdsKey, selectedEventCountReadinessKey]);
 
   const performSelectedEventSync = async (eventIds: string[], token = "") => {
     const requestedEventIds = [...new Set(eventIds.filter(Boolean))];
@@ -3771,12 +3780,12 @@ export default function Home() {
 
   if (sessionStatus !== "ready") {
     return (
-      <SessionKeyGate
-        value={sessionKeyDraft}
+      <GuestbookKeyGate
+        value={guestbookKeyDraft}
         error={sessionError}
         checking={sessionStatus === "checking"}
-        onChange={setSessionKeyDraft}
-        onSubmit={submitSessionKey}
+        onChange={setGuestbookKeyDraft}
+        onSubmit={submitGuestbookKey}
       />
     );
   }
@@ -4682,7 +4691,7 @@ export default function Home() {
   );
 }
 
-const eventDirectoryShowRateFormatter = new Intl.NumberFormat(undefined, { style: "percent", maximumFractionDigits: 1 });
+const eventDirectoryRateFormatter = new Intl.NumberFormat(undefined, { style: "percent", maximumFractionDigits: 1 });
 const eventDirectoryMetricOptions = [
   { key: "checkedIn", label: "Check-ins" },
   { key: "accepted", label: "Accepted" },
@@ -4691,6 +4700,7 @@ const eventDirectoryMetricOptions = [
   { key: "invited", label: "Invited" },
   { key: "firstRegisters", label: "First registers" },
   { key: "newFaces", label: "New faces" },
+  { key: "discoveryRate", label: "Discovery rate (%)" },
   { key: "newReferrals", label: "New referrals" },
   { key: "showRate", label: "Show rate (%)" },
 ] as const;
@@ -4699,6 +4709,7 @@ const eventDirectoryColumns = [
   { key: "title", label: "Event", kind: "text" },
   { key: "date", label: "Date", kind: "date" },
   { key: "newFaces", label: "New faces", kind: "number" },
+  { key: "discoveryRate", label: "Discovery rate", kind: "number" },
   { key: "newReferrals", label: "New referrals", kind: "number" },
   { key: "checkedIn", label: "Check-ins", kind: "number" },
   { key: "showRate", label: "Show rate", kind: "number" },
@@ -4718,6 +4729,7 @@ function EventDirectory({ events, eventFeedbackById, sort, filters, status, erro
     const checkedIn = Math.max(0, Number(event.checkedIn) || 0);
     const eventWithShowRate = {
       ...event,
+      discoveryRate: checkedIn > 0 ? Math.max(0, Number(event.newFaces) || 0) / checkedIn : null,
       showRate: accepted > 0 ? checkedIn / accepted : null,
     };
     return feedback?.status === "ready"
@@ -4738,8 +4750,8 @@ function EventDirectory({ events, eventFeedbackById, sort, filters, status, erro
       if (includedPhrases.length && !includedPhrases.some((phrase) => title.includes(phrase))) return false;
       if (excludedPhrases.some((phrase) => title.includes(phrase))) return false;
       return filters.metrics.every((filter) => {
-        const rawValue = filter.key === "showRate"
-          ? event.showRate == null ? null : Number(event.showRate) * 100
+        const rawValue = filter.key === "showRate" || filter.key === "discoveryRate"
+          ? event[filter.key] == null ? null : Number(event[filter.key]) * 100
           : Number(event[filter.key]);
         if (rawValue == null || !Number.isFinite(rawValue)) return false;
         return filter.operator === "gte" ? rawValue >= filter.value : rawValue <= filter.value;
@@ -4852,11 +4864,11 @@ function EventDirectory({ events, eventFeedbackById, sort, filters, status, erro
                 type="number"
                 aria-label={`Value for rule ${index + 1}`}
                 min="0"
-                step={filter.key === "showRate" ? "0.1" : "1"}
+                step={filter.key === "showRate" || filter.key === "discoveryRate" ? "0.1" : "1"}
                 value={filter.value}
                 onChange={(event) => updateMetricFilter(index, { value: Math.max(0, Number(event.target.value) || 0) })}
               />
-              {filter.key === "showRate" ? <span className="event-directory-rule-suffix">%</span> : null}
+              {filter.key === "showRate" || filter.key === "discoveryRate" ? <span className="event-directory-rule-suffix">%</span> : null}
               <button type="button" aria-label={`Remove metric rule ${index + 1}`} onClick={() => onFiltersChange({ ...filters, metrics: filters.metrics.filter((_, filterIndex) => filterIndex !== index) })}>
                 <X size={13} aria-hidden="true" />
               </button>
@@ -4912,10 +4924,13 @@ function EventDirectory({ events, eventFeedbackById, sort, filters, status, erro
                     </td>
                     <td><time dateTime={event.date}>{formatDate(event.date)}</time></td>
                     <td>{Number(event.newFaces).toLocaleString()}</td>
+                    <td title={event.discoveryRate == null ? "No checked-in guests" : `${Number(event.newFaces).toLocaleString()} new faces / ${Number(event.checkedIn).toLocaleString()} check-ins`}>
+                      {event.discoveryRate == null ? "—" : eventDirectoryRateFormatter.format(event.discoveryRate)}
+                    </td>
                     <td>{Number(event.newReferrals).toLocaleString()}</td>
                     <td>{Number(event.checkedIn).toLocaleString()}</td>
                     <td title={event.showRate == null ? "No accepted guests" : `${Number(event.checkedIn).toLocaleString()} check-ins / ${Number(event.accepted).toLocaleString()} accepted`}>
-                      {event.showRate == null ? "—" : eventDirectoryShowRateFormatter.format(event.showRate)}
+                      {event.showRate == null ? "—" : eventDirectoryRateFormatter.format(event.showRate)}
                     </td>
                     <td>{Number(event.firstRegisters).toLocaleString()}</td>
                     <td>{Number(event.accepted).toLocaleString()}</td>
@@ -4949,7 +4964,7 @@ function eventDirectoryTitlePhrases(value: string) {
   return [...new Set(value.split(",").map((phrase) => phrase.trim().toLocaleLowerCase()).filter(Boolean))];
 }
 
-function SessionKeyGate({ value, error, checking, onChange, onSubmit }) {
+function GuestbookKeyGate({ value, error, checking, onChange, onSubmit }) {
   return (
     <main className="session-shell">
       <section className="session-panel" aria-labelledby="session-title">
@@ -4962,7 +4977,7 @@ function SessionKeyGate({ value, error, checking, onChange, onSubmit }) {
         </div>
         <form className="session-form" onSubmit={onSubmit}>
           <label>
-            <span>Session key</span>
+            <span>Guestbook key</span>
             <input
               type="password"
               autoComplete="current-password"
@@ -9431,34 +9446,36 @@ async function postBulkLumaAction(payload, apiFetch) {
   return data;
 }
 
-async function verifySessionKey(sessionKey: string) {
+async function verifyGuestbookKey(guestbookKey: string) {
   try {
-    const response = await sessionFetch(sessionKey, "/api/session", { cache: "no-store" });
+    const response = await guestbookFetch(guestbookKey, "/api/session", { cache: "no-store" });
     const data: any = await response.json();
     return {
       ok: response.ok && data.ok !== false,
       status: response.status,
-      error: data.error || "Unable to validate the session key.",
+      error: data.error || "Unable to validate the Guestbook key.",
     };
   } catch {
     return { ok: false, status: 0, error: "Unable to reach Guestbook. Try again." };
   }
 }
 
-function sessionFetch(sessionKey: string, input: RequestInfo | URL, init: RequestInit = {}) {
+function guestbookFetch(guestbookKey: string, input: RequestInfo | URL, init: RequestInit = {}) {
   const headers = new Headers(init.headers);
-  headers.set(SESSION_KEY_HEADER, sessionKey);
+  headers.set(GUESTBOOK_KEY_HEADER, guestbookKey);
   return fetch(input, { ...init, headers });
 }
 
-function writeSessionCookie(sessionKey: string) {
+function writeGuestbookKeyCookie(guestbookKey: string) {
   const secure = window.location.protocol === "https:" ? "; Secure" : "";
-  document.cookie = `${SESSION_KEY_COOKIE}=${encodeURIComponent(sessionKey)}; path=/; max-age=31536000; SameSite=Lax${secure}`;
+  document.cookie = `${GUESTBOOK_KEY_COOKIE}=${encodeURIComponent(guestbookKey)}; path=/; max-age=31536000; SameSite=Lax${secure}`;
+  document.cookie = `${LEGACY_SESSION_KEY_COOKIE}=; path=/; max-age=0; SameSite=Lax${secure}`;
 }
 
-function clearSessionCookie() {
+function clearGuestbookKeyCookies() {
   const secure = window.location.protocol === "https:" ? "; Secure" : "";
-  document.cookie = `${SESSION_KEY_COOKIE}=; path=/; max-age=0; SameSite=Lax${secure}`;
+  document.cookie = `${GUESTBOOK_KEY_COOKIE}=; path=/; max-age=0; SameSite=Lax${secure}`;
+  document.cookie = `${LEGACY_SESSION_KEY_COOKIE}=; path=/; max-age=0; SameSite=Lax${secure}`;
 }
 
 function mergeLumaGuests(current, lumaData, { append = false, preserveView = false } = {}) {

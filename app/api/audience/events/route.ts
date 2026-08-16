@@ -1,5 +1,5 @@
 import { hasLumaDb, listIndexedEventCohortCounts, listIndexedPeopleByEventCohort } from "../../luma/db";
-import { requireSessionKey } from "../../session-auth";
+import { requireGuestbookKey } from "../../session-auth";
 
 type HttpError = Error & { status?: number };
 
@@ -7,7 +7,7 @@ export const runtime = "nodejs";
 
 export async function GET(request: Request) {
   try {
-    requireSessionKey(request);
+    requireGuestbookKey(request);
     if (!hasLumaDb()) return Response.json({ error: "Event audiences require DB_URL." }, { status: 503 });
     const url = new URL(request.url);
     if (url.searchParams.get("counts") === "1") return Response.json({ counts: await listIndexedEventCohortCounts() });

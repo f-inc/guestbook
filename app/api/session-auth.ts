@@ -1,26 +1,32 @@
-export const SESSION_KEY_HEADER = "x-guestbook-session-key";
-export const SESSION_KEY_COOKIE = "guestbook_session_key";
+export const GUESTBOOK_KEY_HEADER = "x-guestbook-key";
+export const GUESTBOOK_KEY_COOKIE = "guestbook_key";
+
+// Keep accepting the old transport names while deployed clients migrate.
+export const LEGACY_SESSION_KEY_HEADER = "x-guestbook-session-key";
+export const LEGACY_SESSION_KEY_COOKIE = "guestbook_session_key";
 
 type HttpError = Error & { status?: number };
 
-export function requireSessionKey(request: Request): void {
+export function requireGuestbookKey(request: Request): void {
   const expectedKey = process.env.GUESTBOOK_KEY || "";
   if (!expectedKey) {
     throw httpError("Missing GUESTBOOK_KEY. Configure it before serving Guestbook.", 503);
   }
-  if (!isSessionRequestAuthorized(request, expectedKey)) {
-    throw httpError("Unauthorized session key.", 401);
+  if (!isGuestbookRequestAuthorized(request, expectedKey)) {
+    throw httpError("Invalid Guestbook key.", 401);
   }
 }
 
-export function isSessionRequestAuthorized(request: Request, expectedKey: string): boolean {
+export function isGuestbookRequestAuthorized(request: Request, expectedKey: string): boolean {
   if (!expectedKey) return false;
-  const headerKey = request.headers.get(SESSION_KEY_HEADER);
-  const providedKey = headerKey !== null ? headerKey : readCookie(request, SESSION_KEY_COOKIE);
-  return constantTimeEqual(providedKey, expectedKey);
+  const providedKey = request.headers.get(GUESTBOOK_KEY_HEADER)
+    ?? request.headers.get(LEGACY_SESSION_KEY_HEADER)
+    ?? readCookie(request, GUESTBOOK_KEY_COOKIE)
+    ?? readCookie(request, LEGACY_SESSION_KEY_COOKIE);
+  return constantTimeEqual(providedKey ?? "", expectedKey);
 }
 
-function readCookie(request: Request, name: string): string {
+function readCookie(request: Request, name: string): string | null {
   const cookieHeader = request.headers.get("cookie") || "";
   for (const cookie of cookieHeader.split(";")) {
     const separator = cookie.indexOf("=");
@@ -29,10 +35,10 @@ function readCookie(request: Request, name: string): string {
     try {
       return decodeURIComponent(value);
     } catch {
-      return "";
+      return null;
     }
   }
-  return "";
+  return null;
 }
 
 function constantTimeEqual(leftValue: string, rightValue: string): boolean {

@@ -38,19 +38,27 @@ test("round-trips show-rate event directory sorting", () => {
   assert.match(buildWorkspaceUrlSearch("", state), /sort=show_rate/);
 });
 
+test("round-trips discovery-rate event directory sorting", () => {
+  const state = parseWorkspaceUrl("?sort=discovery_rate&direction=desc");
+  assert.equal(state.eventSort, "discoveryRate");
+  assert.equal(state.eventSortDirection, "desc");
+  assert.match(buildWorkspaceUrlSearch("", state), /sort=discovery_rate/);
+});
+
 test("round-trips event title and stacked metric filters", () => {
-  const state = parseWorkspaceUrl("?event_title_includes=festival%2Cfounders&event_title_excludes=virtual&event_metric=checkedIn%3Agte%3A100&event_metric=waitlisted%3Alte%3A25&event_metric=showRate%3Agte%3A60.5");
+  const state = parseWorkspaceUrl("?event_title_includes=festival%2Cfounders&event_title_excludes=virtual&event_metric=checkedIn%3Agte%3A100&event_metric=waitlisted%3Alte%3A25&event_metric=showRate%3Agte%3A60.5&event_metric=discoveryRate%3Agte%3A40");
   assert.equal(state.eventTitleIncludes, "festival,founders");
   assert.equal(state.eventTitleExcludes, "virtual");
   assert.deepEqual(state.eventMetricFilters, [
     { key: "checkedIn", operator: "gte", value: 100 },
     { key: "waitlisted", operator: "lte", value: 25 },
     { key: "showRate", operator: "gte", value: 60.5 },
+    { key: "discoveryRate", operator: "gte", value: 40 },
   ]);
   const search = buildWorkspaceUrlSearch("", state);
   assert.match(search, /event_title_includes=festival%2Cfounders/);
   assert.match(search, /event_title_excludes=virtual/);
-  assert.equal(new URLSearchParams(search).getAll("event_metric").length, 3);
+  assert.equal(new URLSearchParams(search).getAll("event_metric").length, 4);
 });
 
 test("drops malformed event metric filters", () => {

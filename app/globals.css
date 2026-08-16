@@ -616,11 +616,46 @@
   }
 
   .event-directory-table th {
-    @apply sticky top-0 z-10 whitespace-nowrap border-b border-border bg-canvas p-0 text-left;
+    @apply sticky top-0 z-10 whitespace-nowrap border-b border-border bg-canvas p-0 text-left transition-[opacity,background-color,box-shadow] duration-150;
   }
 
-  .event-directory-table th button {
-    @apply flex w-full items-center justify-between gap-2 border-0 bg-transparent px-3 py-3 text-[11px] font-bold uppercase tracking-[0.06em] text-muted transition hover:bg-subtle hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/25;
+  .event-directory-column-header {
+    @apply flex min-w-max items-center;
+  }
+
+  .event-directory-column-sort {
+    @apply flex min-w-0 flex-1 items-center justify-between gap-2 border-0 bg-transparent px-3 py-3 text-[11px] font-bold uppercase tracking-[0.06em] text-muted transition hover:bg-subtle hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/25;
+  }
+
+  .event-directory-column-drag-handle {
+    @apply ml-1 inline-flex h-8 w-6 shrink-0 touch-none cursor-grab select-none items-center justify-center self-center rounded border-0 bg-transparent p-0 text-muted/35 opacity-0 transition hover:bg-subtle hover:text-muted active:cursor-grabbing focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/25;
+  }
+
+  .event-directory-table th:hover .event-directory-column-drag-handle,
+  .event-directory-table th.is-dragging .event-directory-column-drag-handle {
+    @apply opacity-100;
+  }
+
+  .event-directory-table th.is-dragging {
+    @apply opacity-45;
+  }
+
+  .event-directory-table th.is-drop-target {
+    @apply bg-brand-soft;
+    box-shadow: inset 2px 0 0 var(--color-brand);
+  }
+
+  .event-directory-column-drag-preview {
+    @apply pointer-events-none fixed left-0 top-0 z-[100] flex items-center gap-2 overflow-hidden rounded-md border border-brand/35 bg-surface px-3 text-[11px] font-bold uppercase tracking-[0.06em] text-ink shadow-xl;
+    will-change: transform;
+  }
+
+  .event-directory-column-drag-preview > svg:first-child {
+    @apply shrink-0 text-muted;
+  }
+
+  .event-directory-column-drag-preview > span {
+    @apply min-w-0 flex-1 truncate;
   }
 
   .event-directory-table td {

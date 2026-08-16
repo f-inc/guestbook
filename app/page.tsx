@@ -24,6 +24,7 @@ import {
   ExternalLink,
   FileText,
   Gem,
+  GripVertical,
   Italic,
   Layers3,
   Link2,
@@ -4709,10 +4710,10 @@ const eventDirectoryColumns = [
   { key: "title", label: "Event", kind: "text" },
   { key: "date", label: "Date", kind: "date" },
   { key: "newFaces", label: "New faces", kind: "number" },
-  { key: "discoveryRate", label: "Discovery rate", kind: "number" },
-  { key: "newReferrals", label: "New referrals", kind: "number" },
   { key: "checkedIn", label: "Check-ins", kind: "number" },
+  { key: "discoveryRate", label: "Discovery rate", kind: "number" },
   { key: "showRate", label: "Show rate", kind: "number" },
+  { key: "newReferrals", label: "New referrals", kind: "number" },
   { key: "firstRegisters", label: "First registers", kind: "number" },
   { key: "accepted", label: "Accepted", kind: "number" },
   { key: "registered", label: "Registered", kind: "number" },
@@ -4721,8 +4722,40 @@ const eventDirectoryColumns = [
   { key: "averageRating", label: "Average rating", kind: "number" },
   { key: "modifiedAt", label: "Date modified", kind: "date" },
 ] as const;
+type EventDirectoryColumn = typeof eventDirectoryColumns[number];
+type EventDirectoryColumnDrag = {
+  key: EventDirectorySortKey;
+  pointerId: number;
+  offsetX: number;
+  offsetY: number;
+  previewLeft: number;
+  previewTop: number;
+  animationFrame: number | null;
+  insertionTarget: string | null;
+  dropTarget: EventDirectorySortKey;
+  initialOrder: EventDirectorySortKey[];
+  handle: HTMLButtonElement;
+};
+type EventDirectoryColumnDragPreview = {
+  key: EventDirectorySortKey;
+  label: string;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+};
 
 function EventDirectory({ events, eventFeedbackById, sort, filters, status, error, onOpenEvent, onRetry, onRefresh, onSortChange, onFiltersChange }) {
+  const [columnOrder, setColumnOrder] = useState<EventDirectorySortKey[]>(() => eventDirectoryColumns.map((column) => column.key));
+  const [draggedColumn, setDraggedColumn] = useState<EventDirectorySortKey | null>(null);
+  const [dropTargetColumn, setDropTargetColumn] = useState<EventDirectorySortKey | null>(null);
+  const [columnDragPreview, setColumnDragPreview] = useState<EventDirectoryColumnDragPreview | null>(null);
+  const columnDragRef = useRef<EventDirectoryColumnDrag | null>(null);
+  const columnDragPreviewRef = useRef<HTMLDivElement | null>(null);
+  const suppressSortClickRef = useRef(false);
+  const orderedColumns = useMemo(() => columnOrder
+    .map((key) => eventDirectoryColumns.find((column) => column.key === key))
+    .filter((column): column is EventDirectoryColumn => Boolean(column)), [columnOrder]);
   const rows = useMemo(() => events.map((event) => {
     const feedback = eventFeedbackById[event.id];
     const accepted = Math.max(0, Number(event.accepted) || 0);
@@ -4787,18 +4820,186 @@ function EventDirectory({ events, eventFeedbackById, sort, filters, status, erro
   };
 
   const setSortKey = (key: typeof eventDirectoryColumns[number]["key"]) => {
+    if (suppressSortClickRef.current) return;
     onSortChange(sort.key === key
       ? { key, direction: sort.direction === "asc" ? "desc" : "asc" }
       : { key, direction: key === "title" ? "asc" : "desc" });
   };
 
+  const beginColumnDrag = (event: React.PointerEvent<HTMLButtonElement>, key: EventDirectorySortKey) => {
+    if (key === "title" || event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const header = event.currentTarget.closest<HTMLElement>("[data-event-column-key]");
+    const bounds = header?.getBoundingClientRect();
+    const column = eventDirectoryColumns.find((item) => item.key === key);
+    if (!bounds || !column) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    columnDragRef.current = {
+      key,
+      pointerId: event.pointerId,
+      offsetX: event.clientX - bounds.left,
+      offsetY: event.clientY - bounds.top,
+      previewLeft: bounds.left,
+      previewTop: bounds.top,
+      animationFrame: null,
+      insertionTarget: null,
+      dropTarget: key,
+      initialOrder: [...columnOrder],
+      handle: event.currentTarget,
+    };
+    suppressSortClickRef.current = true;
+    setDraggedColumn(key);
+    setDropTargetColumn(key);
+    setColumnDragPreview({
+      key,
+      label: column.label,
+      left: bounds.left,
+      top: bounds.top,
+      width: bounds.width,
+      height: bounds.height,
+    });
+  };
+
+  const moveDraggedColumn = (event: React.PointerEvent<HTMLButtonElement>) => {
+    const drag = columnDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    drag.previewLeft = event.clientX - drag.offsetX;
+    drag.previewTop = event.clientY - drag.offsetY;
+    if (drag.animationFrame == null) {
+      drag.animationFrame = window.requestAnimationFrame(() => {
+        drag.animationFrame = null;
+        if (!columnDragPreviewRef.current) return;
+        columnDragPreviewRef.current.style.transform = `translate3d(${drag.previewLeft}px, ${drag.previewTop}px, 0) rotate(0.5deg) scale(1.02)`;
+      });
+    }
+    const targetHeader = document
+      .elementFromPoint(event.clientX, event.clientY)
+      ?.closest<HTMLElement>("[data-event-column-key]");
+    const targetKey = targetHeader?.dataset.eventColumnKey as EventDirectorySortKey | undefined;
+    if (!targetKey || drag.key === targetKey || targetKey === "title") return;
+
+    const targetBounds = targetHeader.getBoundingClientRect();
+    const insertAfter = event.clientX >= targetBounds.left + targetBounds.width / 2;
+    const insertionTarget = `${targetKey}:${insertAfter ? "after" : "before"}`;
+    if (drag.dropTarget !== targetKey) {
+      drag.dropTarget = targetKey;
+      setDropTargetColumn(targetKey);
+    }
+    if (drag.insertionTarget === insertionTarget) return;
+    drag.insertionTarget = insertionTarget;
+
+    setColumnOrder((current) => {
+      if (!current.includes(drag.key) || !current.includes(targetKey)) return current;
+      const withoutDragged = current.filter((key) => key !== drag.key);
+      let targetIndex = withoutDragged.indexOf(targetKey);
+      if (targetIndex < 1) return current;
+
+      if (insertAfter) targetIndex += 1;
+      targetIndex = Math.max(1, Math.min(withoutDragged.length, targetIndex));
+
+      const next = [...withoutDragged];
+      next.splice(targetIndex, 0, drag.key);
+      if (next.every((key, index) => key === current[index])) return current;
+      return next;
+    });
+  };
+
+  const clearColumnDrag = (drag: EventDirectoryColumnDrag) => {
+    if (drag.animationFrame != null) window.cancelAnimationFrame(drag.animationFrame);
+    if (drag.handle.hasPointerCapture(drag.pointerId)) drag.handle.releasePointerCapture(drag.pointerId);
+    columnDragRef.current = null;
+    setDraggedColumn(null);
+    setDropTargetColumn(null);
+    setColumnDragPreview(null);
+    window.setTimeout(() => { suppressSortClickRef.current = false; }, 0);
+  };
+
+  const finishColumnDrag = (event?: React.PointerEvent<HTMLButtonElement>) => {
+    const drag = columnDragRef.current;
+    if (!drag || (event && drag.pointerId !== event.pointerId)) return;
+    clearColumnDrag(drag);
+  };
+
+  const cancelColumnDrag = () => {
+    const drag = columnDragRef.current;
+    if (!drag) return;
+    setColumnOrder(drag.initialOrder);
+    clearColumnDrag(drag);
+  };
+
+  useEffect(() => {
+    if (!draggedColumn) return undefined;
+    const cancelOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      cancelColumnDrag();
+    };
+    window.addEventListener("keydown", cancelOnEscape, true);
+    return () => window.removeEventListener("keydown", cancelOnEscape, true);
+  }, [draggedColumn]);
+
+  const renderEventCell = (event, column: EventDirectoryColumn) => {
+    switch (column.key) {
+      case "title":
+        return (
+          <td key={column.key} className="event-directory-name">
+            <button type="button" onClick={() => onOpenEvent(event.id)}>
+              <EventArtwork event={event} />
+              <span className="event-directory-name-copy">
+                <strong>{event.title}</strong>
+                <span className="event-directory-open-label">
+                  Open event <ArrowRight size={12} aria-hidden="true" />
+                </span>
+              </span>
+            </button>
+          </td>
+        );
+      case "date":
+        return <td key={column.key}><time dateTime={event.date}>{formatDate(event.date)}</time></td>;
+      case "discoveryRate":
+        return (
+          <td key={column.key} title={event.discoveryRate == null ? "No checked-in guests" : `${Number(event.newFaces).toLocaleString()} new faces / ${Number(event.checkedIn).toLocaleString()} check-ins`}>
+            {event.discoveryRate == null ? "—" : eventDirectoryRateFormatter.format(event.discoveryRate)}
+          </td>
+        );
+      case "showRate":
+        return (
+          <td key={column.key} title={event.showRate == null ? "No accepted guests" : `${Number(event.checkedIn).toLocaleString()} check-ins / ${Number(event.accepted).toLocaleString()} accepted`}>
+            {event.showRate == null ? "—" : eventDirectoryRateFormatter.format(event.showRate)}
+          </td>
+        );
+      case "averageRating":
+        return (
+          <td
+            key={column.key}
+            className="event-directory-rating"
+            title={event.averageRating == null
+              ? event.feedbackStatsUpdatedAt || eventFeedbackById[event.id]?.status === "ready"
+                ? "No ratings have been submitted for this event."
+                : "Select Refresh ratings to load this event's feedback."
+              : `${event.ratingCount || 0} rating${event.ratingCount === 1 ? "" : "s"}`}
+          >
+            {event.averageRating == null ? "—" : `${Number(event.averageRating).toFixed(1)} / 5`}
+          </td>
+        );
+      case "modifiedAt":
+        return <td key={column.key}><time dateTime={event.modifiedAt}>{formatDateTime(event.modifiedAt)}</time></td>;
+      default:
+        return <td key={column.key}>{Number(event[column.key]).toLocaleString()}</td>;
+    }
+  };
+
   return (
+    <>
     <section className="event-directory panel" aria-labelledby="event-directory-title">
       <header className="event-directory-header">
         <div>
           <p className="eyebrow">Events calendar</p>
           <h2 id="event-directory-title">All events</h2>
-          <p>Click a column heading to sort; click it again to reverse the order.</p>
+          <p>Click a heading to sort, or drag its handle to reorder columns for this page.</p>
         </div>
         <div className="event-directory-header-actions">
           {status === "ready" ? <span className="count-pill">{hasFilters ? `${filteredRows.length} / ${rows.length}` : rows.length}</span> : null}
@@ -4894,15 +5095,38 @@ function EventDirectory({ events, eventFeedbackById, sort, filters, status, erro
             <table className="event-directory-table">
               <thead>
                 <tr>
-                  {eventDirectoryColumns.map((column) => {
+                  {orderedColumns.map((column) => {
                     const active = sort.key === column.key;
                     const SortIcon = sort.direction === "asc" ? ArrowUp : ArrowDown;
+                    const draggable = column.key !== "title";
                     return (
-                      <th key={column.key} scope="col" aria-sort={active ? (sort.direction === "asc" ? "ascending" : "descending") : "none"}>
-                        <button type="button" onClick={() => setSortKey(column.key)}>
-                          <span>{column.label}</span>
-                          {active ? <SortIcon size={13} aria-hidden="true" /> : null}
-                        </button>
+                      <th
+                        key={column.key}
+                        scope="col"
+                        data-event-column-key={column.key}
+                        aria-sort={active ? (sort.direction === "asc" ? "ascending" : "descending") : "none"}
+                        className={`${draggedColumn === column.key ? "is-dragging" : ""} ${dropTargetColumn === column.key && draggedColumn !== column.key ? "is-drop-target" : ""}`.trim()}
+                      >
+                        <div className="event-directory-column-header">
+                          {draggable ? (
+                            <button
+                              type="button"
+                              className="event-directory-column-drag-handle"
+                              title={`Drag to reorder ${column.label}`}
+                              aria-label={`Drag to reorder ${column.label}`}
+                              onPointerDown={(event) => beginColumnDrag(event, column.key)}
+                              onPointerMove={moveDraggedColumn}
+                              onPointerUp={finishColumnDrag}
+                              onPointerCancel={cancelColumnDrag}
+                            >
+                              <GripVertical size={13} aria-hidden="true" />
+                            </button>
+                          ) : null}
+                          <button className="event-directory-column-sort" type="button" onClick={() => setSortKey(column.key)}>
+                            <span>{column.label}</span>
+                            {active ? <SortIcon size={13} aria-hidden="true" /> : null}
+                          </button>
+                        </div>
                       </th>
                     );
                   })}
@@ -4911,43 +5135,7 @@ function EventDirectory({ events, eventFeedbackById, sort, filters, status, erro
               <tbody>
                 {sortedRows.map((event) => (
                   <tr key={event.id}>
-                    <td className="event-directory-name">
-                      <button type="button" onClick={() => onOpenEvent(event.id)}>
-                        <EventArtwork event={event} />
-                        <span className="event-directory-name-copy">
-                          <strong>{event.title}</strong>
-                          <span className="event-directory-open-label">
-                            Open event <ArrowRight size={12} aria-hidden="true" />
-                          </span>
-                        </span>
-                      </button>
-                    </td>
-                    <td><time dateTime={event.date}>{formatDate(event.date)}</time></td>
-                    <td>{Number(event.newFaces).toLocaleString()}</td>
-                    <td title={event.discoveryRate == null ? "No checked-in guests" : `${Number(event.newFaces).toLocaleString()} new faces / ${Number(event.checkedIn).toLocaleString()} check-ins`}>
-                      {event.discoveryRate == null ? "—" : eventDirectoryRateFormatter.format(event.discoveryRate)}
-                    </td>
-                    <td>{Number(event.newReferrals).toLocaleString()}</td>
-                    <td>{Number(event.checkedIn).toLocaleString()}</td>
-                    <td title={event.showRate == null ? "No accepted guests" : `${Number(event.checkedIn).toLocaleString()} check-ins / ${Number(event.accepted).toLocaleString()} accepted`}>
-                      {event.showRate == null ? "—" : eventDirectoryRateFormatter.format(event.showRate)}
-                    </td>
-                    <td>{Number(event.firstRegisters).toLocaleString()}</td>
-                    <td>{Number(event.accepted).toLocaleString()}</td>
-                    <td>{Number(event.registered).toLocaleString()}</td>
-                    <td>{Number(event.invited).toLocaleString()}</td>
-                    <td>{Number(event.waitlisted).toLocaleString()}</td>
-                    <td
-                      className="event-directory-rating"
-                      title={event.averageRating == null
-                        ? event.feedbackStatsUpdatedAt || eventFeedbackById[event.id]?.status === "ready"
-                          ? "No ratings have been submitted for this event."
-                          : "Select Refresh ratings to load this event's feedback."
-                        : `${event.ratingCount || 0} rating${event.ratingCount === 1 ? "" : "s"}`}
-                    >
-                      {event.averageRating == null ? "—" : `${Number(event.averageRating).toFixed(1)} / 5`}
-                    </td>
-                    <td><time dateTime={event.modifiedAt}>{formatDateTime(event.modifiedAt)}</time></td>
+                    {orderedColumns.map((column) => renderEventCell(event, column))}
                   </tr>
                 ))}
               </tbody>
@@ -4957,6 +5145,28 @@ function EventDirectory({ events, eventFeedbackById, sort, filters, status, erro
         </>
       )}
     </section>
+    {columnDragPreview && typeof document !== "undefined" ? createPortal(
+      <div
+        ref={columnDragPreviewRef}
+        className="event-directory-column-drag-preview"
+        style={{
+          width: columnDragPreview.width,
+          height: columnDragPreview.height,
+          transform: `translate3d(${columnDragPreview.left}px, ${columnDragPreview.top}px, 0) rotate(0.5deg) scale(1.02)`,
+        }}
+        aria-hidden="true"
+      >
+        <GripVertical size={13} aria-hidden="true" />
+        <span>{columnDragPreview.label}</span>
+        {sort.key === columnDragPreview.key
+          ? sort.direction === "asc"
+            ? <ArrowUp size={13} aria-hidden="true" />
+            : <ArrowDown size={13} aria-hidden="true" />
+          : null}
+      </div>,
+      document.body,
+    ) : null}
+    </>
   );
 }
 

@@ -160,18 +160,34 @@ export function eventWideAnalyticsCounts(stats: GuestStats | null | undefined, f
 }
 
 export function buildRegistrationQuestionAnalytics(rows: RegistrationAnswerRow[]) {
-  const answerGroups = new Map<string, { id: string; label: string; responses: Array<{ id: string; value: string; personId: string; checkedIn: boolean }> }>();
+  type RegistrationResponse = {
+    id: string;
+    value: string;
+    values: string[];
+    hasExplicitValues: boolean;
+    multiSelect: boolean;
+    personId: string;
+    checkedIn: boolean;
+  };
+  const answerGroups = new Map<string, { id: string; label: string; responses: RegistrationResponse[] }>();
   rows.forEach(({ personId, registrationAnswers, checkedInAt, status }) => {
     if (!Array.isArray(registrationAnswers)) return;
     registrationAnswers.forEach((answer: any) => {
       const label = String(answer?.label || "Question").trim();
       const value = String(answer?.value ?? "").trim();
       if (!value || !isAnalyticQuestion(label)) return;
+      const explicitValues: string[] = Array.isArray(answer?.values)
+        ? [...new Set<string>((answer.values as unknown[]).map((item) => String(item ?? "").trim()).filter(Boolean))]
+        : [];
+      const multiSelect = isMultiSelectQuestionType(answer?.questionType) || explicitValues.length > 1;
       const id = label.toLocaleLowerCase();
       if (!answerGroups.has(id)) answerGroups.set(id, { id, label, responses: [] });
       answerGroups.get(id)?.responses.push({
         id: `${personId}:${answer?.id || label}`,
         value,
+        values: explicitValues.length ? explicitValues : [value],
+        hasExplicitValues: explicitValues.length > 0,
+        multiSelect,
         personId,
         checkedIn: Boolean(checkedInAt) || status === "checked_in",
       });
@@ -181,13 +197,22 @@ export function buildRegistrationQuestionAnalytics(rows: RegistrationAnswerRow[]
   return [...answerGroups.values()]
     .map((question) => {
       const groups = new Map<string, { answerKey: string; count: number; checkedInCount: number; variants: Map<string, number> }>();
-      question.responses.forEach((response) => {
-        const answerKey = normalizeRegistrationAnswer(response.value);
-        const group = groups.get(answerKey) || { answerKey, count: 0, checkedInCount: 0, variants: new Map<string, number>() };
-        group.count += 1;
-        if (response.checkedIn) group.checkedInCount += 1;
-        group.variants.set(response.value, (group.variants.get(response.value) || 0) + 1);
-        groups.set(answerKey, group);
+      const multiSelect = question.responses.some((response) => response.multiSelect);
+      const legacySelections = inferLegacyMultiSelectSelections(question.responses);
+      question.responses.forEach((response, responseIndex) => {
+        const selections = response.hasExplicitValues
+          ? response.values
+          : multiSelect
+            ? legacySelections[responseIndex]
+            : [response.value];
+        const uniqueSelections = new Map(selections.map((selection) => [normalizeRegistrationAnswer(selection), selection]));
+        uniqueSelections.forEach((selection, answerKey) => {
+          const group = groups.get(answerKey) || { answerKey, count: 0, checkedInCount: 0, variants: new Map<string, number>() };
+          group.count += 1;
+          if (response.checkedIn) group.checkedInCount += 1;
+          group.variants.set(selection, (group.variants.get(selection) || 0) + 1);
+          groups.set(answerKey, group);
+        });
       });
       const maxCount = Math.max(...[...groups.values()].map((group) => group.count));
       const options = [...groups.values()].map((group) => {
@@ -204,7 +229,7 @@ export function buildRegistrationQuestionAnalytics(rows: RegistrationAnswerRow[]
         };
       });
       sortRegistrationQuestionOptions(options);
-      const categorical = (options.length <= 8 || isFounderStageQuestion(options))
+      const categorical = (multiSelect || options.length <= 8 || isFounderStageQuestion(options))
         && options.every((option) => option.label.length <= 64);
       const aggregate = !categorical && maxCount > 3;
       return {
@@ -216,6 +241,68 @@ export function buildRegistrationQuestionAnalytics(rows: RegistrationAnswerRow[]
       };
     })
     .sort((left, right) => right.responseCount - left.responseCount || left.label.localeCompare(right.label));
+}
+
+function isMultiSelectQuestionType(value: unknown): boolean {
+  const normalized = String(value ?? "").toLocaleLowerCase().replace(/[_\s]+/g, "-");
+  return ["multi-select", "multiselect", "checkbox", "checkboxes"].includes(normalized);
+}
+
+function inferLegacyMultiSelectSelections<T extends { value: string; values: string[]; hasExplicitValues: boolean }>(responses: T[]): string[][] {
+  const explicitChoices = responses.flatMap((response) => response.hasExplicitValues ? response.values : []);
+  const legacyValues = [...new Map(
+    responses
+      .filter((response) => !response.hasExplicitValues)
+      .map((response) => [normalizedSelectionText(response.value), response.value]),
+  ).entries()].filter(([key]) => key);
+  const containedChoices = legacyValues
+    .filter(([candidate]) => legacyValues.some(([other]) => other !== candidate && containsTokenSequence(other, candidate)))
+    .map(([, display]) => display);
+  const candidates = [...new Map([...explicitChoices, ...containedChoices]
+    .map((choice) => [normalizedSelectionText(choice), choice]))]
+    .filter(([key]) => key)
+    .sort(([left], [right]) => left.split(" ").length - right.split(" ").length || left.length - right.length)
+    .reduce<Array<{ key: string; label: string; tokens: string[] }>>((atomic, [key, label]) => {
+      const tokens = key.split(" ");
+      const segmented = segmentSelectionTokens(tokens, atomic);
+      if (!segmented || segmented.length < 2) atomic.push({ key, label, tokens });
+      return atomic;
+    }, []);
+
+  return responses.map((response) => {
+    if (response.hasExplicitValues) return response.values;
+    const segmented = segmentSelectionTokens(normalizedSelectionText(response.value).split(" "), candidates);
+    return segmented?.map((choice) => choice.label) || [response.value];
+  });
+}
+
+function normalizedSelectionText(value: string): string {
+  return String(value).normalize("NFKC").toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+}
+
+function containsTokenSequence(value: string, candidate: string): boolean {
+  return (` ${value} `).includes(` ${candidate} `);
+}
+
+function segmentSelectionTokens<T extends { tokens: string[] }>(tokens: string[], choices: T[]): T[] | null {
+  if (!tokens.length || !choices.length) return null;
+  const memo = new Map<number, T[] | null>();
+  const visit = (offset: number): T[] | null => {
+    if (offset === tokens.length) return [];
+    if (memo.has(offset)) return memo.get(offset) || null;
+    for (const choice of choices) {
+      if (!choice.tokens.every((token, index) => tokens[offset + index] === token)) continue;
+      const remainder = visit(offset + choice.tokens.length);
+      if (remainder) {
+        const result = [choice, ...remainder];
+        memo.set(offset, result);
+        return result;
+      }
+    }
+    memo.set(offset, null);
+    return null;
+  };
+  return visit(0);
 }
 
 export function normalizeRegistrationAnswer(value: string): string {

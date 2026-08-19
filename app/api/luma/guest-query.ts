@@ -57,6 +57,8 @@ export type GuestListQuery = {
   tags: string[];
   tagMode?: "any" | "all";
   excludedTags?: string[];
+  latestTagId?: string;
+  latestTagLabel?: string;
   sortBy?: "status_date" | "events_attended" | "events_registered";
   sortDirection?: "asc" | "desc";
   hasNotes?: boolean;
@@ -87,6 +89,8 @@ export function parseGuestListQuery(params: URLSearchParams): GuestListQuery {
   const answer = (params.get("guest_answer") || "").trim().slice(0, 500);
   const answerKey = (params.get("guest_answer_key") || "").trim().slice(0, 500);
   const answerGroups = parseGuestAnswerGroups(params.getAll("guest_answer_group"));
+  const latestTagId = (params.get("guest_latest_tag_id") || "").trim().slice(0, 200);
+  const latestTagLabel = (params.get("guest_latest_tag_label") || "").trim().slice(0, 80);
   return {
     filter,
     filters,
@@ -96,6 +100,7 @@ export function parseGuestListQuery(params: URLSearchParams): GuestListQuery {
     tags: parseTagFilters(params.getAll("guest_tag")),
     tagMode: params.get("guest_tag_mode") === "all" ? "all" : "any",
     excludedTags: parseTagFilters(params.getAll("guest_tag_not")),
+    ...(latestTagId ? { latestTagId, latestTagLabel } : {}),
     sortBy: ["events_attended", "events_registered"].includes(params.get("guest_sort_by") || "")
       ? params.get("guest_sort_by") as "events_attended" | "events_registered"
       : "status_date",
@@ -123,7 +128,8 @@ export function guestQueryRequiresIndex(query: GuestListQuery): boolean {
     || Boolean(query.hasNotes)
     || query.attendedGreaterThan != null
     || Boolean(query.answerQuestion)
-    || Boolean(query.answerGroups?.length);
+    || Boolean(query.answerGroups?.length)
+    || Boolean(query.latestTagId);
 }
 
 export function parseGuestAnswerGroups(values: string[]): GuestAnswerGroup[] {
@@ -206,6 +212,7 @@ export function guestStatusWhere(
   boundary?: EventChronologyBoundary | null,
 ): Record<string, any> | null {
   if (filter === "all") return null;
+  if (filter === "checked_in") return { OR: [{ checkedInAt: { not: null } }, { status: "checked_in" }] };
   if (filter === "to_decide") {
     return {
       OR: [
@@ -423,6 +430,7 @@ function guestTagsWhere(
 
 function guestMatchesFilter(guest: any, filter: GuestFilter): boolean {
   if (filter === "all") return true;
+  if (filter === "checked_in") return Boolean(guest.checkedInAt) || guest.status === "checked_in";
   if (filter === "to_decide") {
     return guest.status === "registered"
       || (guest.status === "waitlisted" && guest.operatorDecision !== "waitlisted");

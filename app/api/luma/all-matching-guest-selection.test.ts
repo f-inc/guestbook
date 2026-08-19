@@ -9,6 +9,8 @@ test("normalizes an explicit all-matching guest query", () => {
     guestTags: ["Referred", "New"],
     guestTagMode: "all",
     guestExcludedTags: ["Flaker"],
+    guestLatestTagId: "auto-reliable",
+    guestLatestTagLabel: "🙏 Reliable",
     guestHasNotes: true,
     guestAttendedGreaterThan: 2,
   });
@@ -21,6 +23,8 @@ test("normalizes an explicit all-matching guest query", () => {
   assert.equal(query.attendedGreaterThan, 2);
   assert.equal(query.tagMode, "all");
   assert.deepEqual(query.excludedTags, ["Flaker"]);
+  assert.equal(query.latestTagId, "auto-reliable");
+  assert.equal(query.latestTagLabel, "🙏 Reliable");
 });
 
 test("normalizes multi-status rules for all-matching updates", () => {

@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   changedLiveEventCountKeys,
   liveEventCountsFromLumaEvent,
+  mergeLiveEventCounts,
 } from "../../event-count-reconciliation";
 
 test("maps Luma guest counts to wrapper metrics", () => {
@@ -70,4 +71,31 @@ test("does not force a refresh before wrapper summary stats are ready", () => {
     checkedIn: 1,
     registered: 6,
   }), []);
+});
+
+test("updates live header counts without discarding derived event metrics", () => {
+  assert.deepEqual(mergeLiveEventCounts({
+    accepted: 10,
+    checkedIn: 4,
+    firstRegisters: 7,
+  } as any, {
+    eventId: "evt-1",
+    accepted: 12,
+    waitlisted: 2,
+    pending: 3,
+    invited: 4,
+    declined: 5,
+    checkedIn: 6,
+    registered: 17,
+  }), {
+    accepted: 12,
+    confirmed: 12,
+    waitlisted: 2,
+    pending: 3,
+    invitedNoResponse: 4,
+    declined: 5,
+    checkedIn: 6,
+    registered: 17,
+    firstRegisters: 7,
+  });
 });

@@ -183,6 +183,40 @@ test("groups free-text answers that differ only by case, spacing, or punctuation
   assert.deepEqual(questions[0].options.map(({ percent }) => percent), [100, 25]);
 });
 
+test("counts each explicit multi-select choice independently", () => {
+  const questionType = "multi-select";
+  const questions = buildRegistrationQuestionAnalytics([
+    { personId: "person-1", status: "checked_in", registrationAnswers: [{ label: "Goals", questionType, value: "Meet builders Meet investors", values: ["Meet builders", "Meet investors"] }] },
+    { personId: "person-2", registrationAnswers: [{ label: "Goals", questionType, value: "Meet builders", values: ["Meet builders"] }] },
+    { personId: "person-3", registrationAnswers: [{ label: "Goals", questionType, value: "Meet investors", values: ["Meet investors"] }] },
+  ]);
+
+  assert.equal(questions[0].kind, "categorical");
+  assert.equal(questions[0].responseCount, 3);
+  assert.deepEqual(questions[0].options.map(({ label, count, checkedInCount }) => ({ label, count, checkedInCount })), [
+    { label: "Meet builders", count: 2, checkedInCount: 1 },
+    { label: "Meet investors", count: 2, checkedInCount: 1 },
+  ]);
+});
+
+test("recovers atomic choices from legacy flattened multi-select answers", () => {
+  const answer = (value: string) => ({ label: "Goals", questionType: "multi-select", value });
+  const questions = buildRegistrationQuestionAnalytics([
+    { personId: "person-1", registrationAnswers: [answer("Meet founders to invest in")] },
+    { personId: "person-2", registrationAnswers: [answer("Meet investors")] },
+    { personId: "person-3", registrationAnswers: [answer("Meet other builders")] },
+    { personId: "person-4", registrationAnswers: [answer("Meet founders to invest in Meet investors")] },
+    { personId: "person-5", registrationAnswers: [answer("Meet founders to invest in Meet investors Meet other builders")] },
+  ]);
+
+  assert.equal(questions[0].kind, "categorical");
+  assert.deepEqual(questions[0].options.map(({ label, count }) => ({ label, count })), [
+    { label: "Meet founders to invest in", count: 3 },
+    { label: "Meet investors", count: 3 },
+    { label: "Meet other builders", count: 2 },
+  ]);
+});
+
 test("orders founder-stage answers by progression instead of popularity", () => {
   const values = [
     "Launched",

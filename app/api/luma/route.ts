@@ -190,12 +190,22 @@ export async function GET(request: Request) {
     if (tracePersonId || traceEmail) {
       if (!forceRefresh && hasLumaDb()) {
         try {
+          const traceCacheKey = indexedTraceCacheKey(tracePersonId, traceEmail);
+          const cachedTrace = readCache(traceCacheKey);
+          if (cachedTrace) {
+            await debugLog(requestId, "trace person cache hit", {
+              recordCount: cachedTrace.records?.length || 0,
+              cacheExpiresAt: cachedTrace.cacheExpiresAt,
+            });
+            return Response.json({ ...cachedTrace, requestId });
+          }
           const indexStartedAt = Date.now();
           const indexedTrace = await getIndexedTrace({
             tracePersonId,
             traceEmail,
             limit: safeInt("LUMA_INDEX_TRACE_MAX_RECORDS", 500, 1, 5000),
           });
+          writeCache(traceCacheKey, indexedTrace, cacheTtlMs("LUMA_TRACE_CACHE_SECONDS", 900));
           await debugLog(requestId, "trace person index hit", {
             recordCount: indexedTrace.records.length,
             durationMs: Date.now() - indexStartedAt,
@@ -270,6 +280,9 @@ export async function GET(request: Request) {
       const guestQuery = parseGuestListQuery(url.searchParams);
       const prioritizePage = url.searchParams.get("guest_mode") === "page";
       const requiresIndexedPage = guestQueryRequiresIndex(guestQuery);
+      if (guestQuery.latestTagId && !hasLumaDb()) {
+        return Response.json({ error: "Latest-tag attendee filters require the Luma index.", requestId }, { status: 503 });
+      }
 
       const pageSize = forceRefresh
         ? safeInt("LUMA_EVENT_SYNC_GUESTS_PAGE_SIZE", 100, 1, 100)
@@ -343,6 +356,9 @@ export async function GET(request: Request) {
           await debugLog(requestId, "event guests index empty", { eventId });
         } catch (error) {
           await debugLog(requestId, "event guests index skipped", { eventId, status: error.status || 500, message: error.message }, "error");
+          if (guestQuery.latestTagId) {
+            return Response.json({ error: "Unable to load the latest-tag attendee group.", requestId }, { status: error.status || 500 });
+          }
         }
       }
 
@@ -1541,6 +1557,12 @@ async function refreshManagedData({ requestId, rawEvents }: AnyRecord) {
   return { refreshedEventCount, failedEventCount, guestCount, personCount, truncatedGuestEventCount, deletedStaleGuestCount, limits };
 }
 
+function indexedTraceCacheKey(tracePersonId, traceEmail) {
+  const targetId = normalizeTraceValue(tracePersonId);
+  const targetEmail = normalizeEmail(traceEmail);
+  return "trace-person:" + (targetId || "no-id") + ":" + (targetEmail || "no-email");
+}
+
 async function tracePersonActivity({ requestId, tracePersonId, traceEmail, forceRefresh, traceScope, startedAt }: AnyRecord) {
   const target = {
     id: normalizeTraceValue(tracePersonId),
@@ -1553,7 +1575,7 @@ async function tracePersonActivity({ requestId, tracePersonId, traceEmail, force
     throw error;
   }
 
-  const cacheKey = "trace-person:" + (target.id || "no-id") + ":" + (target.email || "no-email");
+  const cacheKey = indexedTraceCacheKey(target.id, target.email);
   const cached = forceRefresh ? null : readCache(cacheKey);
   if (cached) {
     await debugLog(requestId, "trace person cache hit", {
@@ -1931,11 +1953,14 @@ function normalizeRegistrationAnswers(answers = []) {
   return answers
     .map((answer, index) => {
       const label = firstString(answer.label, answer.question_label, answer.question_text, answer.question?.label, answer.question?.title, answer.question?.text, answer.question);
-      const value = stringifyAnswerValue(answer.value ?? answer.answer ?? answer.response);
+      const rawValue = answer.value ?? answer.answer ?? answer.response;
+      const values = answerValueSelections(rawValue);
+      const value = values.join(" ");
       return {
         id: firstString(answer.id, answer.question_id, answer.question?.id) || "answer-" + index,
         label: label || "Question",
         value,
+        values,
         questionType: firstString(answer.question_type, answer.type, answer.question?.type),
       };
     })
@@ -2222,6 +2247,14 @@ function stringifyAnswerValue(value) {
   if (Array.isArray(value)) return value.map(stringifyAnswerValue).filter(Boolean).join(" ");
   if (typeof value === "object") return Object.values(value).map(stringifyAnswerValue).filter(Boolean).join(" ");
   return String(value);
+}
+
+function answerValueSelections(value) {
+  if (value == null) return [];
+  if (Array.isArray(value)) return [...new Set(value.flatMap(answerValueSelections).filter(Boolean))];
+  if (typeof value === "object") return [...new Set(Object.values(value).flatMap(answerValueSelections).filter(Boolean))];
+  const selection = stringifyAnswerValue(value);
+  return selection ? [selection] : [];
 }
 
 function formatLocation(event) {

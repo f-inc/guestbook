@@ -120,6 +120,15 @@ test("persists ALL tag matching and excluded tags", () => {
   assert.match(search, /guest_tag_not=Flaker/);
 });
 
+test("round-trips the latest-profile-tag analytics drill-down", () => {
+  const state = parseWorkspaceUrl("?tab=overview&guest_status=checked_in&guest_latest_tag_id=auto-reliable&guest_latest_tag_label=%F0%9F%99%8F+Reliable");
+  assert.equal(state.guestLatestTagId, "auto-reliable");
+  assert.equal(state.guestLatestTagLabel, "🙏 Reliable");
+  const reparsed = parseWorkspaceUrl(buildWorkspaceUrlSearch("", state));
+  assert.equal(reparsed.guestLatestTagId, "auto-reliable");
+  assert.equal(reparsed.guestLatestTagLabel, "🙏 Reliable");
+});
+
 test("parses ordered multi-event selections and keeps the last event primary", () => {
   const state = parseWorkspaceUrl("?event=evt-1&event=evt-2&event=evt-3");
   assert.deepEqual(state.eventIds, ["evt-1", "evt-2", "evt-3"]);

@@ -213,6 +213,9 @@ model LumaEventGuest {
   @@index([personId])
   @@index([lumaUserIdLower])
   @@index([emailLower])
+  @@index([personId, checkedInAt(sort: Desc), registeredAt(sort: Desc), createdAt(sort: Desc), lastSeenAt(sort: Desc)], map: "luma_event_guests_person_activity_idx")
+  @@index([lumaUserIdLower, checkedInAt(sort: Desc), registeredAt(sort: Desc), createdAt(sort: Desc), lastSeenAt(sort: Desc)], map: "luma_event_guests_luma_user_activity_idx")
+  @@index([emailLower, checkedInAt(sort: Desc), registeredAt(sort: Desc), createdAt(sort: Desc), lastSeenAt(sort: Desc)], map: "luma_event_guests_email_activity_idx")
   @@index([checkedInAt(sort: Desc), registeredAt(sort: Desc), createdAt(sort: Desc), lastSeenAt(sort: Desc)])
   @@map("luma_event_guests")
 }

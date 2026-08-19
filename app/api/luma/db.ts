@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 type AnyRecord = Record<string, any>;
 type HttpError = Error & { status?: number };
 import { orderAvatarCandidates } from "../../avatar-order";
+import { isAnyRegistrationAnswer } from "../../audience-answer-rules";
 import { databaseUrlWithPoolLimits } from "./database-url";
 import { lumaEventDate } from "./event-date";
 import {
@@ -46,10 +47,16 @@ export type IndexedAudienceCriteria = {
   excludeSuperTagIds?: string[];
   includeEventCohorts?: Array<{ eventId: string; cohort: "attended" | "registered" | "invited" }>;
   excludeEventCohorts?: Array<{ eventId: string; cohort: "attended" | "registered" | "invited" }>;
+  includeEventAnswers?: Array<{ eventId: string; cohort: "attended" | "registered" | "invited"; question: string; answer: string; answerKey: string }>;
+  excludeEventAnswers?: Array<{ eventId: string; question: string; answer: string; answerKey: string }>;
   excludeExistingEventIds?: string[];
   includePersonIds?: string[];
   excludePersonIds?: string[];
 };
+
+export function audienceAnswerQuestionMode(operation: "include" | "exclude"): "all" | "any" {
+  return operation === "exclude" ? "any" : "all";
+}
 let audienceTagGroupCache: { expiresAt: number; groups: AudienceTagGroup[] } | null = null;
 let audienceTagGroupPromise: Promise<AudienceTagGroup[]> | null = null;
 let audienceSuperTagGroupCache: { expiresAt: number; groups: AudienceSuperTagGroup[] } | null = null;
@@ -101,6 +108,25 @@ const INDEXED_AUDIENCE_PERSON_SELECT = {
   email: true,
   name: true,
   avatarUrl: true,
+  socialLinks: true,
+  tags: true,
+  manualTags: true,
+  automaticTags: true,
+};
+
+const INDEXED_TRACE_PERSON_SELECT = {
+  personId: true,
+  lumaUserId: true,
+  email: true,
+  phoneNumber: true,
+  name: true,
+  title: true,
+  bio: true,
+  avatarUrl: true,
+  profileUrl: true,
+  socialLinks: true,
+  referrer: true,
+  groups: true,
   tags: true,
   manualTags: true,
   automaticTags: true,
@@ -979,6 +1005,26 @@ function normalizedAudienceCohorts(values: unknown) {
   }).slice(0, 500);
 }
 
+function normalizedAudienceEventAnswers(values: unknown, { requireCohort = false } = {}) {
+  if (!Array.isArray(values)) return [];
+  const normalized = values.flatMap((value) => {
+    const eventId = String(value?.eventId || "").trim().slice(0, 200);
+    const question = String(value?.question || "").trim().slice(0, 500);
+    const answer = String(value?.answer || "").trim().slice(0, 500);
+    const answerKey = String(value?.answerKey || "").trim().slice(0, 500);
+    const cohort = value?.cohort;
+    const validCohort = ["attended", "registered", "invited"].includes(cohort);
+    return eventId && question && answer && answerKey && (!requireCohort || validCohort)
+      ? [{ eventId, ...(validCohort ? { cohort: cohort as "attended" | "registered" | "invited" } : {}), question, answer, answerKey }]
+      : [];
+  });
+  const unique = new Map(normalized.map((value) => [
+    `${value.eventId}\u0000${value.question.toLocaleLowerCase()}\u0000${value.answerKey}`,
+    value,
+  ]));
+  return [...unique.values()].slice(0, 500);
+}
+
 export function normalizeIndexedAudienceCriteria(criteria: IndexedAudienceCriteria | null | undefined): IndexedAudienceCriteria {
   return {
     includeTagIds: normalizedAudienceValues(criteria?.includeTagIds),
@@ -987,6 +1033,8 @@ export function normalizeIndexedAudienceCriteria(criteria: IndexedAudienceCriter
     excludeSuperTagIds: normalizedAudienceValues(criteria?.excludeSuperTagIds),
     includeEventCohorts: normalizedAudienceCohorts(criteria?.includeEventCohorts),
     excludeEventCohorts: normalizedAudienceCohorts(criteria?.excludeEventCohorts),
+    includeEventAnswers: normalizedAudienceEventAnswers(criteria?.includeEventAnswers, { requireCohort: true }) as IndexedAudienceCriteria["includeEventAnswers"],
+    excludeEventAnswers: normalizedAudienceEventAnswers(criteria?.excludeEventAnswers),
     excludeExistingEventIds: normalizedAudienceValues(criteria?.excludeExistingEventIds),
     includePersonIds: normalizedAudienceValues(criteria?.includePersonIds, AUDIENCE_RESOLUTION_LIMIT),
     excludePersonIds: normalizedAudienceValues(criteria?.excludePersonIds, AUDIENCE_RESOLUTION_LIMIT),
@@ -1067,6 +1115,36 @@ export async function resolveIndexedAudiencePersonIds(
     ...(criteria.excludeEventCohorts || []).map(({ eventId, cohort }) =>
       collect(exclude, listIndexedPeopleByEventCohort(eventId, cohort, { idsOnly: true, limit: AUDIENCE_RESOLUTION_LIMIT }))),
   ]);
+  const includeEventAnswers = criteria.includeEventAnswers || [];
+  if (includeEventAnswers.length) {
+    const matches = await prisma().$queryRaw<Array<{ personId: string }>>(Prisma.sql`
+      SELECT DISTINCT guest.person_id AS "personId"
+      FROM luma_event_guests AS guest
+      WHERE ${audienceEventAnswersWhereSql(includeEventAnswers, { questionMode: audienceAnswerQuestionMode("include") })}
+      LIMIT ${AUDIENCE_RESOLUTION_LIMIT + 1}
+    `);
+    if (matches.length > AUDIENCE_RESOLUTION_LIMIT) {
+      const error = new Error(`Audience exceeds the ${AUDIENCE_RESOLUTION_LIMIT.toLocaleString()}-person safety limit.`) as HttpError;
+      error.status = 400;
+      throw error;
+    }
+    matches.forEach(({ personId }) => include.add(personId));
+  }
+  const excludeEventAnswers = criteria.excludeEventAnswers || [];
+  if (excludeEventAnswers.length) {
+    const matches = await prisma().$queryRaw<Array<{ personId: string }>>(Prisma.sql`
+      SELECT DISTINCT guest.person_id AS "personId"
+      FROM luma_event_guests AS guest
+      WHERE ${audienceEventAnswersWhereSql(excludeEventAnswers, { questionMode: audienceAnswerQuestionMode("exclude") })}
+      LIMIT ${AUDIENCE_RESOLUTION_LIMIT + 1}
+    `);
+    if (matches.length > AUDIENCE_RESOLUTION_LIMIT) {
+      const error = new Error(`Audience exceeds the ${AUDIENCE_RESOLUTION_LIMIT.toLocaleString()}-person safety limit.`) as HttpError;
+      error.status = 400;
+      throw error;
+    }
+    matches.forEach(({ personId }) => exclude.add(personId));
+  }
   if ((criteria.excludeExistingEventIds || []).length) {
     const existingGuests = await prisma().lumaEventGuest.findMany({
       where: { eventId: { in: criteria.excludeExistingEventIds } },
@@ -1107,6 +1185,37 @@ function audienceValuesWhereSql(column: Prisma.Sql, values: string[]) {
   return values.length ? Prisma.sql`${column} IN (${Prisma.join(values)})` : Prisma.sql`FALSE`;
 }
 
+function indexedRegistrationAnswerChoicePredicateSql(item: Prisma.Sql, answer: string, answerKey: string): Prisma.Sql {
+  if (isAnyRegistrationAnswer(answerKey)) {
+    return Prisma.sql`BTRIM(COALESCE(${item} ->> 'value', '')) <> ''`;
+  }
+  const normalizedMatch = answerKey
+    ? Prisma.sql`REGEXP_REPLACE(LOWER(BTRIM(COALESCE(${item} ->> 'value', ''))), '[^[:alnum:]]+', '', 'g') = ${answerKey}`
+    : Prisma.sql`LOWER(BTRIM(COALESCE(${item} ->> 'value', ''))) = LOWER(${answer})`;
+  const selectedValueMatch = answerKey
+    ? Prisma.sql`REGEXP_REPLACE(LOWER(BTRIM(selected_value.value)), '[^[:alnum:]]+', '', 'g') = ${answerKey}`
+    : Prisma.sql`LOWER(BTRIM(selected_value.value)) = LOWER(${answer})`;
+  return Prisma.sql`(
+    ${normalizedMatch}
+    OR EXISTS (
+      SELECT 1
+      FROM JSONB_ARRAY_ELEMENTS_TEXT(
+        CASE WHEN JSONB_TYPEOF(${item} -> 'values') = 'array'
+          THEN ${item} -> 'values' ELSE '[]'::jsonb END
+      ) AS selected_value(value)
+      WHERE ${selectedValueMatch}
+    )
+    OR (
+      REGEXP_REPLACE(LOWER(COALESCE(${item} ->> 'questionType', ${item} ->> 'question_type', '')), '[^[:alnum:]]+', '', 'g')
+        IN ('multiselect', 'checkbox', 'checkboxes')
+      AND POSITION(
+        ' ' || REGEXP_REPLACE(LOWER(BTRIM(${answer})), '[^[:alnum:]]+', ' ', 'g') || ' '
+        IN ' ' || REGEXP_REPLACE(LOWER(BTRIM(COALESCE(${item} ->> 'value', ''))), '[^[:alnum:]]+', ' ', 'g') || ' '
+      ) > 0
+    )
+  )`;
+}
+
 function audienceEventCohortsWhereSql(selections: Array<{ eventId: string; cohort: "attended" | "registered" | "invited" }>) {
   if (!selections.length) return Prisma.sql`FALSE`;
   return Prisma.sql`(${Prisma.join(selections.map(({ eventId, cohort }) => Prisma.sql`
@@ -1115,6 +1224,49 @@ function audienceEventCohortsWhereSql(selections: Array<{ eventId: string; cohor
       : cohort === "invited"
         ? Prisma.sql`(guest.invited_at IS NOT NULL OR guest.status = 'invited')`
         : indexedRegisteredGuestPredicateSql()})
+  `), " OR ")})`;
+}
+
+function audienceEventAnswersWhereSql(
+  selections: Array<{ eventId: string; cohort?: "attended" | "registered" | "invited"; question: string; answer: string; answerKey: string }>,
+  { questionMode = "all" }: { questionMode?: "all" | "any" } = {},
+) {
+  if (!selections.length) return Prisma.sql`FALSE`;
+  const eventGroups = new Map<string, {
+    eventId: string;
+    cohort?: "attended" | "registered" | "invited";
+    questions: Map<string, { question: string; answers: Array<{ answer: string; answerKey: string }> }>;
+  }>();
+  selections.forEach(({ eventId, cohort, question, answer, answerKey }) => {
+    const eventKey = `${eventId}\u0000${cohort || ""}`;
+    const eventGroup = eventGroups.get(eventKey) || { eventId, cohort, questions: new Map() };
+    const questionKey = question.toLocaleLowerCase();
+    const questionGroup = eventGroup.questions.get(questionKey) || { question, answers: [] };
+    questionGroup.answers.push({ answer, answerKey });
+    eventGroup.questions.set(questionKey, questionGroup);
+    eventGroups.set(eventKey, eventGroup);
+  });
+  return Prisma.sql`(${Prisma.join([...eventGroups.values()].map(({ eventId, cohort, questions }) => Prisma.sql`
+    (guest.event_id = ${eventId}
+      AND ${cohort === "attended"
+        ? Prisma.sql`(guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')`
+        : cohort === "invited"
+          ? Prisma.sql`(guest.invited_at IS NOT NULL OR guest.status = 'invited')`
+          : cohort === "registered" ? indexedRegisteredGuestPredicateSql() : Prisma.sql`TRUE`}
+      AND (${Prisma.join([...questions.values()].map(({ question, answers }) => Prisma.sql`
+        EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(
+            CASE WHEN jsonb_typeof(guest.registration_answers) = 'array'
+              THEN guest.registration_answers ELSE '[]'::jsonb END
+          ) AS registration_answer
+          WHERE LOWER(BTRIM(COALESCE(registration_answer->>'label', ''))) = LOWER(${question})
+            AND (${Prisma.join(answers.map(({ answer, answerKey }) => Prisma.sql`
+              ${indexedRegistrationAnswerChoicePredicateSql(Prisma.sql`registration_answer`, answer, answerKey)}
+            `), " OR ")})
+        )
+      `), questionMode === "any" ? " OR " : " AND ")})
+    )
   `), " OR ")})`;
 }
 
@@ -1136,6 +1288,8 @@ export async function listIndexedAudiencePage(
   const allTagIds = [...new Set([...includeTagIds, ...excludeTagIds])];
   const includeEventCohorts = criteria.includeEventCohorts || [];
   const excludeEventCohorts = criteria.excludeEventCohorts || [];
+  const includeEventAnswers = criteria.includeEventAnswers || [];
+  const excludeEventAnswers = criteria.excludeEventAnswers || [];
   const includePersonIds = criteria.includePersonIds || [];
   const excludePersonIds = criteria.excludePersonIds || [];
   const excludeExistingEventIds = criteria.excludeExistingEventIds || [];
@@ -1189,6 +1343,12 @@ export async function listIndexedAudiencePage(
 
       UNION
 
+      SELECT guest.person_id
+      FROM luma_event_guests AS guest
+      WHERE ${audienceEventAnswersWhereSql(includeEventAnswers, { questionMode: audienceAnswerQuestionMode("include") })}
+
+      UNION
+
       SELECT person.person_id
       FROM luma_people AS person
       WHERE ${audienceValuesWhereSql(Prisma.sql`person.person_id`, includePersonIds)}
@@ -1215,6 +1375,12 @@ export async function listIndexedAudiencePage(
       SELECT guest.person_id
       FROM luma_event_guests AS guest
       WHERE ${audienceEventCohortsWhereSql(excludeEventCohorts)}
+
+      UNION
+
+      SELECT guest.person_id
+      FROM luma_event_guests AS guest
+      WHERE ${audienceEventAnswersWhereSql(excludeEventAnswers, { questionMode: audienceAnswerQuestionMode("exclude") })}
 
       UNION
 
@@ -1339,6 +1505,8 @@ export async function countIndexedAudience(criteria: IndexedAudienceCriteria) {
   const allTagIds = [...new Set([...includeTagIds, ...excludeTagIds])];
   const includeEventCohorts = normalized.includeEventCohorts || [];
   const excludeEventCohorts = normalized.excludeEventCohorts || [];
+  const includeEventAnswers = normalized.includeEventAnswers || [];
+  const excludeEventAnswers = normalized.excludeEventAnswers || [];
   const includePersonIds = normalized.includePersonIds || [];
   const excludePersonIds = normalized.excludePersonIds || [];
   const excludeExistingEventIds = normalized.excludeExistingEventIds || [];
@@ -1377,6 +1545,12 @@ export async function countIndexedAudience(criteria: IndexedAudienceCriteria) {
 
       UNION
 
+      SELECT guest.person_id
+      FROM luma_event_guests AS guest
+      WHERE ${audienceEventAnswersWhereSql(includeEventAnswers, { questionMode: audienceAnswerQuestionMode("include") })}
+
+      UNION
+
       SELECT person.person_id
       FROM luma_people AS person
       WHERE ${audienceValuesWhereSql(Prisma.sql`person.person_id`, includePersonIds)}
@@ -1403,6 +1577,12 @@ export async function countIndexedAudience(criteria: IndexedAudienceCriteria) {
       SELECT guest.person_id
       FROM luma_event_guests AS guest
       WHERE ${audienceEventCohortsWhereSql(excludeEventCohorts)}
+
+      UNION
+
+      SELECT guest.person_id
+      FROM luma_event_guests AS guest
+      WHERE ${audienceEventAnswersWhereSql(excludeEventAnswers, { questionMode: audienceAnswerQuestionMode("exclude") })}
 
       UNION
 
@@ -2000,6 +2180,7 @@ function indexedMultiEventGuestPageWhereSql(query: GuestListQuery) {
         AND (${Prisma.join(excludedTagPredicates, " OR ")})
     )`);
   }
+  if (query.latestTagId) predicates.push(indexedLatestProfileTagPredicateSql(query.latestTagId));
 
   if (query.hasNotes) {
     predicates.push(Prisma.sql`EXISTS (
@@ -2090,6 +2271,7 @@ function indexedGuestPageWhereSql(
       )
     `);
   }
+  if (query.latestTagId) predicates.push(indexedLatestProfileTagPredicateSql(query.latestTagId));
 
   if (query.hasNotes) {
     predicates.push(Prisma.sql`EXISTS (
@@ -2115,6 +2297,43 @@ function indexedGuestPageWhereSql(
   return Prisma.sql`WHERE ${Prisma.join(predicates, " AND ")}`;
 }
 
+function indexedLatestProfileTagPredicateSql(latestTagId: string) {
+  return Prisma.sql`
+    COALESCE((
+      SELECT
+        CASE
+          WHEN definition.id IS NOT NULL THEN definition.id
+          ELSE 'legacy:' || LOWER(profile_tag.name)
+        END
+      FROM luma_people AS latest_tag_person
+      CROSS JOIN LATERAL JSONB_ARRAY_ELEMENTS_TEXT(
+        CASE
+          WHEN JSONB_TYPEOF(latest_tag_person.tags) = 'array' THEN latest_tag_person.tags
+          ELSE '[]'::jsonb
+        END
+      ) WITH ORDINALITY AS profile_tag(name, ordinality)
+      LEFT JOIN guest_tags AS definition ON LOWER(definition.name) = LOWER(profile_tag.name)
+      LEFT JOIN LATERAL (
+        SELECT mutation.assigned_at, mutation.removed
+        FROM manual_tag_mutations AS mutation
+        WHERE mutation.person_id = latest_tag_person.person_id
+          AND mutation.tag_id = definition.id
+        ORDER BY mutation.assigned_at DESC NULLS LAST, mutation.id DESC
+        LIMIT 1
+      ) AS manual ON NOT manual.removed
+      LEFT JOIN automatic_tag_assignments AS automatic
+        ON automatic.person_id = latest_tag_person.person_id
+        AND automatic.tag_id = definition.id
+      WHERE latest_tag_person.person_id = guest.person_id
+      ORDER BY
+        GREATEST(manual.assigned_at, automatic.assigned_at) DESC NULLS LAST,
+        profile_tag.ordinality DESC,
+        LOWER(profile_tag.name)
+      LIMIT 1
+    ), 'untagged') = ${latestTagId}
+  `;
+}
+
 function indexedRegistrationAnswerPredicateSql(query: GuestListQuery): Prisma.Sql | null {
   if (query.answerGroups?.length) {
     const predicates = query.answerGroups.map((group) => indexedRegistrationAnswerGroupPredicateSql(group));
@@ -2130,11 +2349,9 @@ function indexedRegistrationAnswerPredicateSql(query: GuestListQuery): Prisma.Sq
 }
 
 function indexedRegistrationAnswerGroupPredicateSql(group: { question: string; answer: string; answerKey: string; checkedInOnly: boolean }): Prisma.Sql {
-  const valuePredicate = group.answerKey
-    ? Prisma.sql`AND LOWER(REGEXP_REPLACE(BTRIM(answer.item ->> 'value'), '[^[:alnum:]]+', '', 'g')) = ${group.answerKey}`
-    : group.answer
-      ? Prisma.sql`AND BTRIM(answer.item ->> 'value') = ${group.answer}`
-      : Prisma.empty;
+  const valuePredicate = group.answerKey || group.answer
+    ? Prisma.sql`AND ${indexedRegistrationAnswerChoicePredicateSql(Prisma.sql`answer.item`, group.answer, group.answerKey)}`
+    : Prisma.empty;
   const checkedInPredicate = group.checkedInOnly
     ? Prisma.sql`AND (guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')`
     : Prisma.empty;
@@ -2225,6 +2442,7 @@ function indexedEventStatusPredicateSql(
 }
 
 function indexedSimpleStatusPredicateSql(filter: GuestFilter): Prisma.Sql {
+  if (filter === "checked_in") return Prisma.sql`(guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')`;
   if (filter === "accepted") return Prisma.sql`guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)})`;
   if (filter === "to_decide") {
     return Prisma.sql`(
@@ -2471,7 +2689,8 @@ export async function getIndexedEventAnalytics(
 export async function getIndexedMultiEventStats(eventIds: string[]) {
   const boundedEventIds = [...new Set(eventIds.filter(Boolean))].slice(0, MAX_SELECTED_EVENT_IDS);
   if (!boundedEventIds.length) return null;
-  const uncachedEvents = await prisma().lumaEvent.findMany({
+  const db = prisma();
+  const uncachedEvents = await db.lumaEvent.findMany({
     where: {
       eventId: { in: boundedEventIds },
       overviewStatsUpdatedAt: null,
@@ -2481,7 +2700,7 @@ export async function getIndexedMultiEventStats(eventIds: string[]) {
   if (uncachedEvents.length) {
     await refreshIndexedEventOverviewStats(uncachedEvents.map((event) => event.eventId));
   }
-  const rows = await prisma().$queryRaw<Array<{
+  const rows = await db.$queryRaw<Array<{
     eventCount: number;
     total: number;
     checkedIn: number;
@@ -2610,43 +2829,113 @@ export async function getIndexedMultiEventStats(eventIds: string[]) {
       )::integer AS "referredReturning"
     FROM guest_cohort AS guest
   `);
+  const tagDistribution = await db.$queryRaw<Array<{ id: string; label: string; color: string; count: number }>>(Prisma.sql`
+    WITH attendees AS MATERIALIZED (
+      SELECT DISTINCT guest.person_id
+      FROM luma_event_guests AS guest
+      WHERE guest.event_id IN (${Prisma.join(boundedEventIds)})
+        AND (guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')
+    ),
+    latest_manual_state AS MATERIALIZED (
+      SELECT DISTINCT ON (mutation.person_id, mutation.tag_id)
+        mutation.person_id,
+        mutation.tag_id,
+        mutation.assigned_at,
+        mutation.removed
+      FROM manual_tag_mutations AS mutation
+      JOIN attendees ON attendees.person_id = mutation.person_id
+      ORDER BY mutation.person_id, mutation.tag_id, mutation.assigned_at DESC NULLS LAST, mutation.id DESC
+    ),
+    profile_tags AS MATERIALIZED (
+      SELECT
+        attendee.person_id,
+        profile_tag.name,
+        profile_tag.ordinality,
+        definition.id,
+        definition.color,
+        GREATEST(manual.assigned_at, automatic.assigned_at) AS assigned_at
+      FROM attendees AS attendee
+      JOIN luma_people AS person ON person.person_id = attendee.person_id
+      CROSS JOIN LATERAL JSONB_ARRAY_ELEMENTS_TEXT(
+        CASE WHEN JSONB_TYPEOF(person.tags) = 'array' THEN person.tags ELSE '[]'::jsonb END
+      ) WITH ORDINALITY AS profile_tag(name, ordinality)
+      LEFT JOIN guest_tags AS definition ON LOWER(definition.name) = LOWER(profile_tag.name)
+      LEFT JOIN latest_manual_state AS manual
+        ON manual.person_id = attendee.person_id
+        AND manual.tag_id = definition.id
+        AND NOT manual.removed
+      LEFT JOIN automatic_tag_assignments AS automatic
+        ON automatic.person_id = attendee.person_id
+        AND automatic.tag_id = definition.id
+    ),
+    latest_profile_tag AS (
+      SELECT person_id, id, name, color
+      FROM (
+        SELECT
+          profile_tags.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY profile_tags.person_id
+            ORDER BY profile_tags.assigned_at DESC NULLS LAST, profile_tags.ordinality DESC, LOWER(profile_tags.name)
+          ) AS rank
+        FROM profile_tags
+      ) AS ranked
+      WHERE rank = 1
+    ),
+    attendee_tags AS (
+      SELECT
+        attendee.person_id,
+        CASE
+          WHEN latest_profile_tag.name IS NULL THEN 'untagged'
+          ELSE COALESCE(latest_profile_tag.id, 'legacy:' || LOWER(latest_profile_tag.name))
+        END AS id,
+        COALESCE(latest_profile_tag.name, 'Untagged') AS label,
+        COALESCE(latest_profile_tag.color, '#706f69') AS color
+      FROM attendees AS attendee
+      LEFT JOIN latest_profile_tag ON latest_profile_tag.person_id = attendee.person_id
+    )
+    SELECT id, label, color, COUNT(*)::integer AS count
+    FROM attendee_tags
+    GROUP BY id, label, color
+    ORDER BY count DESC, LOWER(label), id
+  `);
+  const stats = rows[0] || {
+    eventCount: 0,
+    total: 0,
+    checkedIn: 0,
+    accepted: 0,
+    registered: 0,
+    pending: 0,
+    declined: 0,
+    invited: 0,
+    waitlisted: 0,
+    toDecide: 0,
+    firstRegisters: 0,
+    newRegistrations: 0,
+    newFaces: 0,
+    referredRegistrations: 0,
+    newReferrals: 0,
+    referredAccepted: 0,
+    referredCheckedIn: 0,
+    referredFirstRegisters: 0,
+    referredReturning: 0,
+    invitationTotal: 0,
+    invitedGoing: 0,
+    invitedCheckedIn: 0,
+    invitedNoShow: 0,
+    invitedNoResponse: 0,
+    invitedDeclined: 0,
+    invitedReferralTotal: 0,
+    invitedReferralGoing: 0,
+    invitedReferralCheckedIn: 0,
+    invitedReferralNoShow: 0,
+    invitedReferralNoResponse: 0,
+    invitedReferralDeclined: 0,
+  };
   return {
     source: "luma-index",
     eventIds: boundedEventIds,
     uniquePeople: true,
-    stats: rows[0] || {
-      eventCount: 0,
-      total: 0,
-      checkedIn: 0,
-      accepted: 0,
-      registered: 0,
-      pending: 0,
-      declined: 0,
-      invited: 0,
-      waitlisted: 0,
-      toDecide: 0,
-      firstRegisters: 0,
-      newRegistrations: 0,
-      newFaces: 0,
-      referredRegistrations: 0,
-      newReferrals: 0,
-      referredAccepted: 0,
-      referredCheckedIn: 0,
-      referredFirstRegisters: 0,
-      referredReturning: 0,
-      invitationTotal: 0,
-      invitedGoing: 0,
-      invitedCheckedIn: 0,
-      invitedNoShow: 0,
-      invitedNoResponse: 0,
-      invitedDeclined: 0,
-      invitedReferralTotal: 0,
-      invitedReferralGoing: 0,
-      invitedReferralCheckedIn: 0,
-      invitedReferralNoShow: 0,
-      invitedReferralNoResponse: 0,
-      invitedReferralDeclined: 0,
-    },
+    stats: { ...stats, tagDistribution },
   };
 }
 
@@ -2662,10 +2951,8 @@ export async function listIndexedAnalyticsRespondents(query: AnalyticsRespondent
     };
   }
 
-  const answerFilter = query.answerKey
-    ? Prisma.sql`AND LOWER(REGEXP_REPLACE(BTRIM(response.item ->> 'value'), '[^[:alnum:]]+', '', 'g')) = ${query.answerKey}`
-    : query.answer
-    ? Prisma.sql`AND BTRIM(response.item ->> 'value') = ${query.answer}`
+  const answerFilter = query.answerKey || query.answer
+    ? Prisma.sql`AND ${indexedRegistrationAnswerChoicePredicateSql(Prisma.sql`response.item`, query.answer, query.answerKey)}`
     : Prisma.empty;
   const pageRows = await prisma().$queryRaw<Array<{
     personId: string;
@@ -2789,7 +3076,7 @@ async function indexedEventAnalytics(
 ) {
   const diagnosticStartedAt = Date.now();
   const analyticsQuestionLimit = safeInt("LUMA_ANALYTICS_MAX_NEW_FACES", 1000, 1, 5000);
-  const [summaryRows, analyticsQuestionRows, analyticsAllQuestionRows] = await db.$transaction([
+  const [summaryRows, analyticsQuestionRows, analyticsAllQuestionRows, tagDistributionRows] = await db.$transaction([
     db.$queryRaw<Array<{ total: number; checkedIn: number; accepted: number; registered: number; pending: number; declined: number; invited: number; waitlisted: number; toDecide: number; firstRegisters: number; newRegistrations: number; newFaces: number; referredRegistrations: number; newReferrals: number; referredAccepted: number; referredCheckedIn: number; referredFirstRegisters: number; referredReturning: number; invitationTotal: number; invitedGoing: number; invitedCheckedIn: number; invitedNoShow: number; invitedNoResponse: number; invitedDeclined: number; invitedReferralTotal: number; invitedReferralGoing: number; invitedReferralCheckedIn: number; invitedReferralNoShow: number; invitedReferralNoResponse: number; invitedReferralDeclined: number }>>(Prisma.sql`
       WITH guest_cohort AS MATERIALIZED (
         SELECT guest.*
@@ -2912,15 +3199,86 @@ async function indexedEventAnalytics(
       take: analyticsQuestionLimit,
       orderBy: [{ registeredAt: "desc" }, { createdAt: "desc" }, { lastSeenAt: "desc" }],
     }),
+    db.$queryRaw<Array<{ id: string; label: string; color: string; count: number }>>(Prisma.sql`
+      WITH attendees AS MATERIALIZED (
+        SELECT DISTINCT guest.person_id
+        FROM luma_event_guests AS guest
+        WHERE guest.event_id = ${eventId}
+          AND (guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')
+      ),
+      latest_manual_state AS MATERIALIZED (
+        SELECT DISTINCT ON (mutation.person_id, mutation.tag_id)
+          mutation.person_id,
+          mutation.tag_id,
+          mutation.assigned_at,
+          mutation.removed
+        FROM manual_tag_mutations AS mutation
+        JOIN attendees ON attendees.person_id = mutation.person_id
+        ORDER BY mutation.person_id, mutation.tag_id, mutation.assigned_at DESC NULLS LAST, mutation.id DESC
+      ),
+      profile_tags AS MATERIALIZED (
+        SELECT
+          attendee.person_id,
+          profile_tag.name,
+          profile_tag.ordinality,
+          definition.id,
+          definition.color,
+          GREATEST(manual.assigned_at, automatic.assigned_at) AS assigned_at
+        FROM attendees AS attendee
+        JOIN luma_people AS person ON person.person_id = attendee.person_id
+        CROSS JOIN LATERAL JSONB_ARRAY_ELEMENTS_TEXT(
+          CASE WHEN JSONB_TYPEOF(person.tags) = 'array' THEN person.tags ELSE '[]'::jsonb END
+        ) WITH ORDINALITY AS profile_tag(name, ordinality)
+        LEFT JOIN guest_tags AS definition ON LOWER(definition.name) = LOWER(profile_tag.name)
+        LEFT JOIN latest_manual_state AS manual
+          ON manual.person_id = attendee.person_id
+          AND manual.tag_id = definition.id
+          AND NOT manual.removed
+        LEFT JOIN automatic_tag_assignments AS automatic
+          ON automatic.person_id = attendee.person_id
+          AND automatic.tag_id = definition.id
+      ),
+      latest_profile_tag AS (
+        SELECT person_id, id, name, color
+        FROM (
+          SELECT
+            profile_tags.*,
+            ROW_NUMBER() OVER (
+              PARTITION BY profile_tags.person_id
+              ORDER BY profile_tags.assigned_at DESC NULLS LAST, profile_tags.ordinality DESC, LOWER(profile_tags.name)
+            ) AS rank
+          FROM profile_tags
+        ) AS ranked
+        WHERE rank = 1
+      ),
+      attendee_tags AS (
+        SELECT
+          attendee.person_id,
+          CASE
+            WHEN latest_profile_tag.name IS NULL THEN 'untagged'
+            ELSE COALESCE(latest_profile_tag.id, 'legacy:' || LOWER(latest_profile_tag.name))
+          END AS id,
+          COALESCE(latest_profile_tag.name, 'Untagged') AS label,
+          COALESCE(latest_profile_tag.color, '#706f69') AS color
+        FROM attendees AS attendee
+        LEFT JOIN latest_profile_tag ON latest_profile_tag.person_id = attendee.person_id
+      )
+      SELECT id, label, color, COUNT(*)::integer AS count
+      FROM attendee_tags
+      GROUP BY id, label, color
+      ORDER BY count DESC, LOWER(label), id
+    `),
   ]);
   diagnosticReporter?.("analytics_queries", Date.now() - diagnosticStartedAt, {
     answerRowCount: analyticsQuestionRows.length,
     allAnswerRowCount: analyticsAllQuestionRows.length,
+    tagCount: tagDistributionRows.length,
   });
   return {
     stats: summaryRows[0] || { total: 0, checkedIn: 0, accepted: 0, registered: 0, pending: 0, declined: 0, invited: 0, waitlisted: 0, toDecide: 0, firstRegisters: 0, newRegistrations: 0, newFaces: 0, referredRegistrations: 0, newReferrals: 0, referredAccepted: 0, referredCheckedIn: 0, referredFirstRegisters: 0, referredReturning: 0, invitationTotal: 0, invitedGoing: 0, invitedCheckedIn: 0, invitedNoShow: 0, invitedNoResponse: 0, invitedDeclined: 0, invitedReferralTotal: 0, invitedReferralGoing: 0, invitedReferralCheckedIn: 0, invitedReferralNoShow: 0, invitedReferralNoResponse: 0, invitedReferralDeclined: 0 },
     analyticsQuestions: buildRegistrationQuestionAnalytics(analyticsQuestionRows),
     analyticsAllQuestions: buildRegistrationQuestionAnalytics(analyticsAllQuestionRows),
+    tagDistribution: tagDistributionRows,
   };
 }
 
@@ -4133,6 +4491,7 @@ export async function getIndexedTrace({ tracePersonId, traceEmail, limit = 500 }
     where: { OR: guestMatches },
     select: {
       ...INDEXED_GUEST_SELECT,
+      person: { select: INDEXED_TRACE_PERSON_SELECT },
       event: {
         select: {
           title: true,
@@ -5078,7 +5437,7 @@ function indexedPersonToApiPerson(row: any, guestRow: any = {}) {
     avatarUrl: avatarCandidates[0] || "",
     avatarCandidates,
     profileUrl: row.profileUrl || "",
-    socialLinks: row.socialLinks || guestRow.socialLinks || [],
+    socialLinks: Array.isArray(row.socialLinks) && row.socialLinks.length ? row.socialLinks : guestRow.socialLinks || [],
     referrer: row.referrer || guestRow.referrer || null,
     groups: row.groups || [],
     tags: row.tags || [],
@@ -5149,6 +5508,7 @@ function indexedGuestToTraceRecord(row) {
     checkedInAt: isoOrNull(row.checkedInAt),
     approvedAt: isoOrNull(row.approvedAt),
     profileDescription: row.profileDescription || row.person?.bio || "",
+    socialLinks: Array.isArray(row.socialLinks) && row.socialLinks.length ? row.socialLinks : row.person?.socialLinks || [],
     registrationAnswers: row.registrationAnswers || [],
     referrer: row.referrer || row.person?.referrer || null,
     sortAt: isoOrNull(row.event?.startsAt || row.event?.date || row.checkedInAt || row.registeredAt || row.lastSeenAt),

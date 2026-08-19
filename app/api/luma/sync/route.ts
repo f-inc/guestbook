@@ -548,11 +548,14 @@ function normalizeRegistrationAnswers(answers = []) {
   return answers
     .map((answer, index) => {
       const label = firstString(answer.label, answer.question_label, answer.question_text, answer.question?.label, answer.question?.title, answer.question?.text, answer.question);
-      const value = stringifyAnswerValue(answer.value ?? answer.answer ?? answer.response);
+      const rawValue = answer.value ?? answer.answer ?? answer.response;
+      const values = answerValueSelections(rawValue);
+      const value = values.join(" ");
       return {
         id: firstString(answer.id, answer.question_id, answer.question?.id) || "answer-" + index,
         label: label || "Question",
         value,
+        values,
         questionType: firstString(answer.question_type, answer.type, answer.question?.type),
       };
     })
@@ -798,6 +801,14 @@ function stringifyAnswerValue(value) {
   if (Array.isArray(value)) return value.map(stringifyAnswerValue).filter(Boolean).join(" ");
   if (typeof value === "object") return Object.values(value).map(stringifyAnswerValue).filter(Boolean).join(" ");
   return String(value);
+}
+
+function answerValueSelections(value) {
+  if (value == null) return [];
+  if (Array.isArray(value)) return [...new Set(value.flatMap(answerValueSelections).filter(Boolean))];
+  if (typeof value === "object") return [...new Set(Object.values(value).flatMap(answerValueSelections).filter(Boolean))];
+  const selection = stringifyAnswerValue(value);
+  return selection ? [selection] : [];
 }
 
 function formatLocation(event) {

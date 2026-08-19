@@ -1,7 +1,7 @@
 "use client";
 
 import type { CSSProperties } from "react";
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { startTransition, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -52,6 +52,7 @@ import {
   X,
 } from "lucide-react";
 import { activityRecordStatus } from "./activity-status";
+import { ANY_REGISTRATION_ANSWER_KEY, ANY_REGISTRATION_ANSWER_LABEL } from "./audience-answer-rules";
 import { orderAvatarCandidates } from "./avatar-order";
 import { allVisibleEventSelection, nextEventSelection } from "./event-selection";
 import { guestStatusDate, guestStatusTimestamp } from "./guest-status-date";
@@ -60,7 +61,7 @@ import { MAX_INVITE_MESSAGE_LENGTH } from "./invite-message";
 import { MAX_GUEST_STATUS_MESSAGE_LENGTH } from "./guest-status-notification";
 import { lumaEventManageUrl } from "./luma-event-url";
 import { buildRegistrationQuestionAnalytics, eventWideAnalyticsCounts, invitationOutcomeCounts, normalizeRegistrationAnswer, REFERRED_PERSON_TAG, sortRegistrationQuestionOptions } from "./event-analytics";
-import { changedLiveEventCountKeys, type LiveEventCounts } from "./event-count-reconciliation";
+import { changedLiveEventCountKeys, mergeLiveEventCounts, type LiveEventCounts } from "./event-count-reconciliation";
 import {
   EVENT_SWITCH_DIAGNOSTICS_ACTION,
   EVENT_SWITCH_DIAGNOSTICS_PARAM,
@@ -212,6 +213,8 @@ const initialState = {
     guestTags: [],
     guestTagMode: "any",
     guestExcludedTags: [],
+    guestLatestTagId: "",
+    guestLatestTagLabel: "",
     guestHasNotes: false,
     guestAttendedGreaterThan: "",
     guestAnswerQuestion: "",
@@ -229,6 +232,8 @@ const initialState = {
     excludeEventIds: [],
     includeEventCohorts: {},
     excludeEventCohorts: {},
+    includeEventAnswers: [],
+    excludeEventAnswers: [],
     includeGroups: [],
     excludeGroups: [],
     includeTags: [],
@@ -258,6 +263,7 @@ export default function Home() {
   const [toastSequence, setToastSequence] = useState(0);
   const [toastVisible, setToastVisible] = useState(true);
   const [profilePanelOpen, setProfilePanelOpen] = useState(false);
+  const [profilePersonId, setProfilePersonId] = useState("");
   const [avatarPreview, setAvatarPreview] = useState<{ person: any; url: string } | null>(null);
   const avatarPreviewRef = useRef<{ person: any; url: string } | null>(null);
   const [activeEventTab, setActiveEventTab] = useState("overview");
@@ -386,11 +392,11 @@ export default function Home() {
       metrics: urlState.eventMetricFilters || [],
     });
     setProfilePanelOpen(Boolean(urlState.profileId));
+    setProfilePersonId(urlState.profileId || "");
     setState((current) => ({
       ...current,
       selectedEventId: urlState.eventId || current.selectedEventId,
       selectedEventIds: urlState.eventIds.length ? urlState.eventIds : current.selectedEventIds,
-      selectedPersonId: urlState.profileId || current.selectedPersonId,
       filters: {
         ...current.filters,
         event: urlState.eventView,
@@ -403,6 +409,8 @@ export default function Home() {
         guestTags: urlState.guestTags,
         guestTagMode: urlState.guestTagMode || "any",
         guestExcludedTags: urlState.guestExcludedTags || [],
+        guestLatestTagId: urlState.guestLatestTagId || "",
+        guestLatestTagLabel: urlState.guestLatestTagLabel || "",
         guestHasNotes: Boolean(urlState.guestHasNotes),
         guestAttendedGreaterThan: urlState.guestAttendedGreaterThan == null ? "" : String(urlState.guestAttendedGreaterThan),
         guestAnswerQuestion: urlState.guestAnswerQuestion || "",
@@ -463,6 +471,7 @@ export default function Home() {
     setActivityTraces({});
     clearUniversalSearch();
     setProfilePanelOpen(false);
+    setProfilePersonId("");
     setAvatarPreview(null);
   };
 
@@ -926,14 +935,25 @@ export default function Home() {
     () => workspaceEventFeedback(selectedFeedbackEvents, eventFeedbackById),
     [selectedFeedbackEventIdsKey, eventFeedbackById],
   );
-  const selectedPerson = getPerson(state, state.selectedPersonId);
-  const selectedTrace = selectedPerson ? activityTraces[selectedPerson.id] || { status: "idle", records: [] } : { status: "idle", records: [] };
-  const selectedProfileRecord = selectedPerson ? currentProfileRecord(state, selectedPerson) : null;
+  const peopleById = useMemo(() => new Map(state.people.map((person) => [person.id, person])), [state.people]);
+  const personHistoryById = useMemo(() => buildAllPersonHistoryIndex(state.events), [state.events]);
+  const selectedTrace = profilePersonId ? activityTraces[profilePersonId] || { status: "idle", records: [] } : { status: "idle", records: [] };
+  const selectedPerson = useMemo(() => {
+    const person = peopleById.get(profilePersonId) || null;
+    return person && selectedTrace.person ? mergePersonRecord(person, selectedTrace.person) : person;
+  }, [peopleById, profilePersonId, selectedTrace.person]);
+  const selectedProfileRecord = useMemo(
+    () => selectedPerson ? currentProfileRecord(state, selectedPerson) : null,
+    [state.events, state.selectedEventId, selectedPerson?.id],
+  );
 
-  const inviteAudience = useMemo(() => computeInviteAudience(state), [state]);
+  const inviteAudience = useMemo(
+    () => computeInviteAudience(state),
+    [state.invite, state.people, state.events, state.groups],
+  );
   const selectedEventAnalytics = useMemo(
     () => buildWorkspaceAnalytics(state, selectedEvents, uniqueWorkspaceStats, analyticsCohort),
-    [state, selectedEventIdsKey, uniqueWorkspaceStats, analyticsCohort],
+    [state.events, state.people, state.groups, selectedEventIdsKey, uniqueWorkspaceStats, analyticsCohort],
   );
 
   useLayoutEffect(() => {
@@ -959,7 +979,10 @@ export default function Home() {
     return () => window.cancelAnimationFrame(animationFrame);
   }, [workspaceScrollRestoreVersion, activeEventTab, analyticsCohort, selectedEventIdsKey]);
 
-  const filteredEvents = useMemo(() => visibleEvents(state, lifecycleNow), [state, lifecycleNow]);
+  const filteredEvents = useMemo(
+    () => visibleEvents(state, lifecycleNow),
+    [state.events, state.filters.event, state.filters.globalSearch, lifecycleNow],
+  );
   const eventSearchActive = Boolean(state.filters.globalSearch.trim());
   const allFilteredEventsSelected = filteredEvents.length > 0
     && filteredEvents.length === selectedEvents.length
@@ -969,15 +992,16 @@ export default function Home() {
   const eventAnchorId = state.filters.event === "all" ? nearestUpcomingEventId(filteredEvents) : "";
   const renderedEvents = filteredEvents.slice(eventWindow.start, eventWindow.end);
   const visibleGuests = useMemo(
-    () => workspaceEventGuests(state, selectedEvents, guestSortField, guestDateSortDirection),
-    [state, selectedEventIdsKey, guestSortField, guestDateSortDirection],
+    () => workspaceEventGuests(state, selectedEvents, guestSortField, guestDateSortDirection, peopleById, personHistoryById),
+    [state.events, state.people, state.filters, selectedEventIdsKey, guestSortField, guestDateSortDirection, peopleById, personHistoryById],
   );
   const guestTagFilterKey = `${state.filters.guestTagMode}:${state.filters.guestTags.join("\u0000")}:${state.filters.guestExcludedTags.join("\u0000")}`;
+  const guestLatestTagFilterKey = `${state.filters.guestLatestTagId}:${state.filters.guestLatestTagLabel}`;
   const guestStatusFilterKey = `${state.filters.guestStatusMode}:${state.filters.guestStatuses.join("\u0000")}:${state.filters.guestExcludedStatuses.join("\u0000")}`;
   const guestAnswerFilterKey = state.filters.guestAnswerGroups.length
     ? state.filters.guestAnswerGroups.map(guestAnswerGroupKey).join("\u0001")
     : `${state.filters.guestAnswerQuestion}:${state.filters.guestAnswerKey}:${state.filters.guestAnswer}`;
-  const multiEventGuestQueryKey = `${multiEventStatsKey}:${guestStatusFilterKey}:${debouncedGuestSearch}:${guestTagFilterKey}:${state.filters.guestHasNotes ? 1 : 0}:${state.filters.guestAttendedGreaterThan}:${guestAnswerFilterKey}:${guestSortField}:${guestDateSortDirection}`;
+  const multiEventGuestQueryKey = `${multiEventStatsKey}:${guestStatusFilterKey}:${debouncedGuestSearch}:${guestTagFilterKey}:${guestLatestTagFilterKey}:${state.filters.guestHasNotes ? 1 : 0}:${state.filters.guestAttendedGreaterThan}:${guestAnswerFilterKey}:${guestSortField}:${guestDateSortDirection}`;
   const normalizedUniversalQuery = universalQuery.trim().toLocaleLowerCase();
   const universalPeopleRequestKey = `${normalizedUniversalQuery}\u0000${universalPeopleFiltersKey}`;
   const activeUniversalPeopleSearch = universalPeopleSearch.query === universalPeopleRequestKey ? universalPeopleSearch : null;
@@ -988,11 +1012,11 @@ export default function Home() {
       : null;
   const universalResults = useMemo(
     () => universalSearchResults(state, universalQuery, activeUniversalIndexedPeople),
-    [state, universalQuery, activeUniversalIndexedPeople],
+    [state.events, state.people, state.groups, state.tags, state.tagDefinitions, state.filters, universalQuery, activeUniversalIndexedPeople],
   );
   const universalResultCount = universalResults.people.length;
   const showGuestGroups = visibleGuests.some(({ person }) => person.groups.length > 0);
-  const hasSelectedProfile = hasProfileContent(state, selectedPerson);
+  const hasSelectedProfile = Boolean(selectedPerson);
   const showProfilePanel = profilePanelOpen && hasSelectedProfile;
   const showGuestReferrer = !showProfilePanel;
   const guestTableColumnCount = 10 + Number(showGuestGroups) + Number(showGuestReferrer);
@@ -1000,6 +1024,7 @@ export default function Home() {
     || state.filters.guestExcludedStatuses.length > 0
     || state.filters.guestTags.length > 0
     || state.filters.guestExcludedTags.length > 0
+    || Boolean(state.filters.guestLatestTagId)
     || state.filters.guestHasNotes
     || state.filters.guestAttendedGreaterThan !== ""
     || Boolean(state.filters.guestAnswerQuestion)
@@ -1036,13 +1061,13 @@ export default function Home() {
     if (!workspaceUrlReady || !pendingProfileId) return;
     const pendingPerson = getPerson(state, pendingProfileId);
     if (!pendingPerson) return;
-    if (state.selectedPersonId === pendingProfileId) {
+    if (profilePersonId === pendingProfileId) {
       pendingProfileIdRef.current = "";
       return;
     }
-    setState((current) => ({ ...current, selectedPersonId: pendingProfileId }));
+    setProfilePersonId(pendingProfileId);
     setProfilePanelOpen(true);
-  }, [workspaceUrlReady, state.people, state.selectedPersonId]);
+  }, [workspaceUrlReady, state.people, profilePersonId]);
 
   useEffect(() => {
     if (!workspaceUrlReady || !state.events.length || !selectedEvent) return;
@@ -1069,6 +1094,8 @@ export default function Home() {
       guestTags: state.filters.guestTags,
       guestTagMode: state.filters.guestTagMode === "all" ? "all" : "any",
       guestExcludedTags: state.filters.guestExcludedTags,
+      guestLatestTagId: state.filters.guestLatestTagId,
+      guestLatestTagLabel: state.filters.guestLatestTagLabel,
       guestHasNotes: state.filters.guestHasNotes,
       guestAttendedGreaterThan: state.filters.guestAttendedGreaterThan === ""
         ? null
@@ -1112,6 +1139,7 @@ export default function Home() {
     guestStatusFilterKey,
     state.filters.guestSearch,
     guestTagFilterKey,
+    guestLatestTagFilterKey,
     state.filters.guestHasNotes,
     state.filters.guestAttendedGreaterThan,
     guestAnswerFilterKey,
@@ -1120,7 +1148,8 @@ export default function Home() {
   ]);
 
   useEffect(() => {
-    if (sessionStatus !== "ready" || !multiEventMode || !multiEventStatsKey || multiEventStatsByKey[multiEventStatsKey] || multiEventStatsRequestsRef.current.has(multiEventStatsKey)) return;
+    const cachedStats = multiEventStatsByKey[multiEventStatsKey];
+    if (sessionStatus !== "ready" || !multiEventMode || !multiEventStatsKey || (cachedStats && Array.isArray(cachedStats.tagDistribution)) || multiEventStatsRequestsRef.current.has(multiEventStatsKey)) return;
     multiEventStatsRequestsRef.current.add(multiEventStatsKey);
     const params = new URLSearchParams({ multi_event_stats: "1" });
     selectedEvents.forEach((event) => params.append("event_id", event.id));
@@ -1314,13 +1343,10 @@ export default function Home() {
   const openPerson = (personId: string, eventId = "") => {
     workspaceUrlModeRef.current = "push";
     pendingProfileIdRef.current = "";
-    updateState((draft) => {
-      draft.selectedPersonId = personId;
-      if (eventId) {
-        draft.selectedEventId = eventId;
-        draft.selectedEventIds = [eventId];
-      }
-    });
+    setProfilePersonId(personId);
+    if (eventId) {
+      setState((current) => ({ ...current, selectedEventId: eventId, selectedEventIds: [eventId] }));
+    }
     setProfilePanelOpen(true);
   };
 
@@ -1351,14 +1377,14 @@ export default function Home() {
         },
       }));
       workspaceUrlModeRef.current = "push";
-      setState((current) => normalizeState({
+      setState((current) => ({
         ...current,
         people: [
           ...current.people.filter((person) => person.id !== personId),
           mergePersonRecord(getPerson(current, personId), data.person),
         ],
-        selectedPersonId: personId,
       }));
+      setProfilePersonId(personId);
       setProfilePanelOpen(true);
     } catch (error: any) {
       setApiState({ status: "error", message: error.message });
@@ -1400,6 +1426,8 @@ export default function Home() {
       draft.filters.guestTags = [];
       draft.filters.guestTagMode = "any";
       draft.filters.guestExcludedTags = [];
+      draft.filters.guestLatestTagId = "";
+      draft.filters.guestLatestTagLabel = "";
       draft.filters.guestHasNotes = false;
       draft.filters.guestAttendedGreaterThan = "";
       draft.filters.guestAnswerQuestion = "";
@@ -1414,6 +1442,36 @@ export default function Home() {
     if (!state.filters.guestAnswerGroups.length) return;
     rememberWorkspaceScroll();
     workspaceUrlModeRef.current = "push";
+    setActiveEventTab("overview");
+  };
+
+  const openAnalyticsTagDistribution = (tag) => {
+    if (!tag?.id) return;
+    rememberWorkspaceScroll();
+    workspaceUrlModeRef.current = "push";
+    setGuestPageTarget(1);
+    setDebouncedGuestSearch("");
+    setAllMatchingGuestsSelected(false);
+    setSelectedGuestIds(new Set());
+    lastSelectedGuestIdRef.current = "";
+    updateState((draft) => {
+      draft.filters.guestStatus = "checked_in";
+      draft.filters.guestStatuses = ["checked_in"];
+      draft.filters.guestStatusMode = "any";
+      draft.filters.guestExcludedStatuses = [];
+      draft.filters.guestSearch = "";
+      draft.filters.guestTags = [];
+      draft.filters.guestTagMode = "any";
+      draft.filters.guestExcludedTags = [];
+      draft.filters.guestLatestTagId = String(tag.id);
+      draft.filters.guestLatestTagLabel = String(tag.label || "Untagged");
+      draft.filters.guestHasNotes = false;
+      draft.filters.guestAttendedGreaterThan = "";
+      draft.filters.guestAnswerQuestion = "";
+      draft.filters.guestAnswer = "";
+      draft.filters.guestAnswerKey = "";
+      draft.filters.guestAnswerGroups = [];
+    });
     setActiveEventTab("overview");
   };
 
@@ -1450,6 +1508,8 @@ export default function Home() {
         draft.filters.guestTags = [];
         draft.filters.guestTagMode = "any";
         draft.filters.guestExcludedTags = [];
+        draft.filters.guestLatestTagId = "";
+        draft.filters.guestLatestTagLabel = "";
         draft.filters.guestHasNotes = false;
         draft.filters.guestAttendedGreaterThan = "";
         draft.filters.guestAnswerQuestion = "";
@@ -1503,7 +1563,7 @@ export default function Home() {
       setGuestStatusRules(value === "all" ? [] : [value], [], "any");
       return;
     }
-    if (["guestStatuses", "guestStatusMode", "guestExcludedStatuses", "guestSearch", "guestTags", "guestTagMode", "guestExcludedTags", "guestAnswerQuestion", "guestAnswer", "guestAnswerKey"].includes(key)) {
+    if (["guestStatuses", "guestStatusMode", "guestExcludedStatuses", "guestSearch", "guestTags", "guestTagMode", "guestExcludedTags", "guestLatestTagId", "guestLatestTagLabel", "guestAnswerQuestion", "guestAnswer", "guestAnswerKey"].includes(key)) {
       setGuestPageTarget(1);
       setAllMatchingGuestsSelected(false);
       setSelectedGuestIds(new Set());
@@ -1561,6 +1621,8 @@ export default function Home() {
       draft.filters.guestTags = [];
       draft.filters.guestTagMode = "any";
       draft.filters.guestExcludedTags = [];
+      draft.filters.guestLatestTagId = "";
+      draft.filters.guestLatestTagLabel = "";
       draft.filters.guestSearch = "";
       draft.filters.guestHasNotes = false;
       draft.filters.guestAttendedGreaterThan = "";
@@ -1581,6 +1643,17 @@ export default function Home() {
       draft.filters.guestAnswer = "";
       draft.filters.guestAnswerKey = "";
       draft.filters.guestAnswerGroups = [];
+    });
+  };
+
+  const clearGuestLatestTagFilter = () => {
+    setGuestPageTarget(1);
+    setAllMatchingGuestsSelected(false);
+    setSelectedGuestIds(new Set());
+    lastSelectedGuestIdRef.current = "";
+    updateState((draft) => {
+      draft.filters.guestLatestTagId = "";
+      draft.filters.guestLatestTagLabel = "";
     });
   };
 
@@ -1605,6 +1678,8 @@ export default function Home() {
       tags = state.filters.guestTags,
       tagMode = state.filters.guestTagMode === "all" ? "all" : "any",
       excludedTags = state.filters.guestExcludedTags,
+      latestTagId = state.filters.guestLatestTagId,
+      latestTagLabel = state.filters.guestLatestTagLabel,
       hasNotes = state.filters.guestHasNotes,
       attendedGreaterThan = state.filters.guestAttendedGreaterThan,
       answerQuestion = state.filters.guestAnswerQuestion,
@@ -1614,7 +1689,7 @@ export default function Home() {
       cursor = "",
       priority = false,
       background = false,
-    }: { force?: boolean; append?: boolean; status?: string; statuses?: string[]; statusMode?: "any" | "all"; excludedStatuses?: string[]; search?: string; tags?: string[]; tagMode?: "any" | "all"; excludedTags?: string[]; hasNotes?: boolean; attendedGreaterThan?: string; answerQuestion?: string; answer?: string; answerKey?: string; answerGroups?: WorkspaceGuestAnswerGroup[]; cursor?: string; priority?: boolean; background?: boolean } = {},
+    }: { force?: boolean; append?: boolean; status?: string; statuses?: string[]; statusMode?: "any" | "all"; excludedStatuses?: string[]; search?: string; tags?: string[]; tagMode?: "any" | "all"; excludedTags?: string[]; latestTagId?: string; latestTagLabel?: string; hasNotes?: boolean; attendedGreaterThan?: string; answerQuestion?: string; answer?: string; answerKey?: string; answerGroups?: WorkspaceGuestAnswerGroup[]; cursor?: string; priority?: boolean; background?: boolean } = {},
   ) => {
     const event = getEvent(state, eventId);
     if (!event) {
@@ -1650,6 +1725,10 @@ export default function Home() {
     tags.forEach((tag) => params.append("guest_tag", tag));
     if (tagMode === "all") params.set("guest_tag_mode", "all");
     excludedTags.forEach((tag) => params.append("guest_tag_not", tag));
+    if (latestTagId) {
+      params.set("guest_latest_tag_id", latestTagId);
+      if (latestTagLabel) params.set("guest_latest_tag_label", latestTagLabel);
+    }
     if (nextCursor) params.set("guest_cursor", nextCursor);
     if (!force && event.guestStats) params.set("guest_summary", "0");
     if (priority && !force) params.set("guest_mode", "page");
@@ -1725,40 +1804,56 @@ export default function Home() {
     }
   };
 
-  const reconcileActiveEventCounts = async () => {
+  const reconcileActiveEventCounts = async (
+    { force = false, eventIds = [] }: { force?: boolean; eventIds?: string[] } = {},
+  ) => {
     if (
-      document.visibilityState !== "visible"
-      || activeEventCountCheckInFlightRef.current
+      (!force && document.visibilityState !== "visible")
+      || (!force && activeEventCountCheckInFlightRef.current)
     ) return;
+    const requestedEventIds = new Set(eventIds);
     const events = selectedWorkspaceEvents(state)
-      .filter((event) => event.source === "luma" && eventHeaderStatsReady(event))
+      .filter((event) => event.source === "luma")
+      .filter((event) => !requestedEventIds.size || requestedEventIds.has(event.id))
+      .filter((event) => force || eventHeaderStatsReady(event))
       .slice(0, 50);
     if (!events.length) return;
 
-    activeEventCountCheckInFlightRef.current = true;
+    if (!force) activeEventCountCheckInFlightRef.current = true;
     try {
       const params = new URLSearchParams({ live_event_counts: "1" });
       events.forEach((event) => params.append("event_id", event.id));
       const response = await apiFetch(`/api/luma?${params.toString()}`, { cache: "no-store" });
       const data: any = await response.json();
       if (!response.ok) throw new Error(withRequestId(data.error || "Unable to check live event counts.", data.requestId));
-      if (document.visibilityState !== "visible") return;
+      if (!force && document.visibilityState !== "visible") return;
       const liveCounts = new Map<string, LiveEventCounts>(
         (Array.isArray(data.counts) ? data.counts : []).map((counts: LiveEventCounts) => [counts.eventId, counts]),
       );
       const changedEvents = events.filter((event) => {
         const counts = liveCounts.get(event.id);
-        return counts && changedLiveEventCountKeys(event.guestStats, counts).length > 0;
+        return counts && (force || changedLiveEventCountKeys(event.guestStats, counts).length > 0);
       });
-      for (const event of changedEvents) {
-        if (document.visibilityState !== "visible") return;
-        await loadEventGuests(event.id, { force: true, priority: true, background: true });
+      if (changedEvents.length) {
+        const changedIds = new Set(changedEvents.map((event) => event.id));
+        setState((current) => ({
+          ...current,
+          events: current.events.map((event) => {
+            if (!changedIds.has(event.id)) return event;
+            const counts = liveCounts.get(event.id);
+            if (!counts) return event;
+            return {
+              ...event,
+              guestStats: mergeLiveEventCounts(event.guestStats, counts),
+            };
+          }),
+        }));
       }
     } catch {
       // This passive freshness check should not interrupt the workspace. The
       // server records a redacted request-scoped error for diagnostics.
     } finally {
-      activeEventCountCheckInFlightRef.current = false;
+      if (!force) activeEventCountCheckInFlightRef.current = false;
     }
   };
   reconcileActiveEventCountsRef.current = () => void reconcileActiveEventCounts();
@@ -1834,6 +1929,9 @@ export default function Home() {
       .filter((event) => event.source === "luma")
       .map((event) => event.id);
     if (!eventIds.length) return;
+    // Event-level Luma counts are a sub-second request. Update the visible
+    // check-in number immediately while the full guest/referrer sync continues.
+    void reconcileActiveEventCounts({ force: true, eventIds });
     const storedToken = window.localStorage.getItem(LUMA_SESSION_TOKEN_STORAGE_KEY) || "";
     if (!storedToken) {
       setLumaSessionPrompt({
@@ -1858,6 +1956,8 @@ export default function Home() {
       tags = state.filters.guestTags,
       tagMode = state.filters.guestTagMode === "all" ? "all" : "any",
       excludedTags = state.filters.guestExcludedTags,
+      latestTagId = state.filters.guestLatestTagId,
+      latestTagLabel = state.filters.guestLatestTagLabel,
       hasNotes = state.filters.guestHasNotes,
       attendedGreaterThan = state.filters.guestAttendedGreaterThan,
       answerQuestion = state.filters.guestAnswerQuestion,
@@ -1865,7 +1965,7 @@ export default function Home() {
       answerKey = state.filters.guestAnswerKey,
       answerGroups = state.filters.guestAnswerGroups,
       cursor = "",
-    }: { append?: boolean; status?: string; statuses?: string[]; statusMode?: "any" | "all"; excludedStatuses?: string[]; search?: string; tags?: string[]; tagMode?: "any" | "all"; excludedTags?: string[]; hasNotes?: boolean; attendedGreaterThan?: string; answerQuestion?: string; answer?: string; answerKey?: string; answerGroups?: WorkspaceGuestAnswerGroup[]; cursor?: string } = {},
+    }: { append?: boolean; status?: string; statuses?: string[]; statusMode?: "any" | "all"; excludedStatuses?: string[]; search?: string; tags?: string[]; tagMode?: "any" | "all"; excludedTags?: string[]; latestTagId?: string; latestTagLabel?: string; hasNotes?: boolean; attendedGreaterThan?: string; answerQuestion?: string; answer?: string; answerKey?: string; answerGroups?: WorkspaceGuestAnswerGroup[]; cursor?: string } = {},
   ) => {
     const eventIds = selectedWorkspaceEvents(state)
       .filter((event) => event.source === "luma")
@@ -1873,7 +1973,7 @@ export default function Home() {
     if (eventIds.length < 2) return;
 
     const includedStatuses = statuses.length ? statuses : status !== "all" ? [status] : [];
-    const queryKey = `${[...eventIds].sort().join("\u0000")}:${statusMode}:${includedStatuses.join("\u0000")}:${excludedStatuses.join("\u0000")}:${search}:${tagMode}:${tags.join("\u0000")}:${excludedTags.join("\u0000")}:${hasNotes ? 1 : 0}:${attendedGreaterThan}:${answerQuestion}:${answerKey}:${answer}:${answerGroups.map(guestAnswerGroupKey).join("\u0001")}:${guestSortField}:${guestDateSortDirection}`;
+    const queryKey = `${[...eventIds].sort().join("\u0000")}:${statusMode}:${includedStatuses.join("\u0000")}:${excludedStatuses.join("\u0000")}:${search}:${tagMode}:${tags.join("\u0000")}:${excludedTags.join("\u0000")}:${latestTagId}:${latestTagLabel}:${hasNotes ? 1 : 0}:${attendedGreaterThan}:${answerQuestion}:${answerKey}:${answer}:${answerGroups.map(guestAnswerGroupKey).join("\u0001")}:${guestSortField}:${guestDateSortDirection}`;
     if (append && (multiEventGuestState.loading || !cursor || (multiEventGuestAbortRef.current && !multiEventGuestAbortRef.current.signal.aborted))) return;
     multiEventGuestAbortRef.current?.abort();
     const controller = new AbortController();
@@ -1901,6 +2001,10 @@ export default function Home() {
     tags.forEach((tag) => params.append("guest_tag", tag));
     if (tagMode === "all") params.set("guest_tag_mode", "all");
     excludedTags.forEach((tag) => params.append("guest_tag_not", tag));
+    if (latestTagId) {
+      params.set("guest_latest_tag_id", latestTagId);
+      if (latestTagLabel) params.set("guest_latest_tag_label", latestTagLabel);
+    }
     if (cursor) params.set("guest_cursor", cursor);
 
     setMultiEventGuestState((current) => ({
@@ -1976,6 +2080,7 @@ export default function Home() {
           guestStats: data.stats || item.guestStats,
           guestAnalyticsQuestions: data.analyticsQuestions || item.guestAnalyticsQuestions || [],
           guestAnalyticsAllQuestions: data.analyticsAllQuestions || item.guestAnalyticsAllQuestions || [],
+          guestTagDistribution: data.tagDistribution || item.guestTagDistribution || [],
           analyticsLoaded: true,
           analyticsLoading: false,
         } : item),
@@ -2042,15 +2147,17 @@ export default function Home() {
   const tracePersonActivity = async (person: any, { force = false }: { force?: boolean } = {}) => {
     if (!person || traceRequestsRef.current.has(person.id)) return;
     traceRequestsRef.current.add(person.id);
-    setActivityTraces((current) => ({
-      ...current,
-      [person.id]: {
-        ...(current[person.id] || {}),
-        status: "loading",
-        message: force ? "Reconciling activity directly with Luma..." : "Looking up indexed event activity...",
-        records: current[person.id]?.records || [],
-      },
-    }));
+    startTransition(() => {
+      setActivityTraces((current) => ({
+        ...current,
+        [person.id]: {
+          ...(current[person.id] || {}),
+          status: "loading",
+          message: force ? "Reconciling activity directly with Luma..." : "Looking up indexed event activity...",
+          records: current[person.id]?.records || [],
+        },
+      }));
+    });
 
     try {
       const params = new URLSearchParams();
@@ -2066,19 +2173,22 @@ export default function Home() {
       const records = data.records || [];
       const truncatedText = data.truncated ? " Scan hit configured limits." : "";
       const requestText = data.requestId ? " Request " + data.requestId + "." : "";
-      setActivityTraces((current) => ({
-        ...current,
-        [person.id]: {
-          status: "ready",
-          records,
-          scanned: data.scanned,
-          limits: data.limits,
-          truncated: data.truncated,
-          requestId: data.requestId,
-          loadedAt: data.loadedAt,
-          message: `${records.length} records across ${data.scanned?.eventCount || 0} scanned events.${truncatedText}${requestText}`,
-        },
-      }));
+      startTransition(() => {
+        setActivityTraces((current) => ({
+          ...current,
+          [person.id]: {
+            status: "ready",
+            person: data.person || current[person.id]?.person || null,
+            records,
+            scanned: data.scanned,
+            limits: data.limits,
+            truncated: data.truncated,
+            requestId: data.requestId,
+            loadedAt: data.loadedAt,
+            message: `${records.length} records across ${data.scanned?.eventCount || 0} scanned events.${truncatedText}${requestText}`,
+          },
+        }));
+      });
     } catch (error) {
       setActivityTraces((current) => ({
         ...current,
@@ -2098,7 +2208,7 @@ export default function Home() {
     setSelectedGuestIds(new Set());
     setAllMatchingGuestsSelected(false);
     lastSelectedGuestIdRef.current = "";
-  }, [selectedEventIdsKey, guestStatusFilterKey, debouncedGuestSearch, guestTagFilterKey, state.filters.guestHasNotes, state.filters.guestAttendedGreaterThan, guestAnswerFilterKey]);
+  }, [selectedEventIdsKey, guestStatusFilterKey, debouncedGuestSearch, guestTagFilterKey, guestLatestTagFilterKey, state.filters.guestHasNotes, state.filters.guestAttendedGreaterThan, guestAnswerFilterKey]);
 
   // EVENT_SWITCH_DIAGNOSTICS: records the first React commit containing the newly selected event shell.
   useLayoutEffect(() => {
@@ -2123,7 +2233,7 @@ export default function Home() {
         priority: !event.guestsLoaded,
       });
     });
-  }, [sessionStatus, selectedEventIdsKey, activeEventTab, guestStatusFilterKey, debouncedGuestSearch, guestTagFilterKey, state.filters.guestHasNotes, state.filters.guestAttendedGreaterThan, guestAnswerFilterKey, guestSortField, guestDateSortDirection]);
+  }, [sessionStatus, selectedEventIdsKey, activeEventTab, guestStatusFilterKey, debouncedGuestSearch, guestTagFilterKey, guestLatestTagFilterKey, state.filters.guestHasNotes, state.filters.guestAttendedGreaterThan, guestAnswerFilterKey, guestSortField, guestDateSortDirection]);
 
   useEffect(() => {
     if (sessionStatus !== "ready" || activeEventTab !== "overview") return;
@@ -2145,30 +2255,7 @@ export default function Home() {
     if (activeEventTab !== "overview" || pending.some((event) => !event.guestsLoaded || event.guestQueryLoading || event.guestHistoryLoading || event.guestHistoryLoaded === false)) return;
     const timer = window.setTimeout(() => pending.forEach((event) => void loadEventAnalytics(event.id)), 120);
     return () => window.clearTimeout(timer);
-  }, [sessionStatus, selectedEventIdsKey, selectedEvents.map((event) => `${event.analyticsLoaded}:${event.analyticsLoading}:${Array.isArray(event.guestAnalyticsQuestions)}:${Array.isArray(event.guestAnalyticsAllQuestions)}:${event.guestsLoaded}:${event.guestQueryLoading}:${event.guestHistoryLoaded}:${event.guestHistoryLoading}`).join("|"), activeEventTab]);
-
-  useEffect(() => {
-    if (sessionStatus !== "ready") return;
-    const hasActiveGuestQuery = state.filters.guestStatuses.length > 0
-      || state.filters.guestExcludedStatuses.length > 0
-      || Boolean(debouncedGuestSearch.trim())
-      || state.filters.guestTags.length > 0
-      || state.filters.guestExcludedTags.length > 0
-      || state.filters.guestHasNotes
-      || state.filters.guestAttendedGreaterThan !== "";
-    if (hasActiveGuestQuery) return;
-    const warming = selectedEvents.filter((event) => event.source === "luma" && event.analyticsLoaded && !event.guestSnapshotReady && !event.guestSnapshotWarming);
-    if (!warming.length) return;
-    const timer = window.setTimeout(() => {
-      warming.forEach((event) => void loadEventGuests(event.id, {
-          status: state.filters.guestStatus,
-          search: debouncedGuestSearch,
-          tags: state.filters.guestTags,
-          background: true,
-        }));
-    }, 220);
-    return () => window.clearTimeout(timer);
-  }, [sessionStatus, selectedEventIdsKey, selectedEvents.map((event) => `${event.analyticsLoaded}:${event.guestSnapshotReady}:${event.guestSnapshotWarming}`).join("|"), guestStatusFilterKey, debouncedGuestSearch, guestTagFilterKey, state.filters.guestHasNotes, state.filters.guestAttendedGreaterThan, guestAnswerFilterKey]);
+  }, [sessionStatus, selectedEventIdsKey, selectedEvents.map((event) => `${event.analyticsLoaded}:${event.analyticsLoading}:${Array.isArray(event.guestAnalyticsQuestions)}:${Array.isArray(event.guestAnalyticsAllQuestions)}:${Array.isArray(event.guestTagDistribution)}:${event.guestsLoaded}:${event.guestQueryLoading}:${event.guestHistoryLoaded}:${event.guestHistoryLoading}`).join("|"), activeEventTab]);
 
   // EVENT_SWITCH_DIAGNOSTICS: completes after the active tab's data has committed and reached a paint frame.
   useEffect(() => {
@@ -2263,6 +2350,8 @@ export default function Home() {
       draft.filters.guestTags = [];
       draft.filters.guestTagMode = "any";
       draft.filters.guestExcludedTags = [];
+      draft.filters.guestLatestTagId = "";
+      draft.filters.guestLatestTagLabel = "";
       draft.filters.guestAnswerQuestion = "";
       draft.filters.guestAnswer = "";
       draft.filters.guestAnswerKey = "";
@@ -2661,7 +2750,8 @@ export default function Home() {
 
   useEffect(() => {
     if (!profilePanelOpen || selectedPerson?.source !== "luma" || selectedTrace.status !== "idle") return;
-    tracePersonActivity(selectedPerson);
+    const timeout = window.setTimeout(() => void tracePersonActivity(selectedPerson), 80);
+    return () => window.clearTimeout(timeout);
   }, [profilePanelOpen, selectedPerson?.id, selectedPerson?.source, selectedTrace.status]);
 
   useEffect(() => {
@@ -2778,7 +2868,6 @@ export default function Home() {
         invitationOutcomeBefore,
         { ...optimisticGuest, isReferred: isReferredPerson },
       );
-      draft.selectedPersonId = personId;
     });
     if (multiEventMode && uniqueWorkspaceStats) {
       setMultiEventStatsByKey((current) => ({
@@ -2886,6 +2975,8 @@ export default function Home() {
     guestTags: [...state.filters.guestTags],
     guestTagMode: state.filters.guestTagMode,
     guestExcludedTags: [...state.filters.guestExcludedTags],
+    guestLatestTagId: state.filters.guestLatestTagId,
+    guestLatestTagLabel: state.filters.guestLatestTagLabel,
     guestHasNotes: state.filters.guestHasNotes,
     guestAttendedGreaterThan: state.filters.guestAttendedGreaterThan === ""
       ? null
@@ -2979,6 +3070,8 @@ export default function Home() {
             guestTags: selection?.guestTags,
             guestTagMode: selection?.guestTagMode,
             guestExcludedTags: selection?.guestExcludedTags,
+            guestLatestTagId: selection?.guestLatestTagId,
+            guestLatestTagLabel: selection?.guestLatestTagLabel,
             guestHasNotes: selection?.guestHasNotes,
             guestAttendedGreaterThan: selection?.guestAttendedGreaterThan,
             guestAnswerQuestion: selection?.guestAnswerQuestion,
@@ -3119,6 +3212,8 @@ export default function Home() {
           guestTags: selection?.guestTags,
           guestTagMode: selection?.guestTagMode,
           guestExcludedTags: selection?.guestExcludedTags,
+          guestLatestTagId: selection?.guestLatestTagId,
+          guestLatestTagLabel: selection?.guestLatestTagLabel,
           guestHasNotes: selection?.guestHasNotes,
           guestAttendedGreaterThan: selection?.guestAttendedGreaterThan,
           guestAnswerQuestion: selection?.guestAnswerQuestion,
@@ -3663,7 +3758,22 @@ export default function Home() {
     }
     const deliveryCount = recipientCount * lumaTargets.length;
     const targetLabel = lumaTargets.length === 1 ? lumaTargets[0].title : `${lumaTargets.length} selected events`;
+    const refreshBeforeSending = window.confirm(
+      `Refresh the guest list for ${targetLabel} before sending?\n\nOK: Refresh first, then send.\nCancel: Send now without refreshing.`,
+    );
     try {
+      if (refreshBeforeSending) {
+        for (const event of lumaTargets) {
+          const refreshed = await loadEventGuests(event.id, { force: true });
+          if (!refreshed) {
+            setApiState({
+              status: "error",
+              message: `Could not refresh ${event.title}, so no invitations were sent.`,
+            });
+            return false;
+          }
+        }
+      }
       const result = await postLumaAction({
         action: "sendAudienceInvites",
         confirm: LIVE_WRITE_CONFIRMATION,
@@ -3672,18 +3782,11 @@ export default function Home() {
         message,
       }, apiFetch);
       invalidateMultiEventStats();
-      let refreshedEventCount = 0;
-      for (const event of lumaTargets) {
-        const refreshed = await loadEventGuests(event.id, { force: true });
-        if (refreshed) refreshedEventCount += 1;
-      }
-      await loadInviteMetadata("events", { force: true }).catch(() => {});
-      const refreshComplete = refreshedEventCount === lumaTargets.length;
       setApiState({
-        status: refreshComplete ? "live" : "error",
-        message: refreshComplete
-          ? `Sent ${Number(result.invited || deliveryCount).toLocaleString()} invitations across ${targetLabel} and refreshed the event guest data.`
-          : `Sent ${Number(result.invited || deliveryCount).toLocaleString()} invitations across ${targetLabel}, but only refreshed ${refreshedEventCount} of ${lumaTargets.length} events.`,
+        status: "live",
+        message: refreshBeforeSending
+          ? `Refreshed ${targetLabel}, then sent ${Number(result.invited || deliveryCount).toLocaleString()} invitations.`
+          : `Sent ${Number(result.invited || deliveryCount).toLocaleString()} invitations across ${targetLabel} without refreshing the guest list.`,
       });
       return true;
     } catch (error) {
@@ -3752,7 +3855,6 @@ export default function Home() {
       if (!person) return;
       if (person.groups.includes(groupId)) person.groups = person.groups.filter((id) => id !== groupId);
       else person.groups.push(groupId);
-      draft.selectedPersonId = personId;
     });
   };
 
@@ -3760,21 +3862,26 @@ export default function Home() {
     if (result.type !== "person") return;
     workspaceUrlModeRef.current = "push";
     pendingProfileIdRef.current = "";
-    updateState((draft) => {
+    setState((current) => {
+      let people = current.people;
       if (result.person) {
-        const existingPerson = draft.people.find((person) => person.id === result.person.id || (person.email && person.email.toLocaleLowerCase() === result.person.email?.toLocaleLowerCase()));
+        const existingPerson = current.people.find((person) => person.id === result.person.id || (person.email && person.email.toLocaleLowerCase() === result.person.email?.toLocaleLowerCase()));
         const mergedPerson = mergePersonRecord(existingPerson, result.person);
-        draft.people = existingPerson
-          ? draft.people.map((person) => person.id === existingPerson.id ? mergedPerson : person)
-          : [...draft.people, mergedPerson];
+        people = existingPerson
+          ? current.people.map((person) => person.id === existingPerson.id ? mergedPerson : person)
+          : [...current.people, mergedPerson];
       }
-      draft.selectedPersonId = result.id;
-      if (result.eventId) {
-        draft.selectedEventId = result.eventId;
-        draft.selectedEventIds = [result.eventId];
-        draft.filters.event = "all";
-      }
+      return {
+        ...current,
+        people,
+        ...(result.eventId ? {
+          selectedEventId: result.eventId,
+          selectedEventIds: [result.eventId],
+          filters: { ...current.filters, event: "all" },
+        } : {}),
+      };
     });
+    setProfilePersonId(result.id);
     setProfilePanelOpen(true);
     closeUniversalSearch();
   };
@@ -4137,6 +4244,17 @@ export default function Home() {
                         </button>
                       </div>
                     ) : null}
+                    {state.filters.guestLatestTagId ? (
+                      <div className="guest-answer-filter" title={`Latest profile tag: ${state.filters.guestLatestTagLabel || "Untagged"}`}>
+                        <span>
+                          <small>Latest profile tag</small>
+                          <strong>{state.filters.guestLatestTagLabel || "Untagged"}</strong>
+                        </span>
+                        <button type="button" aria-label="Clear latest profile tag filter" onClick={clearGuestLatestTagFilter}>
+                          <X size={13} aria-hidden="true" />
+                        </button>
+                      </div>
+                    ) : null}
                     <StatusFilter
                       options={guestFilterOptions}
                       included={state.filters.guestStatuses}
@@ -4269,7 +4387,7 @@ export default function Home() {
                           const selectPerson = () => openPerson(person.id);
                           return (
                           <tr
-                            className={`guest-row ${state.selectedPersonId === person.id ? "selected" : ""} ${allMatchingGuestsSelected || selectedGuestIds.has(person.id) ? "bulk-selected" : ""}`}
+                            className={`guest-row ${selectedPerson?.id === person.id ? "selected" : ""} ${allMatchingGuestsSelected || selectedGuestIds.has(person.id) ? "bulk-selected" : ""}`}
                             key={person.id}
                             tabIndex={0}
                             aria-label={`View ${person.name}'s profile`}
@@ -4475,6 +4593,7 @@ export default function Home() {
               onOpenPerson={openAnalyticsResponsePerson}
               selectedAnswerGroups={state.filters.guestAnswerGroups}
               onOpenRespondents={(question, option, options) => openAnalyticsRespondents(question, option, analyticsCohort, options)}
+              onOpenTag={openAnalyticsTagDistribution}
               onViewSelectedRespondents={viewSelectedAnalyticsRespondents}
               onClearSelectedRespondents={clearGuestAnswerFilter}
               onFilter={openAnalyticsGuestFilter}
@@ -7034,14 +7153,21 @@ function InviteTab({
     excludeTagIds: (state.invite.excludeTags || []).map((name) => tagIdByName.get(name)).filter(Boolean),
     includeSuperTagIds: (state.invite.includeSuperTags || []).map((name) => superTagIdByName.get(name)).filter(Boolean),
     excludeSuperTagIds: (state.invite.excludeSuperTags || []).map((name) => superTagIdByName.get(name)).filter(Boolean),
-    includeEventCohorts: Object.entries(state.invite.includeEventCohorts || {}).map(([eventId, selection]: [string, any]) => ({
-      eventId,
-      cohort: selection.cohort,
-    })),
+    includeEventCohorts: Object.entries(state.invite.includeEventCohorts || {})
+      .filter(([eventId]) => !(state.invite.includeEventAnswers || []).some((rule) => rule.eventId === eventId))
+      .map(([eventId, selection]: [string, any]) => ({
+        eventId,
+        cohort: selection.cohort,
+      })),
     excludeEventCohorts: Object.entries(state.invite.excludeEventCohorts || {}).map(([eventId, selection]: [string, any]) => ({
       eventId,
       cohort: selection.cohort,
     })),
+    includeEventAnswers: (state.invite.includeEventAnswers || []).flatMap((rule) => {
+      const cohort = state.invite.includeEventCohorts?.[rule.eventId]?.cohort;
+      return cohort ? [{ ...rule, cohort }] : [];
+    }),
+    excludeEventAnswers: state.invite.excludeEventAnswers || [],
     excludeExistingEventIds: targetEvents.filter((event) => event.source === "luma").map((event) => event.id),
     includePersonIds: state.invite.includePeople || [],
     excludePersonIds: state.invite.excludePeople || [],
@@ -7052,6 +7178,8 @@ function InviteTab({
     state.invite.excludeSuperTags,
     state.invite.includeEventCohorts,
     state.invite.excludeEventCohorts,
+    state.invite.includeEventAnswers,
+    state.invite.excludeEventAnswers,
     state.invite.includePeople,
     state.invite.excludePeople,
     targetEvents,
@@ -7140,6 +7268,7 @@ function InviteTab({
     const hasIncludes = audienceCriteria.includeTagIds.length
       || audienceCriteria.includeSuperTagIds.length
       || audienceCriteria.includeEventCohorts.length
+      || audienceCriteria.includeEventAnswers.length
       || audienceCriteria.includePersonIds.length;
     if (!hasIncludes) {
       setResolvedAudience({ loading: false, loadingMore: false, countLoading: false, people: [], total: 0, matchedTotal: 0, nextCursor: null, error: "" });
@@ -7210,6 +7339,8 @@ function InviteTab({
   const excludeSuperTags = state.invite.excludeSuperTags || [];
   const includeEventCohorts = state.invite.includeEventCohorts || {};
   const excludeEventCohorts = state.invite.excludeEventCohorts || {};
+  const includeEventAnswers = state.invite.includeEventAnswers || [];
+  const excludeEventAnswers = state.invite.excludeEventAnswers || [];
   const directoryRows = directoryQuery.trim()
     ? directorySearch.results
     : resolvedAudience.people;
@@ -7280,6 +7411,10 @@ function InviteTab({
       const next = { ...selected };
       delete next[event.id];
       onSetInvite(key, next);
+      if (mode === "add") {
+        onSetInvite("includeEventAnswers", (state.invite.includeEventAnswers || []).filter((rule) => rule.eventId !== event.id));
+        onSetInvite("excludeEventAnswers", (state.invite.excludeEventAnswers || []).filter((rule) => rule.eventId !== event.id));
+      }
       return;
     }
     setBuilderError("");
@@ -7298,6 +7433,7 @@ function InviteTab({
   const hasSubtractions = excludeTags.length > 0
     || excludeSuperTags.length > 0
     || Object.keys(excludeEventCohorts).length > 0
+    || excludeEventAnswers.length > 0
     || (state.invite.excludePeople || []).length > 0;
   const confirmationEvents = targetEvents.filter((event) => event.source === "luma");
   const confirmationInvitationCount = audienceTotal * confirmationEvents.length;
@@ -7309,9 +7445,15 @@ function InviteTab({
   const additionSummary = [
     ...includeSuperTags.map((name) => ({ label: name, detail: "Supertag" })),
     ...includeTags.map((name) => ({ label: name, detail: "Tag group" })),
-    ...Object.entries(includeEventCohorts).map(([eventId, selection]: [string, any]) => ({
-      label: (eventById.get(eventId) as any)?.title || "Historical event",
-      detail: `${selection.cohort} group`,
+    ...Object.entries(includeEventCohorts)
+      .filter(([eventId]) => !includeEventAnswers.some((rule) => rule.eventId === eventId))
+      .map(([eventId, selection]: [string, any]) => ({
+        label: (eventById.get(eventId) as any)?.title || "Historical event",
+        detail: `${selection.cohort} group`,
+      })),
+    ...includeEventAnswers.map((selection) => ({
+      label: selection.answer,
+      detail: `${(eventById.get(selection.eventId) as any)?.title || "Historical event"} · only ${selection.question}`,
     })),
     ...((state.invite.includePeople || []).length
       ? [{ label: `${state.invite.includePeople.length.toLocaleString()} individual ${state.invite.includePeople.length === 1 ? "person" : "people"}`, detail: "Manually added" }]
@@ -7324,16 +7466,20 @@ function InviteTab({
       label: (eventById.get(eventId) as any)?.title || "Historical event",
       detail: `${selection.cohort} group`,
     })),
+    ...excludeEventAnswers.map((selection) => ({
+      label: selection.answer,
+      detail: `${(eventById.get(selection.eventId) as any)?.title || "Historical event"} · ${selection.question}`,
+    })),
     ...((state.invite.excludePeople || []).length
       ? [{ label: `${state.invite.excludePeople.length.toLocaleString()} individual ${state.invite.excludePeople.length === 1 ? "person" : "people"}`, detail: "Manually subtracted" }]
       : []),
   ];
   const clearStageSelections = (mode) => {
     if (mode === "add") {
-      onSetInvite({ includeTags: [], includeSuperTags: [], includeEventCohorts: {}, includePeople: [] });
+      onSetInvite({ includeTags: [], includeSuperTags: [], includeEventCohorts: {}, includeEventAnswers: [], excludeEventAnswers: [], includePeople: [] });
       return;
     }
-    onSetInvite({ excludeTags: [], excludeSuperTags: [], excludeEventCohorts: {}, excludePeople: [] });
+    onSetInvite({ excludeTags: [], excludeSuperTags: [], excludeEventCohorts: {}, excludeEventAnswers: [], excludePeople: [] });
   };
   const goToStage = (nextStage) => {
     setStage(nextStage);
@@ -7428,6 +7574,15 @@ function InviteTab({
             <div className="invite-stage-head"><div><p className="eyebrow">Step 1</p><h3>Add people by group</h3><p>Build an audience from tag groups, past events, or individual people.</p></div></div>
             <TagAudienceBubbles groups={tagGroups} superTags={superTagGroups} selected={includeTags} selectedSuperTags={includeSuperTags} loading={tagsLoading} activeLoading={tagLoading} mode="add" onSelect={selectTagGroup} onOpenTagSettings={onOpenTagSettings} />
             <EventAudiencePicker events={state.events} selections={includeEventCohorts} activeLoading={eventLoading} mode="add" cohortCounts={metadata.eventCounts} countsStatus={metadata.eventsStatus} countsError={metadata.eventsError} onSelect={selectEventCohort} />
+            <RegistrationAnswerRules
+              mode="add"
+              events={state.events}
+              includedEventCohorts={includeEventCohorts}
+              cohortCounts={metadata.eventCounts}
+              rules={includeEventAnswers}
+              request={request}
+              onChange={(rules) => onSetInvite("includeEventAnswers", rules)}
+            />
             <div className="invite-stage-actions"><div className="invite-stage-progress"><strong>{resolvedAudience.countLoading ? "…" : audienceTotal.toLocaleString()}</strong><span>people ready</span></div><button className="button primary" type="button" title="Continue to subtract people" disabled={!audienceTotal || resolvedAudience.countLoading} onClick={() => goToStage("subtract")}>Continue <ArrowRight size={15} aria-hidden="true" /></button></div>
           </>
         ) : null}
@@ -7437,6 +7592,15 @@ function InviteTab({
             <div className="invite-stage-head"><div><p className="eyebrow">Step 2</p><h3>Subtract people</h3><p>Remove tag groups, past-event groups, or individual people.</p></div></div>
             <TagAudienceBubbles groups={tagGroups.filter((group) => !includeTags.includes(group.name))} superTags={superTagGroups.filter((group) => !includeSuperTags.includes(group.name))} selected={excludeTags} selectedSuperTags={excludeSuperTags} loading={tagsLoading} activeLoading={tagLoading} mode="subtract" onSelect={selectTagGroup} onOpenTagSettings={onOpenTagSettings} />
             <EventAudiencePicker events={state.events} selections={excludeEventCohorts} activeLoading={eventLoading} mode="subtract" cohortCounts={metadata.eventCounts} countsStatus={metadata.eventsStatus} countsError={metadata.eventsError} onSelect={selectEventCohort} />
+            <RegistrationAnswerRules
+              mode="subtract"
+              events={state.events}
+              includedEventCohorts={includeEventCohorts}
+              cohortCounts={metadata.eventCounts}
+              rules={excludeEventAnswers}
+              request={request}
+              onChange={(rules) => onSetInvite("excludeEventAnswers", rules)}
+            />
             <div className="invite-stage-actions"><button className="button ghost" type="button" onClick={() => goToStage("add")}>Back</button><div className="invite-stage-progress"><strong>{resolvedAudience.countLoading ? "…" : audienceTotal.toLocaleString()}</strong><span>people remaining</span></div><button className="button primary" type="button" title="Continue to message" disabled={!audienceTotal || resolvedAudience.countLoading} onClick={() => goToStage("message")}>Continue <ArrowRight size={15} aria-hidden="true" /></button></div>
           </>
         ) : null}
@@ -7642,6 +7806,168 @@ function TagAudienceBubbles({ groups, superTags = [], selected, selectedSuperTag
       ))}
     </div>
   ) : <div className="empty-state compact">No tag groups have people yet.</div>;
+}
+
+function RegistrationAnswerRules({ mode, events, includedEventCohorts, cohortCounts = {}, rules, request, onChange }) {
+  const includedEntries = Object.entries(includedEventCohorts || {}) as Array<[string, any]>;
+  const conditionCount = new Set(rules.map((rule) => `${rule.eventId}\u0000${rule.question.toLocaleLowerCase()}`)).size;
+  if (!includedEntries.length) {
+    return mode === "subtract" ? null : (
+      <section className="invite-answer-rules-empty">
+        <ListFilter size={18} aria-hidden="true" />
+        <div><strong>Want a more specific audience?</strong><span>Select a past event above, then narrow it by registration answers.</span></div>
+      </section>
+    );
+  }
+  return (
+    <section className={`invite-answer-rules invite-answer-rules-${mode}`}>
+      <div className="invite-answer-rules-heading">
+        <div><p className="eyebrow">Registration answers</p><h3>{mode === "add" ? "Narrow selected event groups" : "Exclude matching answers"}</h3></div>
+        <span>{conditionCount ? `${conditionCount} active ${conditionCount === 1 ? "condition" : "conditions"}` : "Optional"}</span>
+      </div>
+      <p className="invite-answer-rules-description">{mode === "add" ? "Choose exactly who from each event belongs in this audience." : "Remove people from an added event when their answers match."}</p>
+      <div className="invite-answer-event-list">
+        {includedEntries.map(([eventId, selection], index) => {
+          const sourceEvent = events.find((event) => event.id === eventId);
+          if (!sourceEvent) return null;
+          return (
+            <RegistrationAnswerEventCard
+              key={eventId}
+              mode={mode}
+              event={sourceEvent}
+              cohort={selection.cohort}
+              sourceCount={eventCohortCount(sourceEvent, selection.cohort, cohortCounts[eventId])}
+              rules={rules.filter((rule) => rule.eventId === eventId)}
+              allRules={rules}
+              defaultOpen={index === 0 && mode === "add"}
+              request={request}
+              onChange={onChange}
+            />
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function RegistrationAnswerEventCard({ mode, event, cohort, sourceCount, rules, allRules, defaultOpen, request, onChange }) {
+  const [open, setOpen] = useState(defaultOpen || rules.length > 0);
+  const [questions, setQuestions] = useState<any[]>([]);
+  const [questionId, setQuestionId] = useState("");
+  const [answerSearch, setAnswerSearch] = useState("");
+  const [status, setStatus] = useState("idle");
+  const [error, setError] = useState("");
+  const [loadVersion, setLoadVersion] = useState(0);
+
+  useEffect(() => {
+    if (!open) return;
+    const controller = new AbortController();
+    setStatus("loading");
+    setError("");
+    void (async () => {
+      try {
+        const params = new URLSearchParams({ event_id: event.id, questions: "1" });
+        const response = await request(`/api/audience/events?${params.toString()}`, { cache: "no-store", signal: controller.signal });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Unable to load registration questions.");
+        if (controller.signal.aborted) return;
+        const nextQuestions = data.questions || [];
+        const firstRuleQuestion = rules[0]?.question.toLocaleLowerCase();
+        const initialQuestion = nextQuestions.find((question) => question.label.toLocaleLowerCase() === firstRuleQuestion) || nextQuestions[0];
+        setQuestions(nextQuestions);
+        setQuestionId(initialQuestion?.id || "");
+        setStatus("ready");
+      } catch (loadError: any) {
+        if (!controller.signal.aborted) {
+          setStatus("error");
+          setError(loadError.message || "Unable to load registration questions.");
+        }
+      }
+    })();
+    return () => controller.abort();
+  }, [open, event.id, loadVersion]);
+
+  const question = questions.find((item) => item.id === questionId) || null;
+  const normalizedSearch = answerSearch.trim().toLocaleLowerCase();
+  const visibleOptions = (question?.options || []).filter((option) => !normalizedSearch || option.label.toLocaleLowerCase().includes(normalizedSearch));
+  const questionDenominator = (question?.options || []).reduce((total, option) => total + Number(cohort === "attended" ? option.checkedInCount : option.count || 0), 0);
+  const selectedForQuestion = rules.filter((rule) => rule.question.toLocaleLowerCase() === question?.label?.toLocaleLowerCase());
+  const allAnswersSelected = selectedForQuestion.some((rule) => rule.answerKey === ANY_REGISTRATION_ANSWER_KEY);
+  const toggleOption = (option) => {
+    if (!question) return;
+    const existing = allRules.find((rule) => rule.eventId === event.id && rule.question.toLocaleLowerCase() === question.label.toLocaleLowerCase() && rule.answerKey === option.answerKey);
+    const withoutWildcard = allRules.filter((rule) => !(rule.eventId === event.id && rule.question.toLocaleLowerCase() === question.label.toLocaleLowerCase() && rule.answerKey === ANY_REGISTRATION_ANSWER_KEY));
+    onChange(existing
+      ? allRules.filter((rule) => rule !== existing)
+      : [...withoutWildcard, { eventId: event.id, question: question.label, answer: option.label, answerKey: option.answerKey }]);
+  };
+  const toggleAllAnswers = () => {
+    if (!question) return;
+    const otherRules = allRules.filter((rule) => !(rule.eventId === event.id && rule.question.toLocaleLowerCase() === question.label.toLocaleLowerCase()));
+    onChange(allAnswersSelected
+      ? otherRules
+      : [...otherRules, { eventId: event.id, question: question.label, answer: ANY_REGISTRATION_ANSWER_LABEL, answerKey: ANY_REGISTRATION_ANSWER_KEY }]);
+  };
+  const removeRule = (targetRule) => onChange(allRules.filter((rule) => rule !== targetRule));
+  const groupedRules: Array<[string, string]> = [...new Map<string, string>(rules.map((rule) => [rule.question.toLocaleLowerCase(), rule.question])).entries()];
+
+  return (
+    <article className={`invite-answer-event-card ${open ? "open" : ""} ${rules.length ? "filtered" : ""}`}>
+      <div className="invite-answer-event-summary">
+        <EventArtwork event={event} />
+        <div className="invite-answer-event-identity"><strong>{event.title}</strong><span><span className="invite-answer-cohort">{cohort}</span>{sourceCount === null ? "Audience count unavailable" : `${sourceCount.toLocaleString()} ${cohort}`}</span></div>
+        <div className="invite-answer-event-status"><strong>{groupedRules.length || "All"}</strong><span>{groupedRules.length ? groupedRules.length === 1 ? "condition" : "conditions" : "included"}</span></div>
+        <button className="invite-answer-event-toggle" type="button" aria-expanded={open} onClick={() => setOpen((current) => !current)}>{open ? "Done" : rules.length ? "Edit filters" : mode === "add" ? "Narrow audience" : "Add exclusion"}<ChevronDown className={open ? "rotate-180" : ""} size={15} /></button>
+      </div>
+
+      {rules.length ? (
+        <div className="invite-answer-condition-groups">
+          {groupedRules.map(([questionKey, questionLabel], groupIndex) => (
+            <div className="invite-answer-condition-group" key={questionKey}>
+              {groupIndex ? <span className="invite-answer-logic">{mode === "subtract" ? "OR" : "AND"}</span> : null}
+              <span className="invite-answer-condition-question">{questionLabel}</span>
+              <div>{rules.filter((rule) => rule.question.toLocaleLowerCase() === questionKey).map((rule, answerIndex) => <span className="invite-answer-condition-wrap" key={rule.answerKey}>{answerIndex ? <em>OR</em> : null}<button type="button" onClick={() => removeRule(rule)}>{rule.answer}<X size={11} aria-label={`Remove ${rule.answer}`} /></button></span>)}</div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {open ? (
+        <div className="invite-answer-browser">
+          {status === "loading" ? <div className="invite-answer-browser-state"><span className="loading-spinner" /> Loading registration answers…</div> : null}
+          {status === "error" ? <div className="invite-answer-browser-error" role="alert">{error}<button type="button" onClick={() => setLoadVersion((current) => current + 1)}>Try again</button></div> : null}
+          {status === "ready" && !questions.length ? <div className="invite-answer-browser-state">This event has no grouped registration answers.</div> : null}
+          {status === "ready" && questions.length ? (
+            <>
+              <div className="invite-answer-browser-toolbar">
+                <label><span>Question</span><select value={questionId} onChange={(changeEvent) => { setQuestionId(changeEvent.target.value); setAnswerSearch(""); }}>{questions.map((item) => <option value={item.id} key={item.id}>{item.label} · {item.responseCount}</option>)}</select></label>
+                <label className="invite-answer-search"><Search size={15} aria-hidden="true" /><input type="search" value={answerSearch} placeholder="Find an answer" onChange={(changeEvent) => setAnswerSearch(changeEvent.target.value)} />{answerSearch ? <button type="button" aria-label="Clear answer search" onClick={() => setAnswerSearch("")}><X size={13} /></button> : null}</label>
+              </div>
+              <div className="invite-answer-browser-meta">
+                <span>Choose one or more answers</span>
+                <span className="invite-answer-browser-meta-actions">
+                  <span>{allAnswersSelected ? `All ${(question?.options || []).length} selected` : selectedForQuestion.length ? `${selectedForQuestion.length} selected · OR` : `${visibleOptions.length} answers`}</span>
+                  <button type="button" onClick={toggleAllAnswers}>{allAnswersSelected ? "Clear all" : `Select all ${(question?.options || []).length}`}</button>
+                </span>
+              </div>
+              <div className="invite-answer-options">
+                {visibleOptions.map((option) => {
+                  const count = Number(cohort === "attended" ? option.checkedInCount : option.count) || 0;
+                  const percent = questionDenominator ? Math.round((count / questionDenominator) * 100) : 0;
+                  const active = allAnswersSelected || selectedForQuestion.some((rule) => rule.answerKey === option.answerKey);
+                  return <button className={active ? "active" : ""} type="button" aria-pressed={active} key={option.answerKey} onClick={() => toggleOption(option)}><span className="invite-answer-option-check">{active ? <Check size={13} /> : null}</span><span><strong>{option.label}</strong><small>{percent}% of responses</small></span><em>{count.toLocaleString()}</em></button>;
+                })}
+                {!visibleOptions.length ? <div className="invite-answer-browser-state">No answers match “{answerSearch}”.</div> : null}
+              </div>
+              <p className="invite-answer-logic-note">{mode === "subtract"
+                ? <>Every selected answer uses <strong>OR</strong>: anyone matching any condition is removed. Recipient results update automatically.</>
+                : <>Answers to this question use <strong>OR</strong>. Conditions from different questions use <strong>AND</strong>. Recipient results update automatically.</>}</p>
+            </>
+          ) : null}
+        </div>
+      ) : null}
+    </article>
+  );
 }
 
 function EventAudiencePicker({ events, selections, activeLoading, mode, cohortCounts = {}, countsStatus = "idle", countsError = "", onSelect }) {
@@ -8068,7 +8394,7 @@ function guestAnswerGroupKey(group: Partial<WorkspaceGuestAnswerGroup>) {
   return `${group.question || ""}\u0000${group.answerKey || ""}\u0000${group.answer || ""}\u0000${group.checkedInOnly ? 1 : 0}`;
 }
 
-function AnalyticsTab({ event, analytics, loading = false, uniquePeople = false, cohort = "all", onCohortChange, onOpenPerson, selectedAnswerGroups = [], onOpenRespondents, onViewSelectedRespondents, onClearSelectedRespondents, onFilter }) {
+function AnalyticsTab({ event, analytics, loading = false, uniquePeople = false, cohort = "all", onCohortChange, onOpenPerson, selectedAnswerGroups = [], onOpenRespondents, onOpenTag, onViewSelectedRespondents, onClearSelectedRespondents, onFilter }) {
   if (!event) return <section className="analytics-tab panel"><div className="empty-state">Select an event to view analytics.</div></section>;
   if (loading) {
     return (
@@ -8129,6 +8455,9 @@ function AnalyticsTab({ event, analytics, loading = false, uniquePeople = false,
       overlay: { label: "New referrals", value: Number(analytics.newReferrals) || 0, filter: "new_referrals" },
     },
   ];
+  const tagDistribution = Array.isArray(analytics.tagDistribution) ? analytics.tagDistribution : [];
+  const taggedAttendeeTotal = tagDistribution.reduce((total, tag) => total + (Number(tag.count) || 0), 0);
+  const largestTagCount = Math.max(0, ...tagDistribution.map((tag) => Number(tag.count) || 0));
   return (
     <section className="analytics-tab panel" role="tabpanel" aria-label="Analytics">
       <header className="event-tab-heading">
@@ -8222,6 +8551,40 @@ function AnalyticsTab({ event, analytics, loading = false, uniquePeople = false,
               </li>
             ))}
           </ol>
+        </article>
+
+        <article className="analytics-card tag-distribution-card">
+          <div className="chart-heading">
+            <div><p className="eyebrow">Attendance</p><h3><Tag size={17} aria-hidden="true" /> Tag distribution</h3></div>
+            <span className="tag-distribution-total">{taggedAttendeeTotal} {uniquePeople ? "check-ins" : "checked in"}</span>
+          </div>
+          {tagDistribution.length ? (
+            <ol className="tag-distribution-chart">
+              {tagDistribution.map((tag) => {
+                const count = Number(tag.count) || 0;
+                const share = taggedAttendeeTotal ? Math.round((count / taggedAttendeeTotal) * 100) : 0;
+                const width = largestTagCount ? Math.max(count ? 8 : 0, Math.round((count / largestTagCount) * 100)) : 0;
+                return (
+                  <li key={tag.id || tag.label} style={tagChipStyle(tag.color)}>
+                    <button
+                      className="tag-distribution-filter"
+                      type="button"
+                      aria-label={`View ${count} checked-in ${count === 1 ? "person" : "people"} whose latest profile tag is ${tag.label}`}
+                      onClick={() => onOpenTag(tag)}
+                    >
+                    <span className="tag-distribution-copy">
+                      <span className="tag-distribution-label">{tag.label}</span>
+                      <span><strong>{count}</strong><em>{share}%</em></span>
+                    </span>
+                    <span className="tag-distribution-track" aria-hidden="true"><i style={{ width: `${width}%` }} /></span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ol>
+          ) : (
+            <div className="tag-distribution-empty">No checked-in attendees yet.</div>
+          )}
         </article>
       </div>
 
@@ -8626,17 +8989,17 @@ function ProfilePanel({ state, person, trace, lumaCheckInGuestKey, reinvitingGue
     return () => document.removeEventListener("pointerdown", closeActivityMenu, true);
   }, []);
 
-  if (!person || !hasProfileContent(state, person)) return null;
+  const profile = useMemo(
+    () => buildProfileViewModel(state, person, trace?.records || []),
+    [state.events, state.selectedEventId, person, trace?.records],
+  );
+  if (!person || !profile) return null;
 
-  const history = getPersonHistory(state, person.id);
-  const bio = profileBio(person, state);
-  const socialLinks = profileSocialLinks(person, state);
-  const currentRecord = currentProfileRecord(state, person);
+  const { history, bio, socialLinks, currentRecord, answerGroups } = profile;
   const currentStatus = currentRecord?.guest.status;
   const loadedActivityRecords = activityRecordsFromHistory(history.records);
   const traceRan = ["loading", "ready", "error"].includes(trace?.status);
   const traceRecords = traceRan ? trace?.records || [] : loadedActivityRecords;
-  const answerGroups = registrationAnswerGroups(person, state, trace?.records || []);
   const answerGroupsLoading = person.source === "luma" && ["idle", "loading"].includes(trace?.status);
   const filteredTraceRecords = traceRecords.filter((record) => activityFilters.includes(activityRecordStatus(record)));
   const activityFilterLabel = activityFilters.length === activityFilterOptions.length
@@ -9730,6 +10093,7 @@ function mergeLumaGuests(current, lumaData, { append = false, preserveView = fal
           guestStats: lumaData.stats || event.guestStats,
           guestAnalyticsQuestions: lumaData.analyticsQuestions || event.guestAnalyticsQuestions || [],
           guestAnalyticsAllQuestions: lumaData.analyticsAllQuestions || event.guestAnalyticsAllQuestions || [],
+          guestTagDistribution: lumaData.tagDistribution || event.guestTagDistribution || [],
           guestSnapshotReady: lumaData.snapshotReady ?? event.guestSnapshotReady ?? false,
           guestSnapshotWarming: false,
           guestHistoryLoaded: preserveView ? event.guestHistoryLoaded : guests.every((guest: any) => Boolean(guest.eventCounts)),
@@ -9869,6 +10233,7 @@ function mergeIndexedEventState(existing, incoming) {
     "guestStats",
     "guestAnalyticsQuestions",
     "guestAnalyticsAllQuestions",
+    "guestTagDistribution",
     "analyticsLoaded",
     "analyticsLoading",
     "guestSnapshotReady",
@@ -9947,6 +10312,10 @@ function normalizeState(value) {
   next.filters.guestExcludedTags = sortedTags(unique(Array.isArray(next.filters.guestExcludedTags) ? next.filters.guestExcludedTags : []))
     .filter((tag) => !next.filters.guestTags.includes(tag));
   next.filters.guestTagMode = next.filters.guestTagMode === "all" ? "all" : "any";
+  next.filters.guestLatestTagId = typeof next.filters.guestLatestTagId === "string" ? next.filters.guestLatestTagId.slice(0, 200) : "";
+  next.filters.guestLatestTagLabel = next.filters.guestLatestTagId && typeof next.filters.guestLatestTagLabel === "string"
+    ? next.filters.guestLatestTagLabel.slice(0, 80)
+    : "";
   const validGuestStatuses = new Set(guestFilterOptions.map((option) => option.value).filter((value) => value !== "all"));
   const legacyGuestStatus = validGuestStatuses.has(next.filters.guestStatus) ? next.filters.guestStatus : "all";
   next.filters.guestStatuses = (unique(Array.isArray(next.filters.guestStatuses) ? next.filters.guestStatuses : []) as string[])
@@ -10145,6 +10514,8 @@ function eventGuests(
   event,
   sortField: "status_date" | "events_attended" | "events_registered" = "status_date",
   sortDirection: "asc" | "desc" = "desc",
+  peopleById: Map<string, any> | null = null,
+  personHistoryById: Map<string, any> | null = null,
 ) {
   if (!event) return [];
   const query = state.filters.guestSearch.trim().toLowerCase();
@@ -10152,8 +10523,8 @@ function eventGuests(
   return event.guests
     .map((guest) => ({
       guest,
-      person: getPerson(state, guest.personId),
-      history: personHistoryForGuest(state, guest),
+      person: peopleById?.get(guest.personId) || getPerson(state, guest.personId),
+      history: personHistoryForGuest(state, guest, personHistoryById?.get(guest.personId)),
       statusDate: guestStatusDate(guest, event),
       statusTimestamp: guestStatusTimestamp(guest, event),
     }))
@@ -10239,10 +10610,12 @@ function workspaceEventGuests(
   events,
   sortField: "status_date" | "events_attended" | "events_registered" = "status_date",
   sortDirection: "asc" | "desc" = "desc",
+  peopleById: Map<string, any> | null = null,
+  personHistoryById: Map<string, any> | null = null,
 ) {
   const guestsByPerson = new Map();
   events.forEach((event) => {
-    eventGuests(state, event, sortField, sortDirection).forEach((row) => {
+    eventGuests(state, event, sortField, sortDirection, peopleById, personHistoryById).forEach((row) => {
       const existing = guestsByPerson.get(row.person.id);
       const eventMatches = [...(existing?.eventMatches || []), { event, guest: row.guest }];
       guestsByPerson.set(row.person.id, {
@@ -10264,6 +10637,7 @@ function guestSortStatusFilter(state) {
 
 function guestMatchesFrontendStatus(guest, filter) {
   if (filter === "all") return true;
+  if (filter === "checked_in") return Boolean(guest.checkedInAt) || guest.status === "checked_in";
   if (filter === "to_decide") {
     return guest.status === "registered"
       || (guest.status === "waitlisted" && guest.operatorDecision !== "waitlisted");
@@ -10338,8 +10712,8 @@ function compareGuestDisplayRows(
     || left.person.id.localeCompare(right.person.id);
 }
 
-function personHistoryForGuest(state, guest) {
-  const history = getPersonHistory(state, guest.personId);
+function personHistoryForGuest(state, guest, indexedHistory = null) {
+  const history = indexedHistory || getPersonHistory(state, guest.personId);
   if (!guest.eventCounts) {
     return {
       ...history,
@@ -10382,16 +10756,16 @@ function groupsForPerson(person, groups) {
   return (person?.groups || []).map((groupId) => groups.find((group) => group.id === groupId)).filter(Boolean);
 }
 
-function profileBio(person, state) {
+function profileBio(person, state, guestRecords = null) {
   return firstPresent(
     person?.bio,
     person?.profileDescription,
-    ...personGuestRecords(state, person?.id).map(({ guest }) => guest.profileDescription),
+    ...(guestRecords || personGuestRecords(state, person?.id)).map(({ guest }) => guest.profileDescription),
   );
 }
 
-function profileSocialLinks(person, state) {
-  const guestLinks = personGuestRecords(state, person.id).flatMap(({ guest }) => guest.socialLinks || []);
+function profileSocialLinks(person, state, guestRecords = null) {
+  const guestLinks = (guestRecords || personGuestRecords(state, person.id)).flatMap(({ guest }) => guest.socialLinks || []);
   return mergeProfileSocialLinks(person.socialLinks || [], guestLinks);
 }
 
@@ -10411,7 +10785,7 @@ function normalizeProfileSocialLink(link) {
   return { ...link, url, display };
 }
 
-function registrationAnswerGroups(person, state, activityRecords = []) {
+function registrationAnswerGroups(person, state, activityRecords = [], guestRecords = null) {
   const groupsByEvent = new Map();
   const addGroup = (event, answers) => {
     const usableAnswers = (Array.isArray(answers) ? answers : []).filter((answer) => answer?.value !== undefined && answer?.value !== null && String(answer.value).trim());
@@ -10419,7 +10793,7 @@ function registrationAnswerGroups(person, state, activityRecords = []) {
     groupsByEvent.set(event.id, { event, answers: usableAnswers });
   };
 
-  personGuestRecords(state, person.id).forEach(({ event, guest }) => {
+  (guestRecords || personGuestRecords(state, person.id)).forEach(({ event, guest }) => {
     addGroup(event, guest.registrationAnswers);
   });
   activityRecords.forEach((record) => {
@@ -10435,9 +10809,26 @@ function registrationAnswerGroups(person, state, activityRecords = []) {
     .sort((a, b) => new Date(b.event.startsAt || b.event.date).getTime() - new Date(a.event.startsAt || a.event.date).getTime());
 }
 
-function currentProfileRecord(state, person) {
-  const records = personGuestRecords(state, person.id);
+function currentProfileRecord(state, person, guestRecords = null) {
+  const records = guestRecords || personGuestRecords(state, person.id);
   return records.find(({ event }) => event.id === state.selectedEventId) || records[0] || null;
+}
+
+function buildProfileViewModel(state, person, activityRecords = []) {
+  if (!person) return null;
+  const guestRecords = personGuestRecords(state, person.id)
+    .sort((left, right) => eventSortTime(right.event) - eventSortTime(left.event));
+  const history = personHistoryFromRecords(guestRecords);
+  return {
+    history,
+    bio: profileBio(person, state, guestRecords),
+    socialLinks: mergeProfileSocialLinks(
+      profileSocialLinks(person, state, guestRecords),
+      activityRecords.flatMap((record) => record.socialLinks || []),
+    ),
+    currentRecord: currentProfileRecord(state, person, guestRecords),
+    answerGroups: registrationAnswerGroups(person, state, activityRecords, guestRecords),
+  };
 }
 
 function activityRecordsFromHistory(records) {
@@ -10591,6 +10982,9 @@ function buildEventAnalytics(state, event, cohort: "all" | "first_registers" = "
         personId: person.id,
         registrationAnswers: guest.registrationAnswers,
       })));
+  const tagDistribution = Array.isArray(event.guestTagDistribution)
+    ? event.guestTagDistribution
+    : buildLoadedTagDistribution(state, registrationRows.filter(({ guest }) => guest.status === "checked_in" || Boolean(guest.checkedInAt)));
 
   return {
     registrations,
@@ -10605,6 +10999,7 @@ function buildEventAnalytics(state, event, cohort: "all" | "first_registers" = "
     referredReturning: counts.referredReturning,
     referredFirstRegisters: counts.referredFirstRegisters,
     invitationOutcomes,
+    tagDistribution,
     funnel: [
       { id: "registered", label: "Total registrations", value: registrations, rate: registrations ? 100 : 0, width: registrations ? 100 : 0, referral: counts.referredRegistrations ? { value: counts.referredRegistrations } : null },
       {
@@ -10635,7 +11030,8 @@ function eventAnalyticsReady(event) {
     event?.analyticsLoaded
       && event?.guestStats
       && Array.isArray(event?.guestAnalyticsQuestions)
-      && Array.isArray(event?.guestAnalyticsAllQuestions),
+      && Array.isArray(event?.guestAnalyticsAllQuestions)
+      && Array.isArray(event?.guestTagDistribution),
   );
 }
 
@@ -10730,7 +11126,34 @@ function buildWorkspaceAnalytics(state, events, uniqueStats = null, cohort: "all
       },
     ],
     questions: mergeWorkspaceAnalyticsQuestions(analytics.flatMap((item) => item.questions || [])),
+    tagDistribution: Array.isArray(uniqueStats?.tagDistribution)
+      ? uniqueStats.tagDistribution
+      : mergeWorkspaceTagDistribution(analytics.flatMap((item) => item.tagDistribution || [])),
   };
+}
+
+function buildLoadedTagDistribution(state, attendeeRows) {
+  const counts = new Map();
+  attendeeRows.forEach(({ person }) => {
+    const tags = Array.isArray(person?.tags) ? person.tags.filter((tag) => typeof tag === "string" && tag.trim()) : [];
+    const label = tags.at(-1) || "Untagged";
+    const definition = label === "Untagged" ? { id: "untagged", color: "#706f69" } : tagDefinitionForName(state.tagDefinitions || [], label);
+    const current = counts.get(definition.id) || { id: definition.id, label, color: definition.color, count: 0 };
+    current.count += 1;
+    counts.set(definition.id, current);
+  });
+  return [...counts.values()].sort((left, right) => right.count - left.count || left.label.localeCompare(right.label));
+}
+
+function mergeWorkspaceTagDistribution(distributions) {
+  const counts = new Map();
+  distributions.forEach((tag) => {
+    const key = tag.id || String(tag.label || "Untagged").toLocaleLowerCase();
+    const current = counts.get(key) || { id: key, label: tag.label || "Untagged", color: tag.color || "#706f69", count: 0 };
+    current.count += Number(tag.count) || 0;
+    counts.set(key, current);
+  });
+  return [...counts.values()].sort((left, right) => right.count - left.count || left.label.localeCompare(right.label));
 }
 
 function sumInvitationOutcome(analytics, key) {
@@ -10874,6 +11297,18 @@ function buildPersonHistoryIndex(state, personIds) {
     event.guests.forEach((guest) => {
       const records = recordsByPerson.get(guest.personId);
       if (records) records.push({ event, guest });
+    });
+  });
+  return new Map([...recordsByPerson].map(([personId, records]) => [personId, personHistoryFromRecords(records)]));
+}
+
+function buildAllPersonHistoryIndex(events) {
+  const recordsByPerson = new Map();
+  [...sortEvents(events)].reverse().forEach((event) => {
+    event.guests.forEach((guest) => {
+      const records = recordsByPerson.get(guest.personId) || [];
+      records.push({ event, guest });
+      recordsByPerson.set(guest.personId, records);
     });
   });
   return new Map([...recordsByPerson].map(([personId, records]) => [personId, personHistoryFromRecords(records)]));

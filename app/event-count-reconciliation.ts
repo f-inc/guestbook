@@ -62,3 +62,20 @@ export function changedLiveEventCountKeys(stats: WrapperEventStats | null | unde
   return (["accepted", "waitlisted", "pending", "invited", "declined", "checkedIn"] as const)
     .filter((key) => wrapper[key] !== live[key]);
 }
+
+export function mergeLiveEventCounts(
+  stats: WrapperEventStats | null | undefined,
+  live: LiveEventCounts,
+): WrapperEventStats {
+  return {
+    ...(stats || {}),
+    accepted: live.accepted,
+    confirmed: live.accepted,
+    waitlisted: live.waitlisted,
+    pending: live.pending,
+    invitedNoResponse: live.invited,
+    declined: live.declined,
+    checkedIn: live.checkedIn,
+    registered: live.registered,
+  };
+}

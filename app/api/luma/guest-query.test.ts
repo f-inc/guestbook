@@ -130,6 +130,16 @@ test("parses registration-answer filters through the indexed query", () => {
   assert.equal(guestQueryRequiresIndex(query), true);
 });
 
+test("parses latest-profile-tag analytics filters through the indexed query", () => {
+  const query = parseGuestListQuery(new URLSearchParams({
+    guest_latest_tag_id: "auto-reliable",
+    guest_latest_tag_label: "🙏 Reliable",
+  }));
+  assert.equal(query.latestTagId, "auto-reliable");
+  assert.equal(query.latestTagLabel, "🙏 Reliable");
+  assert.equal(guestQueryRequiresIndex(query), true);
+});
+
 test("parses multiple registration-answer groups as a union with per-group attendance", () => {
   const params = new URLSearchParams();
   params.append("guest_answer_group", JSON.stringify({ question: "Role", answer: "Founder", answerKey: "founder", checkedInOnly: false }));

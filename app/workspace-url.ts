@@ -81,6 +81,8 @@ export type WorkspaceUrlState = {
   guestTags: string[];
   guestTagMode?: "any" | "all";
   guestExcludedTags?: string[];
+  guestLatestTagId?: string;
+  guestLatestTagLabel?: string;
   guestHasNotes?: boolean;
   guestAttendedGreaterThan?: number | null;
   guestAnswerQuestion?: string;
@@ -137,6 +139,8 @@ const WORKSPACE_PARAMS = [
   "guest_tag",
   "guest_tag_mode",
   "guest_tag_not",
+  "guest_latest_tag_id",
+  "guest_latest_tag_label",
   "guest_has_notes",
   "guest_attended_gt",
   "guest_answer_question",
@@ -170,6 +174,8 @@ export function parseWorkspaceUrl(search: string): WorkspaceUrlState {
   const guestHasNotes = params.get("guest_has_notes") === "1";
   const guestAttendedGreaterThan = boundedOptionalInteger(params.get("guest_attended_gt"), 0, 10_000);
   const guestAnswerQuestion = boundedText(params.get("guest_answer_question"), 500);
+  const guestLatestTagId = boundedText(params.get("guest_latest_tag_id"), 200);
+  const guestLatestTagLabel = boundedText(params.get("guest_latest_tag_label"), 80);
   const guestAnswerGroups = params.getAll("guest_answer_group")
     .map(parseWorkspaceGuestAnswerGroup)
     .filter((group): group is WorkspaceGuestAnswerGroup => Boolean(group))
@@ -193,6 +199,7 @@ export function parseWorkspaceUrl(search: string): WorkspaceUrlState {
     guestTags: unique(params.getAll("guest_tag").map((tag) => boundedText(tag, 40)).filter(Boolean)).slice(0, 20),
     guestTagMode: params.get("guest_tag_mode") === "all" ? "all" : "any",
     guestExcludedTags: unique(params.getAll("guest_tag_not").map((tag) => boundedText(tag, 40)).filter(Boolean)).slice(0, 20),
+    ...(guestLatestTagId ? { guestLatestTagId, guestLatestTagLabel } : {}),
     ...(guestHasNotes ? { guestHasNotes: true } : {}),
     ...(guestAttendedGreaterThan === null ? {} : { guestAttendedGreaterThan }),
     ...(guestAnswerGroups.length ? { guestAnswerGroups } : guestAnswerQuestion ? {
@@ -241,6 +248,10 @@ export function buildWorkspaceUrlSearch(currentSearch: string, state: WorkspaceU
   unique(state.guestTags).forEach((tag) => params.append("guest_tag", tag));
   if (state.guestTagMode === "all") params.set("guest_tag_mode", "all");
   unique(state.guestExcludedTags || []).forEach((tag) => params.append("guest_tag_not", tag));
+  if (state.guestLatestTagId) {
+    params.set("guest_latest_tag_id", state.guestLatestTagId);
+    if (state.guestLatestTagLabel) params.set("guest_latest_tag_label", state.guestLatestTagLabel);
+  }
   if (state.guestHasNotes) params.set("guest_has_notes", "1");
   if (state.guestAttendedGreaterThan != null) params.set("guest_attended_gt", String(state.guestAttendedGreaterThan));
   if (state.guestAnswerGroups?.length) {

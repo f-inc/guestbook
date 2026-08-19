@@ -10,6 +10,8 @@ type AllMatchingGuestQueryInput = {
   guestTags?: unknown;
   guestTagMode?: unknown;
   guestExcludedTags?: unknown;
+  guestLatestTagId?: unknown;
+  guestLatestTagLabel?: unknown;
   guestHasNotes?: unknown;
   guestAttendedGreaterThan?: unknown;
   guestAnswerQuestion?: unknown;
@@ -54,6 +56,12 @@ export function parseAllMatchingGuestQuery(input: AllMatchingGuestQueryInput = {
   }
   if (Array.isArray(input.guestExcludedTags) && input.guestExcludedTags.some((tag) => typeof tag !== "string")) {
     throw badRequest("Every excluded guest tag must be a string.");
+  }
+  if (input.guestLatestTagId !== undefined && typeof input.guestLatestTagId !== "string") {
+    throw badRequest("Latest guest tag id must be a string.");
+  }
+  if (input.guestLatestTagLabel !== undefined && typeof input.guestLatestTagLabel !== "string") {
+    throw badRequest("Latest guest tag label must be a string.");
   }
   if (input.guestHasNotes !== undefined && typeof input.guestHasNotes !== "boolean") {
     throw badRequest("Guest notes filter must be a boolean.");
@@ -103,6 +111,12 @@ export function parseAllMatchingGuestQuery(input: AllMatchingGuestQueryInput = {
   for (const tag of Array.isArray(input.guestTags) ? input.guestTags : []) params.append("guest_tag", tag);
   if (input.guestTagMode === "all") params.set("guest_tag_mode", "all");
   for (const tag of Array.isArray(input.guestExcludedTags) ? input.guestExcludedTags : []) params.append("guest_tag_not", tag);
+  if (typeof input.guestLatestTagId === "string" && input.guestLatestTagId) {
+    params.set("guest_latest_tag_id", input.guestLatestTagId);
+    if (typeof input.guestLatestTagLabel === "string" && input.guestLatestTagLabel) {
+      params.set("guest_latest_tag_label", input.guestLatestTagLabel);
+    }
+  }
   if (input.guestHasNotes) params.set("guest_has_notes", "1");
   if (input.guestAttendedGreaterThan !== undefined && input.guestAttendedGreaterThan !== null) {
     params.set("guest_attended_gt", String(input.guestAttendedGreaterThan));

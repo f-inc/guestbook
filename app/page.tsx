@@ -279,6 +279,7 @@ export default function Home() {
   const [lumaSessionPrompt, setLumaSessionPrompt] = useState(null);
   const [lumaCheckInGuestKey, setLumaCheckInGuestKey] = useState("");
   const [reinvitingGuestKey, setReinvitingGuestKey] = useState("");
+  const [loadingReferrerKeys, setLoadingReferrerKeys] = useState<string[]>([]);
   const [guestNoteDraft, setGuestNoteDraft] = useState(null);
   const [openTagPersonId, setOpenTagPersonId] = useState("");
   const [savingTagPersonId, setSavingTagPersonId] = useState("");
@@ -1872,50 +1873,16 @@ export default function Home() {
     };
   }, [sessionStatus, guestbookKey, selectedEventIdsKey, selectedEventCountReadinessKey]);
 
-  const performSelectedEventSync = async (eventIds: string[], token = "") => {
+  const performSelectedEventSync = async (eventIds: string[]) => {
     const requestedEventIds = [...new Set(eventIds.filter(Boolean))];
     if (!requestedEventIds.length) return false;
-    const normalizedToken = normalizeLumaSessionTokenInput(token);
-    let scannedReferrers = 0;
-    let updatedReferrers = 0;
-    let failedReferrers = 0;
-    let referrersTruncated = false;
     setSyncingEventIds((current) => [...new Set([...current, ...requestedEventIds])]);
     try {
       for (const eventId of requestedEventIds) {
         await loadEventGuests(eventId, { force: true });
-        if (!normalizedToken) continue;
-        const result = await postLumaAction({
-          action: "syncGuestReferrers",
-          eventId,
-          lumaSessionToken: normalizedToken,
-        }, apiFetch);
-        scannedReferrers += result.scanned || 0;
-        updatedReferrers += result.updated || 0;
-        failedReferrers += result.failed || 0;
-        referrersTruncated ||= Boolean(result.truncated);
-        await loadEventGuests(eventId);
-      }
-      if (normalizedToken) {
-        const failureText = failedReferrers ? ` ${failedReferrers} detail request${failedReferrers === 1 ? "" : "s"} failed.` : "";
-        const limitText = referrersTruncated ? " The configured referrer limit was reached." : "";
-        setApiState({
-          status: failedReferrers ? "error" : "live",
-          message: `Synced ${requestedEventIds.length} event${requestedEventIds.length === 1 ? "" : "s"}; checked ${scannedReferrers} missing referrer${scannedReferrers === 1 ? "" : "s"} and filled ${updatedReferrers}.${failureText}${limitText}`,
-        });
       }
       return true;
     } catch (error: any) {
-      if (error.code === "LUMA_SESSION_INVALID") {
-        window.localStorage.removeItem(LUMA_SESSION_TOKEN_STORAGE_KEY);
-        setLumaSessionPrompt({
-          pending: { kind: "sync_referrers", eventIds: requestedEventIds },
-          token: "",
-          error: error.message,
-          submitting: false,
-        });
-        return false;
-      }
       setApiState({ status: "error", message: error.message });
       return false;
     } finally {
@@ -1930,19 +1897,9 @@ export default function Home() {
       .map((event) => event.id);
     if (!eventIds.length) return;
     // Event-level Luma counts are a sub-second request. Update the visible
-    // check-in number immediately while the full guest/referrer sync continues.
+    // check-in number immediately while the guest sync continues.
     void reconcileActiveEventCounts({ force: true, eventIds });
-    const storedToken = window.localStorage.getItem(LUMA_SESSION_TOKEN_STORAGE_KEY) || "";
-    if (!storedToken) {
-      setLumaSessionPrompt({
-        pending: { kind: "sync_referrers", eventIds },
-        token: "",
-        error: "",
-        submitting: false,
-      });
-      return;
-    }
-    void performSelectedEventSync(eventIds, storedToken);
+    void performSelectedEventSync(eventIds);
   };
 
   const loadMultiEventGuests = async (
@@ -2754,27 +2711,22 @@ export default function Home() {
     return () => window.clearTimeout(timeout);
   }, [profilePanelOpen, selectedPerson?.id, selectedPerson?.source, selectedTrace.status]);
 
-  useEffect(() => {
-    const eventId = selectedProfileRecord?.event.id;
-    const guest = selectedProfileRecord?.guest;
-    const personId = selectedPerson?.id;
-    const lumaUserId = guest?.lumaUserId || selectedPerson?.lumaUserId;
-    if (!profilePanelOpen || !eventId || !guest || !personId || !lumaUserId || hasPrivateReferrerDetails(guest.referrer)) return;
-    const token = window.localStorage.getItem(LUMA_SESSION_TOKEN_STORAGE_KEY) || "";
-    if (!token) return;
+  const loadGuestReferrer = async (pending, token) => {
+    const { eventId, personId, lumaUserId } = pending;
     const requestKey = `${eventId}:${personId}`;
-    if (referrerRequestsRef.current.has(requestKey)) return;
+    if (referrerRequestsRef.current.has(requestKey)) return false;
     referrerRequestsRef.current.add(requestKey);
+    setLoadingReferrerKeys((current) => current.includes(requestKey) ? current : [...current, requestKey]);
 
-    void postLumaAction({
-      action: "getGuestReferrer",
-      eventId,
-      personId,
-      lumaUserId,
-      lumaSessionToken: normalizeLumaSessionTokenInput(token),
-    }, apiFetch)
-      .then((result) => {
-        if (!result.referrer) return;
+    try {
+      const result = await postLumaAction({
+        action: "getGuestReferrer",
+        eventId,
+        personId,
+        lumaUserId,
+        lumaSessionToken: normalizeLumaSessionTokenInput(token),
+      }, apiFetch);
+      if (result.referrer) {
         setState((current) => ({
           ...current,
           events: current.events.map((event) => event.id !== eventId ? event : {
@@ -2782,13 +2734,38 @@ export default function Home() {
             guests: event.guests.map((item) => item.personId === personId ? { ...item, referrer: result.referrer } : item),
           }),
         }));
-      })
-      .catch((error) => {
-        if (error.code !== "LUMA_SESSION_INVALID") return;
+        setApiState({ status: "live", message: "Loaded referrer details." });
+      } else {
+        setApiState({ status: "live", message: "No referrer details were found for this guest." });
+      }
+      return true;
+    } catch (error: any) {
+      if (error.code === "LUMA_SESSION_INVALID") {
         window.localStorage.removeItem(LUMA_SESSION_TOKEN_STORAGE_KEY);
-        referrerRequestsRef.current.delete(requestKey);
-      });
-  }, [profilePanelOpen, selectedProfileRecord?.event.id, selectedProfileRecord?.guest.personId, selectedProfileRecord?.guest.lumaUserId, selectedProfileRecord?.guest.referrer, selectedPerson?.id, selectedPerson?.lumaUserId]);
+        setLumaSessionPrompt({ pending, token: "", error: error.message, submitting: false });
+      } else {
+        setApiState({ status: "error", message: error.message });
+      }
+      return false;
+    } finally {
+      referrerRequestsRef.current.delete(requestKey);
+      setLoadingReferrerKeys((current) => current.filter((key) => key !== requestKey));
+    }
+  };
+
+  const requestGuestReferrer = (eventId, personId, lumaUserId) => {
+    if (!eventId || !personId || !lumaUserId) {
+      setApiState({ status: "error", message: "This guest does not have enough Luma data to load a referrer." });
+      return;
+    }
+    const pending = { kind: "referrer", eventId, personId, lumaUserId };
+    const token = normalizeLumaSessionTokenInput(window.localStorage.getItem(LUMA_SESSION_TOKEN_STORAGE_KEY));
+    if (!token) {
+      setLumaSessionPrompt({ pending, token: "", error: "", submitting: false });
+      return;
+    }
+    void loadGuestReferrer(pending, token);
+  };
 
   const setGuestStatus = async (personId: string, status: string, { sendEmail = false, message = "", eventId = state.selectedEventId, lumaSessionToken = "" }: { sendEmail?: boolean; message?: string; eventId?: string; lumaSessionToken?: string } = {}) => {
     const event = getEvent(state, eventId);
@@ -3569,8 +3546,8 @@ export default function Home() {
     const pending = lumaSessionPrompt.pending;
     window.localStorage.setItem(LUMA_SESSION_TOKEN_STORAGE_KEY, token);
     setLumaSessionPrompt((current) => current ? { ...current, token, error: "", submitting: true } : current);
-    const updated = pending.kind === "sync_referrers"
-      ? await performSelectedEventSync(pending.eventIds, token)
+    const updated = pending.kind === "referrer"
+      ? await loadGuestReferrer(pending, token)
       : pending.kind === "reinvite"
         ? await reinviteGuest(pending.personId, pending.eventId, token, pending)
         : pending.kind === "feedback"
@@ -3578,13 +3555,6 @@ export default function Home() {
           : await performLumaCheckInChange(pending, token);
     if (updated) setLumaSessionPrompt(null);
     else setLumaSessionPrompt((current) => current ? { ...current, submitting: false } : current);
-  };
-
-  const syncWithoutReferrers = () => {
-    const pending = lumaSessionPrompt?.pending;
-    if (pending?.kind !== "sync_referrers" || lumaSessionPrompt.submitting) return;
-    setLumaSessionPrompt(null);
-    void performSelectedEventSync(pending.eventIds);
   };
 
   useEffect(() => {
@@ -4105,7 +4075,7 @@ export default function Home() {
                         type="button"
                         aria-label={selectedEventSyncing ? "Syncing selected events" : `Sync ${selectedEvents.length === 1 ? "event" : `${selectedEvents.length} events`}`}
                         aria-busy={selectedEventSyncing}
-                        data-tooltip={selectedEventSyncing ? "Syncing guests and referrers…" : `Refresh ${selectedEvents.length === 1 ? "guests and referrers" : `${selectedEvents.length} events`}`}
+                        data-tooltip={selectedEventSyncing ? "Syncing guests…" : `Refresh ${selectedEvents.length === 1 ? "guests" : `${selectedEvents.length} events`}`}
                         disabled={selectedEventSyncing}
                         onClick={requestSelectedEventSync}
                       >
@@ -4385,6 +4355,9 @@ export default function Home() {
                       {visibleGuests.length ? (
                         visibleGuests.map(({ guest, person, history, statusDate, sourceEvent, eventCount }) => {
                           const selectPerson = () => openPerson(person.id);
+                          const referrerEventId = sourceEvent?.id || selectedEvent.id;
+                          const referrerKey = `${referrerEventId}:${person.id}`;
+                          const referrerLoading = loadingReferrerKeys.includes(referrerKey);
                           return (
                           <tr
                             className={`guest-row ${selectedPerson?.id === person.id ? "selected" : ""} ${allMatchingGuestsSelected || selectedGuestIds.has(person.id) ? "bulk-selected" : ""}`}
@@ -4443,8 +4416,21 @@ export default function Home() {
                               {multiEventMode && sourceEvent ? <small className="guest-event-context">{eventCount > 1 ? `${eventCount} selected events · ` : ""}{sourceEvent.title}</small> : null}
                             </td>
                             {showGuestReferrer ? (
-                              <td className="referrer-cell">
-                                <ReferrerValue referrer={guest.referrer} />
+                              <td className="referrer-cell" onClick={(event) => event.stopPropagation()}>
+                                {hasPrivateReferrerDetails(guest.referrer) ? (
+                                  <ReferrerValue referrer={guest.referrer} />
+                                ) : (
+                                  <button
+                                    className="referrer-trigger"
+                                    type="button"
+                                    disabled={referrerLoading}
+                                    aria-label={`See referrer for ${person.name}`}
+                                    onClick={() => requestGuestReferrer(referrerEventId, person.id, guest.lumaUserId || person.lumaUserId)}
+                                  >
+                                    {referrerLoading ? <RefreshCw className="animate-spin" size={12} aria-hidden="true" /> : null}
+                                    {referrerLoading ? "Loading…" : "See referrer"}
+                                  </button>
+                                )}
                               </td>
                             ) : null}
                             <td className="event-count-cell text-center text-sm font-semibold tabular-nums">
@@ -4780,7 +4766,6 @@ export default function Home() {
           onChange={setLumaSessionPrompt}
           onClose={() => setLumaSessionPrompt((current) => current?.submitting ? current : null)}
           onSubmit={submitLumaSessionToken}
-          onSkip={syncWithoutReferrers}
         />
       ) : null}
 
@@ -5619,11 +5604,11 @@ function BulkTagConfirmationDialog({ draft, definitions, onClose, onSubmit }) {
   );
 }
 
-function LumaSessionTokenDialog({ draft, onChange, onClose, onSubmit, onSkip }) {
-  const syncingReferrers = draft.pending?.kind === "sync_referrers";
+function LumaSessionTokenDialog({ draft, onChange, onClose, onSubmit }) {
+  const viewingReferrer = draft.pending?.kind === "referrer";
   const reinviting = draft.pending?.kind === "reinvite";
   const loadingFeedback = draft.pending?.kind === "feedback";
-  const accessTitle = syncingReferrers
+  const accessTitle = viewingReferrer
     ? "Luma guest details access"
     : reinviting
       ? "Luma email delivery access"
@@ -5645,7 +5630,7 @@ function LumaSessionTokenDialog({ draft, onChange, onClose, onSubmit, onSkip }) 
             <p className="eyebrow">{accessTitle}</p>
             <h2 id="luma-session-dialog-title">Add your session token</h2>
             <p className="dialog-description">
-              {syncingReferrers
+              {viewingReferrer
                 ? "Luma only includes referrers in its signed-in guest details response."
                 : loadingFeedback
                   ? "Luma only exposes event ratings and comments to signed-in event managers."
@@ -5684,10 +5669,9 @@ function LumaSessionTokenDialog({ draft, onChange, onClose, onSubmit, onSkip }) 
 
         <div className="dialog-actions">
           <button className="button ghost" type="button" disabled={draft.submitting} onClick={onClose}>Cancel</button>
-          {syncingReferrers ? <button className="button ghost" type="button" disabled={draft.submitting} onClick={onSkip}>Sync guests only</button> : null}
           <button className="button primary" type="submit" disabled={draft.submitting || !draft.token.trim()}>
-            {draft.submitting ? <RefreshCw className="animate-spin" size={16} aria-hidden="true" /> : syncingReferrers ? <RefreshCw size={16} aria-hidden="true" /> : loadingFeedback ? <MessageSquare size={16} aria-hidden="true" /> : <BadgeCheck size={16} aria-hidden="true" />}
-            {draft.submitting ? "Checking..." : syncingReferrers ? "Save and sync" : loadingFeedback ? "Save and load" : "Save and retry"}
+            {draft.submitting ? <RefreshCw className="animate-spin" size={16} aria-hidden="true" /> : viewingReferrer ? <ExternalLink size={16} aria-hidden="true" /> : loadingFeedback ? <MessageSquare size={16} aria-hidden="true" /> : <BadgeCheck size={16} aria-hidden="true" />}
+            {draft.submitting ? "Checking..." : viewingReferrer ? "Save and view" : loadingFeedback ? "Save and load" : "Save and retry"}
           </button>
         </div>
       </form>

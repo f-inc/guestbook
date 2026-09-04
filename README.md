@@ -38,7 +38,14 @@ LUMA_SESSION_TOKEN=your_luma_auth_session_cookie_value
 DB_URL=your_postgres_connection_string
 GUESTBOOK_KEY=replace_with_private_guestbook_key
 GUESTBOOK_SYNC_SECRET=replace_with_random_sync_secret
+LUMA_WEBHOOK_SECRET=whsec_secret_from_luma
 ```
+
+Create a Luma webhook in Calendar Settings → Developer that sends `guest.registered`
+and `guest.updated` events to `https://your-guestbook.example/api/luma/webhooks`.
+Use `LUMA_WEBHOOK_SECRET_2`, `LUMA_WEBHOOK_SECRET_3`, and so on when multiple
+calendar webhooks use different signing secrets. Webhook delivery updates one guest
+at a time; `/api/luma/sync` remains the bounded recovery and consistency scan.
 
 Guestbook merges and deduplicates managed events from every configured API key and signed-in session token. API-key access is preferred when both credential types can access the same event; session-only events use Luma's bounded signed-in manager endpoints for event details and guest loading.
 
@@ -51,6 +58,7 @@ npm run db:push
 npx prisma db execute --file prisma/manual-migrations/20260721_add_automatic_archetype_tags.sql --schema prisma/schema.prisma
 npx prisma db execute --file prisma/manual-migrations/20260723_add_event_catalog_state.sql --schema prisma/schema.prisma
 npx prisma db execute --file prisma/manual-migrations/20260731_add_event_feedback_stats.sql --schema prisma/schema.prisma
+npx prisma db execute --file prisma/manual-migrations/20260819_add_luma_webhooks.sql --schema prisma/schema.prisma
 npm run dev
 ```
 

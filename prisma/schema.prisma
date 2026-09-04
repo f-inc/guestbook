@@ -241,6 +241,8 @@ model LumaEventSyncState {
   eventId         String    @id @map("event_id")
   lastGuestSyncAt DateTime? @map("last_guest_sync_at") @db.Timestamptz(6)
   lastEventSyncAt DateTime? @map("last_event_sync_at") @db.Timestamptz(6)
+  lastWebhookAt   DateTime? @map("last_webhook_at") @db.Timestamptz(6)
+  lastWebhookId   String?   @map("last_webhook_id")
   lastGuestCount  Int       @default(0) @map("last_guest_count")
   lastStatus      String?   @map("last_status")
   truncated       Boolean   @default(false)
@@ -252,4 +254,22 @@ model LumaEventSyncState {
   @@index([lastGuestSyncAt(sort: Desc)])
   @@index([lastStatus])
   @@map("luma_event_sync_state")
+}
+
+model LumaWebhookDelivery {
+  webhookId     String    @id @map("webhook_id")
+  webhookType   String    @map("webhook_type")
+  eventId       String?   @map("event_id")
+  guestId       String?   @map("guest_id")
+  payloadSha256 String    @map("payload_sha256")
+  status        String
+  attempts      Int       @default(1)
+  receivedAt    DateTime  @default(now()) @map("received_at") @db.Timestamptz(6)
+  processedAt   DateTime? @map("processed_at") @db.Timestamptz(6)
+  error         String?
+  updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([status, updatedAt(sort: Asc)])
+  @@index([eventId, receivedAt(sort: Desc)])
+  @@map("luma_webhook_deliveries")
 }

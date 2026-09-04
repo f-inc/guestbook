@@ -234,6 +234,16 @@ export function hasLumaDb() {
   return Boolean(process.env.DB_URL);
 }
 
+export function invalidateIndexedAudienceCaches() {
+  audienceTagGroupCache = null;
+  audienceTagGroupPromise = null;
+  audienceSuperTagGroupCache = null;
+  audienceSuperTagGroupPromise = null;
+  audienceEventCountCache = null;
+  audienceEventCountPromise = null;
+  audienceResolutionCache.clear();
+}
+
 export async function listIndexedEvents({ limit = 100 } = {}) {
   const rows = await prisma().lumaEvent.findMany({
     where: { catalogActive: true },
@@ -4808,6 +4818,100 @@ export async function recordEventSyncState({ eventId, guestCount = 0, status, tr
   });
 }
 
+export async function claimLumaWebhookDelivery({
+  webhookId,
+  webhookType,
+  eventId,
+  guestId,
+  payloadSha256,
+  staleAfterSeconds = 30,
+}) {
+  const data = {
+    webhookId,
+    webhookType,
+    eventId,
+    guestId,
+    payloadSha256,
+    status: "processing",
+  };
+  try {
+    await prisma().lumaWebhookDelivery.create({ data });
+    return { claimed: true, duplicate: false, attempt: 1 };
+  } catch (error) {
+    if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== "P2002") throw error;
+  }
+
+  const existing = await prisma().lumaWebhookDelivery.findUnique({ where: { webhookId } });
+  if (!existing) return { claimed: false, duplicate: true, attempt: 0 };
+  if (existing.payloadSha256 !== payloadSha256) {
+    const error = new Error("Webhook ID was reused with a different payload.") as HttpError;
+    error.status = 409;
+    throw error;
+  }
+  if (existing.status === "processed") {
+    return { claimed: false, duplicate: true, attempt: existing.attempts };
+  }
+
+  const staleBefore = new Date(Date.now() - Math.max(5, staleAfterSeconds) * 1000);
+  const reclaimed = await prisma().lumaWebhookDelivery.updateMany({
+    where: {
+      webhookId,
+      OR: [
+        { status: "failed" },
+        { status: "processing", updatedAt: { lt: staleBefore } },
+      ],
+    },
+    data: {
+      webhookType,
+      eventId,
+      guestId,
+      status: "processing",
+      attempts: { increment: 1 },
+      error: null,
+      processedAt: null,
+    },
+  });
+  return {
+    claimed: reclaimed.count === 1,
+    duplicate: reclaimed.count !== 1,
+    attempt: existing.attempts + (reclaimed.count === 1 ? 1 : 0),
+  };
+}
+
+export async function finishLumaWebhookDelivery(webhookId: string, error: unknown = null) {
+  const failed = Boolean(error);
+  return prisma().lumaWebhookDelivery.update({
+    where: { webhookId },
+    data: {
+      status: failed ? "failed" : "processed",
+      error: failed ? String(error instanceof Error ? error.message : error).slice(0, 2000) : null,
+      processedAt: failed ? null : new Date(),
+    },
+  });
+}
+
+export async function recordLumaWebhookState({ eventId, webhookId }: { eventId: string; webhookId: string }) {
+  const now = new Date();
+  return prisma().lumaEventSyncState.upsert({
+    where: { eventId },
+    create: {
+      eventId,
+      lastEventSyncAt: now,
+      lastWebhookAt: now,
+      lastWebhookId: webhookId,
+      lastStatus: "webhook",
+      error: null,
+    },
+    update: {
+      lastEventSyncAt: now,
+      lastWebhookAt: now,
+      lastWebhookId: webhookId,
+      lastStatus: "webhook",
+      error: null,
+    },
+  });
+}
+
 export async function upsertNormalizedLumaSnapshot({ rawEvent, event, guests = [], rawGuests = [] }) {
   if (!hasLumaDb()) return { skipped: true, eventCount: 0, guestCount: 0, personCount: 0 };
 
@@ -5204,7 +5308,7 @@ async function bulkUpsertEventGuests(tx, rows) {
       created_at = COALESCE(EXCLUDED.created_at, luma_event_guests.created_at),
       updated_at = COALESCE(EXCLUDED.updated_at, luma_event_guests.updated_at),
       approved_at = COALESCE(EXCLUDED.approved_at, luma_event_guests.approved_at),
-      checked_in_at = COALESCE(EXCLUDED.checked_in_at, luma_event_guests.checked_in_at),
+      checked_in_at = EXCLUDED.checked_in_at,
       profile_description = COALESCE(EXCLUDED.profile_description, luma_event_guests.profile_description),
       registration_answers = EXCLUDED.registration_answers,
       social_links = EXCLUDED.social_links,

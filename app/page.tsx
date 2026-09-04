@@ -106,6 +106,7 @@ const EVENT_PAGE_SIZE = 10;
 const EVENT_SCROLL_THRESHOLD = 96;
 const GUEST_PAGE_SIZE = 25;
 const GUEST_SEARCH_DEBOUNCE_MS = 250;
+const ACTIVE_GUEST_REFRESH_INTERVAL_MS = 60_000;
 const QUESTION_RESPONSE_BATCH_SIZE = 10;
 const EVENT_FEEDBACK_REQUEST_BATCH_SIZE = 50;
 const MAX_GUEST_NOTE_LENGTH = 20_000;
@@ -1690,7 +1691,8 @@ export default function Home() {
       cursor = "",
       priority = false,
       background = false,
-    }: { force?: boolean; append?: boolean; status?: string; statuses?: string[]; statusMode?: "any" | "all"; excludedStatuses?: string[]; search?: string; tags?: string[]; tagMode?: "any" | "all"; excludedTags?: string[]; latestTagId?: string; latestTagLabel?: string; hasNotes?: boolean; attendedGreaterThan?: string; answerQuestion?: string; answer?: string; answerKey?: string; answerGroups?: WorkspaceGuestAnswerGroup[]; cursor?: string; priority?: boolean; background?: boolean } = {},
+      silent = false,
+    }: { force?: boolean; append?: boolean; status?: string; statuses?: string[]; statusMode?: "any" | "all"; excludedStatuses?: string[]; search?: string; tags?: string[]; tagMode?: "any" | "all"; excludedTags?: string[]; latestTagId?: string; latestTagLabel?: string; hasNotes?: boolean; attendedGreaterThan?: string; answerQuestion?: string; answer?: string; answerKey?: string; answerGroups?: WorkspaceGuestAnswerGroup[]; cursor?: string; priority?: boolean; background?: boolean; silent?: boolean } = {},
   ) => {
     const event = getEvent(state, eventId);
     if (!event) {
@@ -1745,7 +1747,7 @@ export default function Home() {
     if (guestRequestsRef.current.has(requestKey)) return false;
 
     const requestToken = Symbol(requestKey);
-    const requestScope = `${eventId}:${background ? "background" : "foreground"}`;
+    const requestScope = `${eventId}:${background || silent ? "background" : "foreground"}`;
     latestGuestRequestRef.current.set(requestScope, requestToken);
     guestRequestsRef.current.add(requestKey);
     if (!append) {
@@ -1753,12 +1755,12 @@ export default function Home() {
         ...current,
         events: current.events.map((item) => item.id === eventId ? {
           ...item,
-          ...(background ? { guestSnapshotWarming: true } : { guests: [], guestQueryLoading: true }),
+          ...(background || silent ? { guestSnapshotWarming: true } : { guests: [], guestQueryLoading: true }),
         } : item),
       }));
     }
 
-    if (!background) setLoadingGuestEvents((current) => unique([...current, eventId]));
+    if (!background && !silent) setLoadingGuestEvents((current) => unique([...current, eventId]));
     try {
       const response = await apiFetch("/api/luma?" + params.toString(), { cache: "no-store" });
       const data: any = await response.json();
@@ -1776,7 +1778,7 @@ export default function Home() {
       }
       markEventSwitchDiagnostic(eventId, `${eventSwitchStage}_state_update_queued`);
       if (force) {
-        setActivityTraces({});
+        if (!silent) setActivityTraces({});
         invalidateMultiEventStats();
       }
       const truncatedText = data.truncated ? " Showing the configured capped guest window only." : "";
@@ -1784,7 +1786,7 @@ export default function Home() {
       const resultText = force
         ? `Synced ${data.event?.title || event.title} and ${data.pageInfo?.total ?? data.guests.length} matching guests.`
         : `${data.cached ? "Used cached guests for " : "Loaded guests for "}${event.title}.`;
-      if (force) setApiState({ status: "live", message: resultText + truncatedText + requestText });
+      if (force && !silent) setApiState({ status: "live", message: resultText + truncatedText + requestText });
       return true;
     } catch (error) {
       if (activeEventSwitchDiagnostic(eventId)) completeEventSwitchDiagnostic(eventId, "error");
@@ -1793,14 +1795,14 @@ export default function Home() {
           ...current,
           events: current.events.map((item) => item.id === eventId ? { ...item, guestQueryLoading: false, guestSnapshotWarming: false } : item),
         }));
-        if (!background) setApiState({ status: "error", message: error.message });
+        if (!background && !silent) setApiState({ status: "error", message: error.message });
       }
       return false;
     } finally {
       guestRequestsRef.current.delete(requestKey);
       if (latestGuestRequestRef.current.get(requestScope) === requestToken) {
         latestGuestRequestRef.current.delete(requestScope);
-        if (!background) setLoadingGuestEvents((current) => current.filter((id) => id !== eventId));
+        if (!background && !silent) setLoadingGuestEvents((current) => current.filter((id) => id !== eventId));
       }
     }
   };
@@ -2191,6 +2193,48 @@ export default function Home() {
       });
     });
   }, [sessionStatus, selectedEventIdsKey, activeEventTab, guestStatusFilterKey, debouncedGuestSearch, guestTagFilterKey, guestLatestTagFilterKey, state.filters.guestHasNotes, state.filters.guestAttendedGreaterThan, guestAnswerFilterKey, guestSortField, guestDateSortDirection]);
+
+  useEffect(() => {
+    if (
+      sessionStatus !== "ready"
+      || !guestbookKey
+      || activeEventTab !== "overview"
+      || multiEventMode
+      || selectedEvents.length !== 1
+      || selectedEvents[0].source !== "luma"
+      || selectedEventLoadingGuests
+      || selectedEventSyncing
+      || guestPageTarget !== 1
+      || loadedGuestPage !== 1
+    ) return;
+
+    const eventId = selectedEvents[0].id;
+    const refreshVisibleGuestPage = () => {
+      if (document.visibilityState !== "visible") return;
+      void loadEventGuests(eventId, { force: true, silent: true });
+    };
+    const interval = window.setInterval(refreshVisibleGuestPage, ACTIVE_GUEST_REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(interval);
+  }, [
+    sessionStatus,
+    guestbookKey,
+    activeEventTab,
+    multiEventMode,
+    selectedEventIdsKey,
+    selectedEventLoadingGuests,
+    selectedEventSyncing,
+    guestStatusFilterKey,
+    debouncedGuestSearch,
+    guestTagFilterKey,
+    guestLatestTagFilterKey,
+    state.filters.guestHasNotes,
+    state.filters.guestAttendedGreaterThan,
+    guestAnswerFilterKey,
+    guestSortField,
+    guestDateSortDirection,
+    guestPageTarget,
+    loadedGuestPage,
+  ]);
 
   useEffect(() => {
     if (sessionStatus !== "ready" || activeEventTab !== "overview") return;
@@ -6871,12 +6915,27 @@ function PeopleSearchTable({
               {results.map((result) => {
                 const person = result.person;
                 const eventCounts = person.eventCounts || {};
+                const selectPerson = () => onSelect(result);
                 return (
-                  <tr key={result.id}>
+                  <tr
+                    className="guest-row"
+                    key={result.id}
+                    tabIndex={0}
+                    aria-label={`View ${person.name}'s profile`}
+                    onClick={(event) => {
+                      if (event.target instanceof Element && event.target.closest("button, a, input, textarea, select, [role='button']")) return;
+                      selectPerson();
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.target !== event.currentTarget || !["Enter", " "].includes(event.key)) return;
+                      event.preventDefault();
+                      selectPerson();
+                    }}
+                  >
                     <td className="guest-identity-column">
-                      <PersonButton person={person} onClick={() => onSelect(result)} onAvatarClick={onAvatarClick} />
+                      <PersonButton person={person} onClick={selectPerson} onAvatarClick={onAvatarClick} />
                     </td>
-                    <td className="tag-cell">
+                    <td className="tag-cell" onClick={(event) => event.stopPropagation()}>
                       <PersonTags
                         person={person}
                         definitions={definitions}

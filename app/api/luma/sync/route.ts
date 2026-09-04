@@ -472,7 +472,6 @@ function normalizeGuest(event, guest) {
   const lumaUserId = firstString(guest.user_id, guest.user_api_id, guest.user?.id, guest.user?.user_id, guest.user?.api_id);
   const lumaGuestId = firstString(guest.id, guest.api_id, guest.guest_id, guest.guest_api_id);
   const personId = lumaUserId || firstString(guest.user_email, guest.email, guest.user?.email, lumaGuestId) || "guest-" + Math.random().toString(36).slice(2, 10);
-  const isPast = event.start_at ? new Date(event.start_at) < new Date() : false;
   const checkedInAt = extractCheckedInAt(guest);
   const checkedIn = Boolean(checkedInAt);
   const profileDescription = extractProfileDescription(guest, registrationAnswers);
@@ -480,12 +479,9 @@ function normalizeGuest(event, guest) {
   const referrer = extractReferrer(guest);
   const avatarCandidates = extractAvatarCandidates(guest);
   const searchText = [profileDescription, extractRegistrationAnswerText(registrationAnswers), phoneNumber, socialLinks.map((link) => link.display).join(" "), referrerText(referrer)].filter(Boolean).join(" ");
-  const eventCancelled = ["cancelled", "canceled"].includes(String(event.status || "").toLowerCase());
   const status = checkedIn
     ? "checked_in"
-    : isPast && !eventCancelled && guest.approval_status === "approved"
-      ? "no_show"
-      : approvalToStatus[guest.approval_status] || "registered";
+    : approvalToStatus[guest.approval_status] || "registered";
   const registeredAt = firstString(guest.registered_at, guest.joined_at, status === "invited" ? "" : guest.created_at);
 
   return {

@@ -157,3 +157,12 @@ test("normalizes an un-check-in with an empty checked-in timestamp", () => {
   assert.equal(normalized.guest.checkedInAt, "");
   assert.equal(normalized.guest.status, "going");
 });
+
+test("stores an approved unchecked guest as going even after the event ends", () => {
+  const normalized = normalizeLumaWebhookGuest(
+    guestPayload({ event_tickets: [] }).data as Record<string, unknown>,
+    new Date("2026-08-20T13:00:00.000Z"),
+  );
+
+  assert.equal(normalized.guest.status, "going");
+});

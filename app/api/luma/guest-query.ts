@@ -1,4 +1,5 @@
 import { parseTagFilters } from "./person-tags";
+import { guestStatusAfterEvent } from "../../guest-display-status";
 
 export const GUEST_FILTER_VALUES = [
   "all",
@@ -75,6 +76,7 @@ export type GuestListQuery = {
 
 export type EventChronologyBoundary = {
   startsAt?: Date | string | null;
+  endsAt?: Date | string | null;
   date?: Date | string | null;
 };
 
@@ -294,8 +296,14 @@ export function filterGuestPayload(payload: any, query: GuestListQuery) {
     ...payloadWithoutSummary
   } = payload;
   const peopleById = new Map((payload.people || []).map((person: any) => [person.id, person]));
+  const statusEvent = payload.event?.endsAt ? payload.event : null;
   const rows = (payload.guests || [])
-    .map((guest: any) => ({ guest, person: peopleById.get(guest.personId) }))
+    .map((guest: any) => ({
+      guest: statusEvent
+        ? { ...guest, status: guestStatusAfterEvent(guest, statusEvent) }
+        : guest,
+      person: peopleById.get(guest.personId),
+    }))
     .filter(({ person }: any) => Boolean(person));
   const filteredRows = rows.filter(({ guest, person }: any) => {
     return guestMatchesStatusRules(guest, query)

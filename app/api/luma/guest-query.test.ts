@@ -54,6 +54,17 @@ test("supports multiple included statuses, ALL matching, and excluded statuses",
   assert.deepEqual(result.people.map((person) => person.id), ["checked"]);
 });
 
+test("derives no-show from an approved guest only after the payload event ends", () => {
+  const query = parseGuestListQuery(new URLSearchParams([["guest_status", "no_show"]]));
+  const result = filterGuestPayload({
+    event: { endsAt: "2020-01-01T02:00:00.000Z" },
+    people: [{ id: "approved", tags: [] }],
+    guests: [{ personId: "approved", status: "going", lumaApprovalStatus: "approved" }],
+  }, query);
+
+  assert.equal(result.guests[0]?.status, "no_show");
+});
+
 test("supports ALL included tags and excludes guests with any blocked tag", () => {
   const query = parseGuestListQuery(new URLSearchParams([
     ["guest_tag", "Builder"],

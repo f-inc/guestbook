@@ -100,18 +100,15 @@ export function parseLumaGuestWebhook(rawBody: string) {
   };
 }
 
-export function normalizeLumaWebhookGuest(data: AnyRecord, now = new Date()) {
+export function normalizeLumaWebhookGuest(data: AnyRecord, _now = new Date()) {
   const rawEvent = data.event;
   const event = normalizeWebhookEvent(rawEvent);
   const registrationAnswers = normalizeWebhookAnswers(data.registration_answers);
   const checkedInAt = earliestCheckIn(data.event_tickets);
-  const isPast = event.startsAt ? new Date(event.startsAt) < now : false;
   const approvalStatus = stringValue(data.approval_status);
   const status = checkedInAt
     ? "checked_in"
-    : isPast && approvalStatus === "approved"
-      ? "no_show"
-      : approvalToStatus[approvalStatus] || "registered";
+    : approvalToStatus[approvalStatus] || "registered";
   const email = stringValue(data.user_email);
   const lumaUserId = stringValue(data.user_id);
   const name = stringValue(data.user_name)

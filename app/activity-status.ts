@@ -1,7 +1,10 @@
+import { guestStatusAfterEvent } from "./guest-display-status";
+
 type ActivityRecord = {
   approvedAt?: unknown;
   checkedInAt?: unknown;
   eventDate?: unknown;
+  eventEndsAt?: unknown;
   eventStartsAt?: unknown;
   eventCancelled?: unknown;
   eventCatalogActive?: unknown;
@@ -19,8 +22,14 @@ export function activityRecordStatus(record: ActivityRecord, now = new Date()): 
   if (isRegistered) {
     const approved = record.lumaApprovalStatus === "approved"
       || Boolean(record.approvedAt)
-      || ["going", "no_show"].includes(record.status);
-    return approved && eventHasStarted(record, now) ? "no_show" : "registered";
+      || record.status === "going";
+    return approved
+      ? guestStatusAfterEvent(
+          { ...record, status: "going" },
+          { endsAt: record.eventEndsAt, cancelled: record.eventCancelled === true, catalogActive: record.eventCatalogActive !== false },
+          now,
+        )
+      : "registered";
   }
 
   if (record.status === "invited" || record.invitedAt) return "invited";

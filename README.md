@@ -59,6 +59,7 @@ npx prisma db execute --file prisma/manual-migrations/20260721_add_automatic_arc
 npx prisma db execute --file prisma/manual-migrations/20260723_add_event_catalog_state.sql --schema prisma/schema.prisma
 npx prisma db execute --file prisma/manual-migrations/20260731_add_event_feedback_stats.sql --schema prisma/schema.prisma
 npx prisma db execute --file prisma/manual-migrations/20260819_add_luma_webhooks.sql --schema prisma/schema.prisma
+npx prisma db execute --file prisma/manual-migrations/20260903_preserve_accepted_guest_status.sql --schema prisma/schema.prisma
 npm run dev
 ```
 

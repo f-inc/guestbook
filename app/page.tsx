@@ -56,6 +56,7 @@ import { ANY_REGISTRATION_ANSWER_KEY, ANY_REGISTRATION_ANSWER_LABEL } from "./au
 import { orderAvatarCandidates } from "./avatar-order";
 import { allVisibleEventSelection, nextEventSelection } from "./event-selection";
 import { guestStatusDate, guestStatusTimestamp } from "./guest-status-date";
+import { actionsForStatus } from "./guest-actions";
 import { updateGuestSelection } from "./guest-selection";
 import { MAX_INVITE_MESSAGE_LENGTH } from "./invite-message";
 import { MAX_GUEST_STATUS_MESSAGE_LENGTH } from "./guest-status-notification";
@@ -82,6 +83,7 @@ const statusLabels = {
 
 const activityFilterOptions = [
   { status: "registered", label: "Registered" },
+  { status: "going", label: "Accepted" },
   { status: "checked_in", label: "Checked in" },
   { status: "no_show", label: "No-show" },
   { status: "cancelled", label: "Event cancelled" },
@@ -1724,6 +1726,7 @@ export default function Home() {
     if (answerKey) params.set("guest_answer_key", answerKey);
     answerGroups.forEach((group) => params.append("guest_answer_group", JSON.stringify(group)));
     if (event.startsAt) params.set("event_starts_at", event.startsAt);
+    if (event.endsAt) params.set("event_ends_at", event.endsAt);
     if (event.date) params.set("event_date", String(event.date).slice(0, 10));
     tags.forEach((tag) => params.append("guest_tag", tag));
     if (tagMode === "all") params.set("guest_tag_mode", "all");
@@ -2019,6 +2022,7 @@ export default function Home() {
     try {
       const params = new URLSearchParams({ event_id: eventId, event_analytics: "1" });
       if (event.startsAt) params.set("event_starts_at", event.startsAt);
+      if (event.endsAt) params.set("event_ends_at", event.endsAt);
       if (event.date) params.set("event_date", String(event.date).slice(0, 10));
       const eventSwitchDiagnostic = eventSwitchDiagnosticForEvent(eventId);
       if (eventSwitchDiagnostic) {
@@ -4485,7 +4489,7 @@ export default function Home() {
                             </td>
                             <td>
                               <div className="row-actions" onClick={(event) => event.stopPropagation()}>
-                                {actionsForStatus(guest.status, sourceEvent).map(([label, status]) => {
+                                {actionsForStatus(guest.status).map(([label, status]) => {
                                   const actionKey = `${sourceEvent?.id || state.selectedEventId}:${person.id}`;
                                   const actionBusy = lumaCheckInGuestKey === actionKey || (label === "Reinvite" && reinvitingGuestKey === actionKey);
                                   const ActionIcon = actionBusy ? RefreshCw : guestActionIcons[label];
@@ -9287,7 +9291,7 @@ function ProfileContext({ record }) {
 }
 
 function ProfileGuestActions({ record, person, lumaCheckInGuestKey, reinvitingGuestKey, onAction }) {
-  const actions = actionsForStatus(record.guest.status, record.event);
+  const actions = actionsForStatus(record.guest.status);
   if (!actions.length) return null;
   const actionKey = `${record.event.id}:${person.id}`;
   return (
@@ -10880,6 +10884,7 @@ function activityRecordsFromHistory(records) {
     eventTitle: event.title,
     eventDate: event.date,
     eventStartsAt: event.startsAt,
+    eventEndsAt: event.endsAt,
     eventCategory: event.category,
     eventLocation: event.location,
     eventUrl: event.lumaUrl,
@@ -11620,25 +11625,6 @@ function eventOccursBefore(candidate, event) {
   const candidateDate = String(candidate.date || "").slice(0, 10);
   const eventDate = String(event.date || "").slice(0, 10);
   return Boolean(candidateDate && eventDate && candidateDate < eventDate);
-}
-
-function actionsForStatus(status, event = null) {
-  if (status === "checked_in") return [["Undo", "going"]];
-  if (status === "no_show") return [["Check in", "checked_in"]];
-  if (status === "registered" && eventHasStarted(event)) return [["Check in", "checked_in"]];
-  if (status === "registered") return [["Approve", "going"], ["Waitlist", "waitlisted"], ["Decline", "declined"]];
-  if (status === "waitlisted") return [["Approve", "going"], ["Decline", "declined"]];
-  if (status === "going") return [["Check in", "checked_in"], ["Waitlist", "waitlisted"], ["Decline", "declined"]];
-  if (status === "invited") return [["Approve", "going"], ["Decline", "declined"]];
-  if (status === "declined") return [["Approve", "going"], ["Waitlist", "waitlisted"]];
-  return [];
-}
-
-function eventHasStarted(event, now = new Date()) {
-  const startsAt = new Date(event?.startsAt || "").getTime();
-  if (Number.isFinite(startsAt)) return startsAt <= now.getTime();
-  const eventDate = String(event?.date || "").slice(0, 10);
-  return Boolean(eventDate) && eventDate < localDateKey(now);
 }
 
 function getEvent(state, id) {

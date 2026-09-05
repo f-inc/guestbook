@@ -7090,7 +7090,7 @@ function EventStats({
           { value: "new_referrals", label: "New Referrals", count: stats.newReferrals ?? 0 },
           { value: "checked_in", label: "Check-ins", count: stats.checkedIn },
         ]),
-    ...(mode === "upcoming" ? [{ value: "new_referrals", label: "New Referrals", count: stats.newReferrals ?? 0 }] : []),
+    ...(mode === "upcoming" ? [{ value: "checked_in", label: "# Checked In", count: stats.checkedIn ?? 0 }] : []),
     { value: "first_registers", label: "First Registers", count: stats.newRegistrations ?? stats.firstRegisters ?? 0 },
     { value: "accepted", label: "Accepted", count: stats.accepted ?? stats.confirmed ?? 0 },
     { value: "registered", label: "Registered", count: stats.registered },

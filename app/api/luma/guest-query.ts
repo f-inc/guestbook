@@ -1,5 +1,6 @@
 import { parseTagFilters } from "./person-tags";
 import { guestStatusAfterEvent } from "../../guest-display-status";
+import { phoneMatchesSearch, phoneSearchDigits } from "../../phone-search";
 
 export const GUEST_FILTER_VALUES = [
   "all",
@@ -396,17 +397,23 @@ function firstRegistrationPersonWhere(eventId: string, boundary?: EventChronolog
 function guestSearchWhere(search: string): Record<string, any> | null {
   if (!search) return null;
   const contains = { contains: search, mode: "insensitive" };
+  const phoneDigits = phoneSearchDigits(search);
+  const phoneContains = phoneDigits ? { contains: phoneDigits, mode: "insensitive" } : null;
   return {
     OR: [
       { searchText: contains },
       { profileDescription: contains },
       { email: contains },
+      { phoneNumber: contains },
+      ...(phoneContains ? [{ phoneNumber: phoneContains }] : []),
       {
         person: {
           is: {
             OR: [
               { name: contains },
               { email: contains },
+              { phoneNumber: contains },
+              ...(phoneContains ? [{ phoneNumber: phoneContains }] : []),
               { title: contains },
               { bio: contains },
             ],
@@ -529,11 +536,14 @@ function isFirstRegistration(guest: any): boolean {
 function guestMatchesSearch(guest: any, person: any, search: string): boolean {
   if (!search) return true;
   const query = search.toLowerCase();
-  return [person.name, person.email, person.title, person.bio, guest.profileDescription, guest.searchText]
+  const matchesText = [person.name, person.email, person.title, person.bio, person.phoneNumber, guest.phoneNumber, guest.profileDescription, guest.searchText]
     .filter(Boolean)
     .join(" ")
     .toLowerCase()
     .includes(query);
+  return matchesText
+    || phoneMatchesSearch(person.phoneNumber, search)
+    || phoneMatchesSearch(guest.phoneNumber, search);
 }
 
 function guestMatchesTags(

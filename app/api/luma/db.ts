@@ -24,6 +24,7 @@ import { DEFAULT_TAG_COLOR, normalizeTagColor, normalizeTagName } from "./tag-ca
 import { buildRegistrationQuestionAnalytics, REFERRED_PERSON_TAG } from "../../event-analytics";
 import type { EventSwitchDiagnosticReporter } from "../../event-switch-diagnostics";
 import { MAX_SELECTED_EVENT_IDS } from "../../event-selection";
+import { phoneSearchDigits } from "../../phone-search";
 import { AUTOMATIC_TAG_DEFINITIONS, AUTOMATIC_TAG_RULESET_VERSION, NEW_GUEST_MAX_REGISTRATIONS, automaticTagRunMode, normalizeAutomaticTagPersonIds } from "./auto-tags";
 import type { AnalyticsRespondentQuery } from "./analytics-respondents";
 
@@ -563,6 +564,7 @@ export async function searchIndexedPeople(search: string, {
   comments = "any",
 }: IndexedPeopleSearchOptions = {}) {
   const query = search.trim().slice(0, 120);
+  const phoneDigits = phoneSearchDigits(query);
   const normalizedIncludedTags = [...new Set(includedTags.map((tag) => tag.trim()).filter(Boolean))].slice(0, 20);
   const normalizedExcludedTags = [...new Set(excludedTags.map((tag) => tag.trim()).filter(Boolean))].slice(0, 20);
   const normalizedComments = comments === "with" || comments === "without" ? comments : "any";
@@ -575,6 +577,7 @@ export async function searchIndexedPeople(search: string, {
   const escapedQuery = query.replace(/[\\%_]/g, "\\$&");
   const containsQuery = `%${escapedQuery}%`;
   const prefixQuery = `${escapedQuery}%`;
+  const containsPhoneDigits = `%${phoneDigits}%`;
   const pageSize = Math.max(1, Math.min(20, Math.trunc(limit) || 8));
   const resultOffset = Math.max(0, Math.min(10_000, Math.trunc(offset) || 0));
   const resultLimit = pageSize + 1;
@@ -644,6 +647,10 @@ export async function searchIndexedPeople(search: string, {
               COALESCE(person.title, '') || ' ' ||
               COALESCE(person.bio, '')
             ) LIKE LOWER(${containsQuery}) ESCAPE '\\'
+            OR (
+              ${Boolean(phoneDigits)}
+              AND REGEXP_REPLACE(COALESCE(person.phone_number, ''), '[^0-9]', '', 'g') LIKE ${containsPhoneDigits}
+            )
             OR EXISTS (
               SELECT 1
               FROM guest_comments AS comment
@@ -660,11 +667,17 @@ export async function searchIndexedPeople(search: string, {
         SELECT guest.person_id, 5 AS rank
         FROM luma_event_guests AS guest
         WHERE ${Boolean(query)}
-          AND LOWER(
-            COALESCE(guest.email, '') || ' ' ||
-            COALESCE(guest.profile_description, '') || ' ' ||
-            COALESCE(guest.search_text, '')
-          ) LIKE LOWER(${containsQuery}) ESCAPE '\\'
+          AND (
+            LOWER(
+              COALESCE(guest.email, '') || ' ' ||
+              COALESCE(guest.profile_description, '') || ' ' ||
+              COALESCE(guest.search_text, '')
+            ) LIKE LOWER(${containsQuery}) ESCAPE '\\'
+            OR (
+              ${Boolean(phoneDigits)}
+              AND REGEXP_REPLACE(COALESCE(guest.phone_number, ''), '[^0-9]', '', 'g') LIKE ${containsPhoneDigits}
+            )
+          )
         LIMIT ${guestCandidateLimit}
     ),
     tag_candidates AS MATERIALIZED (
@@ -2147,16 +2160,20 @@ function indexedMultiEventGuestPageWhereSql(query: GuestListQuery) {
 
   if (query.search) {
     const searchPattern = `%${query.search}%`;
+    const phoneDigits = phoneSearchDigits(query.search);
+    const phonePattern = `%${phoneDigits}%`;
     predicates.push(Prisma.sql`(
       guest.search_text ILIKE ${searchPattern}
       OR guest.profile_description ILIKE ${searchPattern}
       OR guest.email ILIKE ${searchPattern}
+      OR (${Boolean(phoneDigits)} AND REGEXP_REPLACE(COALESCE(guest.phone_number, ''), '[^0-9]', '', 'g') LIKE ${phonePattern})
       OR EXISTS (
         SELECT 1 FROM luma_people AS search_person
         WHERE search_person.person_id = guest.person_id
           AND (
             search_person.name ILIKE ${searchPattern}
             OR search_person.email ILIKE ${searchPattern}
+            OR (${Boolean(phoneDigits)} AND REGEXP_REPLACE(COALESCE(search_person.phone_number, ''), '[^0-9]', '', 'g') LIKE ${phonePattern})
             OR search_person.title ILIKE ${searchPattern}
             OR search_person.bio ILIKE ${searchPattern}
           )
@@ -2225,11 +2242,14 @@ function indexedGuestPageWhereSql(
 
   if (query.search) {
     const searchPattern = `%${query.search}%`;
+    const phoneDigits = phoneSearchDigits(query.search);
+    const phonePattern = `%${phoneDigits}%`;
     predicates.push(Prisma.sql`
       (
         guest.search_text ILIKE ${searchPattern}
         OR guest.profile_description ILIKE ${searchPattern}
         OR guest.email ILIKE ${searchPattern}
+        OR (${Boolean(phoneDigits)} AND REGEXP_REPLACE(COALESCE(guest.phone_number, ''), '[^0-9]', '', 'g') LIKE ${phonePattern})
         OR EXISTS (
           SELECT 1
           FROM luma_people AS search_person
@@ -2237,6 +2257,7 @@ function indexedGuestPageWhereSql(
             AND (
               search_person.name ILIKE ${searchPattern}
               OR search_person.email ILIKE ${searchPattern}
+              OR (${Boolean(phoneDigits)} AND REGEXP_REPLACE(COALESCE(search_person.phone_number, ''), '[^0-9]', '', 'g') LIKE ${phonePattern})
               OR search_person.title ILIKE ${searchPattern}
               OR search_person.bio ILIKE ${searchPattern}
             )

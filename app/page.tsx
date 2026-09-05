@@ -61,6 +61,7 @@ import { updateGuestSelection } from "./guest-selection";
 import { MAX_INVITE_MESSAGE_LENGTH } from "./invite-message";
 import { MAX_GUEST_STATUS_MESSAGE_LENGTH } from "./guest-status-notification";
 import { lumaEventManageUrl } from "./luma-event-url";
+import { phoneMatchesSearch } from "./phone-search";
 import { buildRegistrationQuestionAnalytics, eventWideAnalyticsCounts, invitationOutcomeCounts, normalizeRegistrationAnswer, REFERRED_PERSON_TAG, sortRegistrationQuestionOptions } from "./event-analytics";
 import { changedLiveEventCountKeys, mergeLiveEventCounts, type LiveEventCounts } from "./event-count-reconciliation";
 import {
@@ -4299,7 +4300,7 @@ export default function Home() {
                       <span>Find</span>
                       <input
                         type="search"
-                        placeholder="Name, email, profile"
+                        placeholder="Name, email, phone, profile"
                         value={state.filters.guestSearch}
                         onChange={(event) => setFilter("guestSearch", event.target.value)}
                       />
@@ -10585,7 +10586,10 @@ function eventGuests(
           ? includedStatuses.every((status) => guestMatchesFrontendStatus(guest, status))
           : includedStatuses.some((status) => guestMatchesFrontendStatus(guest, status))))
         && !excludedStatuses.some((status) => guestMatchesFrontendStatus(guest, status));
-      const matchesSearch = !query || searchableGuestText(person, guest).includes(query);
+      const matchesSearch = !query
+        || searchableGuestText(person, guest).includes(query)
+        || phoneMatchesSearch(person.phoneNumber, query)
+        || phoneMatchesSearch(guest.phoneNumber, query);
       return matchesStatus && matchesSearch;
     })
     .sort((left, right) => compareGuestDisplayRowsForFilter(left, right, guestSortStatusFilter(state), sortField, sortDirection));
@@ -10784,11 +10788,13 @@ function searchableGuestText(person: any, guest: any = {}) {
   return [
     person.name,
     person.email,
+    person.phoneNumber,
     person.profileDescription,
     person.bio,
     socialLinksText(person.socialLinks),
     referrerLabel(person.referrer),
     guest.profileDescription,
+    guest.phoneNumber,
     guest.searchText,
     registrationAnswerText(guest.registrationAnswers),
     socialLinksText(guest.socialLinks),

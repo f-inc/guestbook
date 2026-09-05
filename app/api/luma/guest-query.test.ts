@@ -257,6 +257,29 @@ test("to-decide includes pending and automatic waitlist guests only", () => {
   assert.deepEqual(result.guests.map((guest: any) => guest.personId), ["pending", "automatic"]);
 });
 
+test("guest search ignores phone formatting", () => {
+  const result = filterGuestPayload({
+    people: [
+      { id: "person-phone", name: "Person phone", phoneNumber: "+16462047329" },
+      { id: "guest-phone", name: "Guest phone" },
+      { id: "different", name: "Different", phoneNumber: "+16469990000" },
+    ],
+    guests: [
+      { personId: "person-phone", status: "going" },
+      { personId: "guest-phone", status: "going", phoneNumber: "+1 (646) 204-7329" },
+      { personId: "different", status: "going" },
+    ],
+  }, {
+    filter: "all",
+    search: "+1 646-204-7329",
+    tags: [],
+    cursor: 0,
+    pageSize: 50,
+  });
+
+  assert.deepEqual(result.guests.map((guest: any) => guest.personId), ["person-phone", "guest-phone"]);
+});
+
 test("only treats chronologically earlier events as prior history", () => {
   const startsAt = new Date("2026-07-17T17:00:00.000Z");
   const date = new Date("2026-07-17T00:00:00.000Z");

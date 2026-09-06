@@ -1751,7 +1751,11 @@ export default function Home() {
     if (guestRequestsRef.current.has(requestKey)) return false;
 
     const requestToken = Symbol(requestKey);
-    const requestScope = `${eventId}:${background || silent ? "background" : "foreground"}`;
+    // Every request that can replace the visible guest page competes in the
+    // same event scope. A silent refresh may have started before the user
+    // changed filters; keeping separate background/foreground scopes allowed
+    // that stale, unfiltered response to overwrite the newer filtered page.
+    const requestScope = eventId;
     latestGuestRequestRef.current.set(requestScope, requestToken);
     guestRequestsRef.current.add(requestKey);
     if (!append) {

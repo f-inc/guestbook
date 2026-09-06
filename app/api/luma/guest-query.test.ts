@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { eventGuestWhere, filterGuestPayload, guestFilterRequiresIndex, guestQueryRequiresIndex, guestStatusWhere, isRegisteredGuest, parseGuestListQuery, priorEventWhere } from "./guest-query";
+import { ANY_REGISTRATION_ANSWER_KEY } from "../../audience-answer-rules";
 
 test("parses bounded server-side guest query parameters", () => {
   const params = new URLSearchParams({
@@ -161,6 +162,68 @@ test("parses multiple registration-answer groups as a union with per-group atten
     { question: "Goal", answer: "Fundraise", answerKey: "fundraise", checkedInOnly: true },
   ]);
   assert.equal(guestQueryRequiresIndex(query), true);
+});
+
+test("keeps registration-answer filters when a refreshed snapshot is filtered in memory", () => {
+  const people = ["robot", "watching", "checked-robot", "legacy-multi"].map((id) => ({ id, name: id }));
+  const result = filterGuestPayload({
+    people,
+    guests: [
+      {
+        personId: "robot",
+        status: "registered",
+        registrationAnswers: [{ label: "Attendance plan", value: "Bringing Robot", values: ["Bringing Robot"] }],
+      },
+      {
+        personId: "watching",
+        status: "registered",
+        registrationAnswers: [{ label: "Attendance plan", value: "Here to watch", values: ["Here to watch"] }],
+      },
+      {
+        personId: "checked-robot",
+        status: "checked_in",
+        registrationAnswers: [{ label: "Attendance plan", value: "Bringing Robot", values: ["Bringing Robot"] }],
+      },
+      {
+        personId: "legacy-multi",
+        status: "registered",
+        registrationAnswers: [{ label: "Attendance plan", value: "Bringing Robot Here to watch", questionType: "multi_select" }],
+      },
+    ],
+  }, {
+    filter: "all",
+    search: "",
+    tags: [],
+    answerGroups: [{ question: "Attendance plan", answer: "Bringing Robot", answerKey: "bringingrobot", checkedInOnly: false }],
+    cursor: 0,
+    pageSize: 50,
+  });
+
+  assert.deepEqual(result.guests.map((guest: any) => guest.personId), ["robot", "checked-robot", "legacy-multi"]);
+  assert.deepEqual(result.query.answerGroups, [
+    { question: "Attendance plan", answer: "Bringing Robot", answerKey: "bringingrobot", checkedInOnly: false },
+  ]);
+});
+
+test("supports any-response and checked-in answer groups in refreshed snapshots", () => {
+  const people = ["registered", "checked", "blank"].map((id) => ({ id, name: id }));
+  const result = filterGuestPayload({
+    people,
+    guests: [
+      { personId: "registered", status: "registered", registrationAnswers: [{ label: "Role", value: "Founder" }] },
+      { personId: "checked", status: "checked_in", registrationAnswers: [{ label: "Role", value: "Investor" }] },
+      { personId: "blank", status: "checked_in", registrationAnswers: [{ label: "Role", value: "" }] },
+    ],
+  }, {
+    filter: "all",
+    search: "",
+    tags: [],
+    answerGroups: [{ question: "Role", answer: "Any response", answerKey: ANY_REGISTRATION_ANSWER_KEY, checkedInOnly: true }],
+    cursor: 0,
+    pageSize: 50,
+  });
+
+  assert.deepEqual(result.guests.map((guest: any) => guest.personId), ["checked"]);
 });
 
 test("filters guests with comments through the comment relation", () => {

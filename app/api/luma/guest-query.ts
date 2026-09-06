@@ -1,6 +1,7 @@
 import { parseTagFilters } from "./person-tags";
 import { guestStatusAfterEvent } from "../../guest-display-status";
 import { phoneMatchesSearch, phoneSearchDigits } from "../../phone-search";
+import { isAnyRegistrationAnswer } from "../../audience-answer-rules";
 
 export const GUEST_FILTER_VALUES = [
   "all",
@@ -310,6 +311,7 @@ export function filterGuestPayload(payload: any, query: GuestListQuery) {
     return guestMatchesStatusRules(guest, query)
       && guestMatchesSearch(guest, person, query.search)
       && guestMatchesTags(person, query.tags, query.tagMode, query.excludedTags)
+      && guestMatchesRegistrationAnswers(guest, query)
       && (!query.hasNotes || Number(person.crmNoteCount || 0) > 0 || Boolean(person.crmNotes?.trim()))
       && (query.attendedGreaterThan == null || Number(guest.eventCounts?.attended) > query.attendedGreaterThan);
   });
@@ -348,6 +350,10 @@ export function filterGuestPayload(payload: any, query: GuestListQuery) {
       sortDirection: query.sortDirection || "desc",
       hasNotes: query.hasNotes,
       attendedGreaterThan: query.attendedGreaterThan,
+      answerQuestion: query.answerQuestion,
+      answer: query.answer,
+      answerKey: query.answerKey,
+      answerGroups: query.answerGroups || [],
     },
   };
 }
@@ -558,6 +564,63 @@ function guestMatchesTags(
   return tagMode === "all"
     ? tags.every((tag) => personTags.has(tag.toLocaleLowerCase()))
     : tags.some((tag) => personTags.has(tag.toLocaleLowerCase()));
+}
+
+function guestMatchesRegistrationAnswers(guest: any, query: GuestListQuery): boolean {
+  const groups = query.answerGroups?.length
+    ? query.answerGroups
+    : query.answerQuestion
+      ? [{
+          question: query.answerQuestion,
+          answer: query.answer || "",
+          answerKey: query.answerKey || "",
+          checkedInOnly: false,
+        }]
+      : [];
+  if (!groups.length) return true;
+  const answers = Array.isArray(guest.registrationAnswers) ? guest.registrationAnswers : [];
+  return groups.some((group) => {
+    if (group.checkedInOnly && !guest.checkedInAt && guest.status !== "checked_in") return false;
+    const question = group.question.trim().toLocaleLowerCase();
+    return answers.some((candidate: any) => {
+      if (String(candidate?.label || "").trim().toLocaleLowerCase() !== question) return false;
+      const value = String(candidate?.value ?? "").trim();
+      if (!value) return false;
+      if (!group.answerKey && !group.answer) return true;
+      if (isAnyRegistrationAnswer(group.answerKey)) return true;
+      const selections = Array.isArray(candidate?.values)
+        ? candidate.values.map((selection: unknown) => String(selection).trim()).filter(Boolean)
+        : [];
+      const candidates = [value, ...selections];
+      if (group.answerKey) {
+        if (candidates.some((selection) => normalizeAnswerKey(selection) === group.answerKey)) return true;
+      } else if (candidates.some((selection) => selection.toLocaleLowerCase() === group.answer.trim().toLocaleLowerCase())) {
+        return true;
+      }
+      return isMultiSelectAnswer(candidate)
+        && containsNormalizedAnswer(value, group.answer);
+    });
+  });
+}
+
+function normalizeAnswerKey(value: string): string {
+  const normalized = String(value).normalize("NFKC").toLocaleLowerCase().trim();
+  return normalized.replace(/[^\p{L}\p{N}]+/gu, "") || normalized;
+}
+
+function normalizedAnswerWords(value: string): string {
+  return String(value).normalize("NFKC").toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+}
+
+function containsNormalizedAnswer(value: string, answer: string): boolean {
+  const normalizedValue = normalizedAnswerWords(value);
+  const normalizedAnswer = normalizedAnswerWords(answer);
+  return Boolean(normalizedAnswer) && (` ${normalizedValue} `).includes(` ${normalizedAnswer} `);
+}
+
+function isMultiSelectAnswer(answer: any): boolean {
+  const questionType = normalizeAnswerKey(answer?.questionType || answer?.question_type || "");
+  return ["multiselect", "checkbox", "checkboxes"].includes(questionType);
 }
 
 function boundedInteger(value: string | null, fallback: number, min: number, max: number): number {

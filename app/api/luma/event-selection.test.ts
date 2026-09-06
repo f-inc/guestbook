@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { MAX_SELECTED_EVENT_IDS, allVisibleEventSelection, nextEventSelection } from "../../event-selection";
+import { MAX_SELECTED_EVENT_IDS, allVisibleEventSelection, nextEventSelection, reconcileEventSelection } from "../../event-selection";
 
 test("selects a forward or reverse range in visible event order", () => {
   const orderedEventIds = ["evt-1", "evt-2", "evt-3", "evt-4", "evt-5"];
@@ -49,5 +49,31 @@ test("selects every visible event within the shared stacked-event limit", () => 
   assert.equal(
     allVisibleEventSelection(["evt-1", "evt-2", "evt-3"], "evt-2").primaryEventId,
     "evt-2",
+  );
+});
+
+test("preserves a URL event selection until the async catalog is available", () => {
+  const pending = reconcileEventSelection([], "evt-from-url", ["evt-from-url"], "");
+  assert.deepEqual(pending, {
+    primaryEventId: "evt-from-url",
+    eventIds: ["evt-from-url"],
+  });
+
+  const resolved = reconcileEventSelection(
+    ["evt-upcoming", "evt-from-url"],
+    pending.primaryEventId,
+    pending.eventIds,
+    "evt-upcoming",
+  );
+  assert.deepEqual(resolved, {
+    primaryEventId: "evt-from-url",
+    eventIds: ["evt-from-url"],
+  });
+});
+
+test("uses the preferred event after a populated catalog rejects the selection", () => {
+  assert.deepEqual(
+    reconcileEventSelection(["evt-upcoming", "evt-later"], "evt-missing", ["evt-missing"], "evt-later"),
+    { primaryEventId: "evt-later", eventIds: ["evt-later"] },
   );
 });

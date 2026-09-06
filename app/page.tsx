@@ -54,7 +54,7 @@ import {
 import { activityRecordStatus } from "./activity-status";
 import { ANY_REGISTRATION_ANSWER_KEY, ANY_REGISTRATION_ANSWER_LABEL } from "./audience-answer-rules";
 import { orderAvatarCandidates } from "./avatar-order";
-import { allVisibleEventSelection, nextEventSelection } from "./event-selection";
+import { allVisibleEventSelection, nextEventSelection, reconcileEventSelection } from "./event-selection";
 import { guestStatusDate, guestStatusTimestamp } from "./guest-status-date";
 import { actionsForStatus } from "./guest-actions";
 import { updateGuestSelection } from "./guest-selection";
@@ -10379,13 +10379,14 @@ function normalizeState(value) {
     .filter((status) => validGuestStatuses.has(status) && !next.filters.guestStatuses.includes(status));
   next.filters.guestStatusMode = next.filters.guestStatusMode === "all" ? "all" : "any";
   next.filters.guestStatus = next.filters.guestStatuses[0] || "all";
-  if (!next.events.some((event) => event.id === next.selectedEventId)) {
-    next.selectedEventId = preferredEventIdForView(next.events, next.filters.event);
-  }
-  next.selectedEventIds = unique(Array.isArray(next.selectedEventIds) ? next.selectedEventIds : [])
-    .filter((eventId) => next.events.some((event) => event.id === eventId));
-  if (!next.selectedEventIds.length && next.selectedEventId) next.selectedEventIds = [next.selectedEventId];
-  if (!next.selectedEventIds.includes(next.selectedEventId)) next.selectedEventIds.push(next.selectedEventId);
+  const reconciledEventSelection = reconcileEventSelection(
+    next.events.map((event) => event.id),
+    next.selectedEventId,
+    Array.isArray(next.selectedEventIds) ? next.selectedEventIds : [],
+    preferredEventIdForView(next.events, next.filters.event),
+  );
+  next.selectedEventId = reconciledEventSelection.primaryEventId;
+  next.selectedEventIds = reconciledEventSelection.eventIds;
   if (!next.people.some((person) => person.id === next.selectedPersonId)) {
     next.selectedPersonId = next.people[0]?.id || "";
   }

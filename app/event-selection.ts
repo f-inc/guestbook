@@ -51,6 +51,41 @@ export function allVisibleEventSelection(eventIds: string[], preferredEventId = 
   };
 }
 
+export function reconcileEventSelection(
+  availableEventIds: string[],
+  selectedEventId: string,
+  selectedEventIds: string[],
+  fallbackEventId = "",
+) {
+  const available = normalizedEventIds(availableEventIds);
+  const selected = normalizedEventIds(selectedEventIds);
+  const requestedPrimary = typeof selectedEventId === "string" ? selectedEventId.trim() : "";
+
+  // URL state is restored before the async event catalog is available. Keep
+  // that unresolved selection so unrelated early responses (such as tags)
+  // cannot normalize it away while the catalog is still empty.
+  if (!available.length) {
+    const primaryEventId = requestedPrimary || selected.at(-1) || "";
+    return {
+      primaryEventId,
+      eventIds: primaryEventId && !selected.includes(primaryEventId)
+        ? normalizedEventIds([...selected, primaryEventId])
+        : selected,
+    };
+  }
+
+  const availableSet = new Set(available);
+  const primaryEventId = availableSet.has(requestedPrimary)
+    ? requestedPrimary
+    : availableSet.has(fallbackEventId)
+      ? fallbackEventId
+      : available[0] || "";
+  const eventIds = selected.filter((eventId) => availableSet.has(eventId));
+  if (!eventIds.length && primaryEventId) eventIds.push(primaryEventId);
+  if (primaryEventId && !eventIds.includes(primaryEventId)) eventIds.push(primaryEventId);
+  return { primaryEventId, eventIds };
+}
+
 function normalizedEventIds(eventIds: string[]) {
   return [...new Set(
     eventIds

@@ -78,13 +78,17 @@ const statusLabels = {
   waitlisted: "Waitlisted",
   checked_in: "Checked in",
   declined: "Declined",
+  pending: "Pending",
+  rejected: "Rejected",
   no_show: "No-show",
   cancelled: "Event cancelled",
 };
 
 const activityFilterOptions = [
-  { status: "registered", label: "Registered" },
+  { status: "pending", label: "Pending" },
   { status: "going", label: "Accepted" },
+  { status: "rejected", label: "Rejected" },
+  { status: "waitlisted", label: "Waitlisted" },
   { status: "checked_in", label: "Checked in" },
   { status: "no_show", label: "No-show" },
   { status: "cancelled", label: "Event cancelled" },
@@ -10903,6 +10907,8 @@ function activityRecordsFromHistory(records) {
     eventCatalogActive: event.catalogActive,
     lumaGuestId: guest.lumaGuestId || guest.personId,
     status: guest.status,
+    lumaApprovalStatus: guest.lumaApprovalStatus,
+    operatorDecision: guest.operatorDecision,
     registeredAt: guest.registeredAt,
     invitedAt: guest.invitedAt,
     checkedInAt: guest.checkedInAt,

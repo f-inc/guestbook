@@ -18,9 +18,17 @@ export function activityRecordStatus(record: ActivityRecord, now = new Date()): 
   if (record.checkedInAt || record.status === "checked_in") return "checked_in";
   if (eventWasCancelledOrDeleted(record)) return "cancelled";
 
-  const isRegistered = Boolean(record.registeredAt || ["registered", "going", "no_show"].includes(record.status));
+  const approvalStatus = String(record.lumaApprovalStatus || "").toLowerCase();
+  if (record.status === "waitlisted" || approvalStatus === "waitlist") return "waitlisted";
+  if (record.status === "declined" || ["declined", "rejected"].includes(approvalStatus)) return "rejected";
+
+  const isRegistered = Boolean(
+    record.registeredAt
+      || ["registered", "going", "no_show"].includes(record.status)
+      || ["approved", "pending_approval", "session"].includes(approvalStatus),
+  );
   if (isRegistered) {
-    const approved = record.lumaApprovalStatus === "approved"
+    const approved = ["approved", "session"].includes(approvalStatus)
       || Boolean(record.approvedAt)
       || record.status === "going";
     return approved
@@ -29,7 +37,7 @@ export function activityRecordStatus(record: ActivityRecord, now = new Date()): 
           { endsAt: record.eventEndsAt, cancelled: record.eventCancelled === true, catalogActive: record.eventCatalogActive !== false },
           now,
         )
-      : "registered";
+      : "pending";
   }
 
   if (record.status === "invited" || record.invitedAt) return "invited";

@@ -4,7 +4,7 @@ import { activityRecordStatus, eventHasStarted } from "../../activity-status";
 
 const now = new Date("2026-07-12T22:00:00-07:00");
 
-test("keeps a future registration registered", () => {
+test("shows a future registration as pending", () => {
   const record = {
     status: "no_show",
     registeredAt: "2026-07-11T09:00:00-07:00",
@@ -13,7 +13,7 @@ test("keeps a future registration registered", () => {
   };
 
   assert.equal(eventHasStarted(record, now), false);
-  assert.equal(activityRecordStatus(record, now), "registered");
+  assert.equal(activityRecordStatus(record, now), "pending");
 });
 
 test("keeps an approved unchecked registration accepted while the event is running", () => {
@@ -51,7 +51,7 @@ test("keeps an approved unchecked registration accepted before the event starts"
   assert.equal(activityRecordStatus(record, now), "going");
 });
 
-test("keeps unapproved past registrations registered", () => {
+test("shows unapproved registrations as pending", () => {
   const record = {
     status: "registered",
     lumaApprovalStatus: "pending_approval",
@@ -59,10 +59,10 @@ test("keeps unapproved past registrations registered", () => {
     eventStartsAt: "2026-07-12T18:00:00-07:00",
   };
 
-  assert.equal(activityRecordStatus(record, now), "registered");
+  assert.equal(activityRecordStatus(record, now), "pending");
 });
 
-test("keeps declined applications with registration evidence registered in activity", () => {
+test("shows rejected applications even when they have registration evidence", () => {
   const record = {
     status: "declined",
     lumaApprovalStatus: "declined",
@@ -70,7 +70,18 @@ test("keeps declined applications with registration evidence registered in activ
     eventStartsAt: "2026-07-12T18:00:00-07:00",
   };
 
-  assert.equal(activityRecordStatus(record, now), "registered");
+  assert.equal(activityRecordStatus(record, now), "rejected");
+});
+
+test("shows waitlisted applications even when they have registration evidence", () => {
+  const record = {
+    status: "waitlisted",
+    lumaApprovalStatus: "waitlist",
+    registeredAt: "2026-07-10T09:00:00-07:00",
+    eventStartsAt: "2026-07-13T18:00:00-07:00",
+  };
+
+  assert.equal(activityRecordStatus(record, now), "waitlisted");
 });
 
 test("keeps checked-in and invitation-only states", () => {
@@ -86,12 +97,12 @@ test("registration evidence outranks an invited status", () => {
       invitedAt: "2026-07-11T20:00:00-07:00",
       eventStartsAt: "2026-07-13T09:00:00-07:00",
     }, now),
-    "registered",
+    "pending",
   );
 });
 
 test("treats a date-only event today as not yet started", () => {
-  assert.equal(activityRecordStatus({ status: "registered", eventDate: "2026-07-12" }, now), "registered");
+  assert.equal(activityRecordStatus({ status: "registered", eventDate: "2026-07-12" }, now), "pending");
 });
 
 test("does not blame a guest for an explicitly cancelled event", () => {

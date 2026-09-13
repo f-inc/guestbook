@@ -7002,6 +7002,23 @@ function PeopleSearchTable({
 function PersonPhoneEditor({ person, saving, onSave }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(person.phoneNumber || "");
+  const [copyStatus, setCopyStatus] = useState("");
+  const copyTimeoutRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    setCopyStatus("");
+    return () => {
+      if (copyTimeoutRef.current) window.clearTimeout(copyTimeoutRef.current);
+    };
+  }, [person.id, person.phoneNumber]);
+
+  const copyPhone = async (event) => {
+    event.stopPropagation();
+    const copied = await copyTextToClipboard(person.phoneNumber);
+    setCopyStatus(copied ? "Copied to clipboard" : "Unable to copy. Try again.");
+    if (copyTimeoutRef.current) window.clearTimeout(copyTimeoutRef.current);
+    copyTimeoutRef.current = window.setTimeout(() => setCopyStatus(""), 1400);
+  };
 
   useEffect(() => {
     if (!editing) setValue(person.phoneNumber || "");
@@ -7056,16 +7073,25 @@ function PersonPhoneEditor({ person, saving, onSave }) {
   return (
     <div className="search-phone-value">
       {person.phoneNumber ? (
-        <a className="phone-link" href={phoneHref(person.phoneNumber)} onClick={(event) => event.stopPropagation()}>
-          <PhoneIcon size={14} aria-hidden="true" />
+        <button
+          className="phone-link"
+          type="button"
+          aria-label={`Copy phone number ${person.phoneNumber}`}
+          title={copyStatus || "Click to copy phone number"}
+          onClick={copyPhone}
+        >
+          {copyStatus === "Copied to clipboard"
+            ? <Check size={14} aria-hidden="true" />
+            : <PhoneIcon size={14} aria-hidden="true" />}
           <span>{person.phoneNumber}</span>
-        </a>
+        </button>
       ) : (
         <button className="phone-add-trigger" type="button" onClick={() => setEditing(true)}>
           <Plus size={13} aria-hidden="true" />
           <span>Add phone</span>
         </button>
       )}
+      <span className="sr-only" role="status">{copyStatus}</span>
       {person.phoneNumber ? (
         <button className="icon-button" type="button" aria-label={`Edit phone number for ${person.name}`} title="Edit phone" onClick={() => setEditing(true)}>
           <Pencil size={13} aria-hidden="true" />
@@ -11484,11 +11510,6 @@ function eventStats(event) {
 
 function hasInvitationEvidence(guest) {
   return Boolean(guest?.invitedAt) || guest?.status === "invited";
-}
-
-function phoneHref(value) {
-  const dialable = String(value || "").trim().replace(/[^\d+*#,;]/g, "");
-  return dialable ? `tel:${dialable}` : undefined;
 }
 
 function isRegisteredGuest(guest) {

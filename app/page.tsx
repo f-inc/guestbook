@@ -69,6 +69,7 @@ import {
   EVENT_SWITCH_DIAGNOSTICS_PARAM,
 } from "./event-switch-diagnostics";
 import { aggregateEventFeedback } from "./api/luma/event-feedback";
+import { buildPeopleSearchUrlSearch, parsePeopleSearchUrl } from "./people-search-url";
 import { buildWorkspaceUrlSearch, isEventDirectoryPath, parseWorkspaceUrl, workspaceHistoryStateWithScroll, workspacePathname, workspaceScrollTopFromHistoryState, type EventDirectoryMetricFilter, type EventDirectorySortKey, type WorkspaceGuestAnswerGroup, type WorkspaceUrlState } from "./workspace-url";
 
 const statusLabels = {
@@ -387,6 +388,14 @@ export default function Home() {
 
   const applyWorkspaceUrlState = (urlState: WorkspaceUrlState) => {
     workspaceUrlModeRef.current = "replace";
+    const peopleState = parsePeopleSearchUrl(window.location.search);
+    searchOpenRef.current = peopleState.open;
+    universalSearchClosedAtRef.current = 0;
+    universalSearchScrollTopRef.current = 0;
+    setSearchOpen(peopleState.open);
+    setUniversalQuery(peopleState.query);
+    setUniversalPeopleFilters(peopleState.filters);
+    setUniversalSearchExpanded(peopleState.open && Boolean(peopleState.query || peopleSearchFiltersActive(peopleState.filters)));
     pendingProfileIdRef.current = urlState.profileId;
     setGuestPageTarget(urlState.guestPage);
     setActiveEventTab(urlState.tab);
@@ -705,6 +714,20 @@ export default function Home() {
     if (!searchOpen) return;
     window.requestAnimationFrame(() => universalSearchInputRef.current?.focus());
   }, [searchOpen]);
+
+  // People search can be shared even before an event has loaded.
+  useEffect(() => {
+    if (!workspaceUrlReady) return;
+    const nextSearch = buildPeopleSearchUrlSearch(window.location.search, {
+      open: searchOpen,
+      query: universalQuery,
+      filters: universalPeopleFilters,
+    });
+    if (nextSearch === window.location.search.replace(/^\?/, "")) return;
+    const nextUrl = new URL(window.location.href);
+    nextUrl.search = nextSearch;
+    window.history.replaceState(window.history.state, "", nextUrl);
+  }, [workspaceUrlReady, searchOpen, universalQuery, universalPeopleFiltersKey]);
 
   useEffect(() => {
     const query = universalQuery.trim().toLocaleLowerCase();

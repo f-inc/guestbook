@@ -7677,6 +7677,14 @@ function InviteTab({
         {stage === "add" ? (
           <>
             <div className="invite-stage-head"><div><p className="eyebrow">Step 1</p><h3>Add people by group</h3><p>Build an audience from tag groups, past events, or individual people.</p></div></div>
+            <ManualAudienceSearch
+              mode="add"
+              people={state.people}
+              selected={state.invite.includePeople || []}
+              request={request}
+              onMergePeople={onMergePeople}
+              onChange={(personIds) => onSetInvite("includePeople", personIds)}
+            />
             <TagAudienceBubbles groups={tagGroups} superTags={superTagGroups} selected={includeTags} selectedSuperTags={includeSuperTags} loading={tagsLoading} activeLoading={tagLoading} mode="add" onSelect={selectTagGroup} onOpenTagSettings={onOpenTagSettings} />
             <EventAudiencePicker events={state.events} selections={includeEventCohorts} activeLoading={eventLoading} mode="add" cohortCounts={metadata.eventCounts} countsStatus={metadata.eventsStatus} countsError={metadata.eventsError} onSelect={selectEventCohort} />
             <RegistrationAnswerRules
@@ -7695,6 +7703,14 @@ function InviteTab({
         {stage === "subtract" ? (
           <>
             <div className="invite-stage-head"><div><p className="eyebrow">Step 2</p><h3>Subtract people</h3><p>Remove tag groups, past-event groups, or individual people.</p></div></div>
+            <ManualAudienceSearch
+              mode="subtract"
+              people={state.people}
+              selected={state.invite.excludePeople || []}
+              request={request}
+              onMergePeople={onMergePeople}
+              onChange={(personIds) => onSetInvite("excludePeople", personIds)}
+            />
             <TagAudienceBubbles groups={tagGroups.filter((group) => !includeTags.includes(group.name))} superTags={superTagGroups.filter((group) => !includeSuperTags.includes(group.name))} selected={excludeTags} selectedSuperTags={excludeSuperTags} loading={tagsLoading} activeLoading={tagLoading} mode="subtract" onSelect={selectTagGroup} onOpenTagSettings={onOpenTagSettings} />
             <EventAudiencePicker events={state.events} selections={excludeEventCohorts} activeLoading={eventLoading} mode="subtract" cohortCounts={metadata.eventCounts} countsStatus={metadata.eventsStatus} countsError={metadata.eventsError} onSelect={selectEventCohort} />
             <RegistrationAnswerRules
@@ -8150,36 +8166,51 @@ function eventCohortCount(event, cohort, indexedCounts: any = null) {
   }).length;
 }
 
-function ManualAudienceSearch({ mode, selected, request, onMergePeople, onChange }) {
+function ManualAudienceSearch({ mode, people, selected, request, onMergePeople, onChange }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
   useEffect(() => {
     const normalized = query.trim();
-    if (!normalized) { setResults([]); setLoading(false); return; }
+    if (!normalized) { setResults([]); setLoading(false); setError(""); return; }
     const controller = new AbortController();
     setLoading(true);
+    setError("");
     const timeout = window.setTimeout(async () => {
       try {
-        const params = new URLSearchParams({ q: normalized, scope: "name", limit: "8" });
+        const params = new URLSearchParams({ q: normalized, limit: "12" });
         const response = await request(`/api/search/people?${params.toString()}`, { cache: "no-store", signal: controller.signal });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Unable to search people.");
-        if (!controller.signal.aborted) setResults(data.people || []);
+        if (!controller.signal.aborted) {
+          setResults(data.people || []);
+          setError("");
+        }
+      } catch (searchError: any) {
+        if (!controller.signal.aborted) {
+          setResults([]);
+          setError(searchError.message || "Unable to search people.");
+        }
       } finally {
         if (!controller.signal.aborted) setLoading(false);
       }
     }, UNIVERSAL_PEOPLE_SEARCH_DEBOUNCE_MS);
     return () => { window.clearTimeout(timeout); controller.abort(); };
   }, [query]);
+  const selectedPeople = selected.flatMap((personId) => {
+    const person = people.find((candidate) => candidate.id === personId);
+    return person ? [person] : [];
+  });
   return (
     <div className="manual-audience-search">
-      <div className="manual-audience-search-head"><strong>{mode === "add" ? "Add someone manually" : "Subtract someone manually"}</strong><span>{selected.length} selected</span></div>
-      <label><Search size={16} /><input type="search" value={query} placeholder="Search by name" onChange={(event) => setQuery(event.target.value)} /></label>
-      {query ? <div className="manual-audience-results">{results.map(({ person }) => {
+      <div className="manual-audience-search-head"><span><strong>Specific people</strong><small>{mode === "add" ? "Search and select anyone you want to invite." : "Search and remove individual recipients."}</small></span><span>{selected.length} selected</span></div>
+      {selectedPeople.length ? <div className="manual-audience-selected" aria-label={`${selectedPeople.length} selected ${selectedPeople.length === 1 ? "person" : "people"}`}>{selectedPeople.map((person) => <button type="button" key={person.id} title={`Remove ${person.name}`} onClick={() => onChange(selected.filter((personId) => personId !== person.id))}><Avatar person={person} /><span>{person.name}</span><X size={12} aria-hidden="true" /></button>)}</div> : null}
+      <label><Search size={16} aria-hidden="true" /><input type="search" value={query} placeholder="Search by name or email" aria-label={mode === "add" ? "Search for people to invite" : "Search for recipients to subtract"} onChange={(event) => setQuery(event.target.value)} />{query ? <button type="button" aria-label="Clear people search" onClick={() => setQuery("")}><X size={14} /></button> : null}</label>
+      {query ? <div className="manual-audience-results" aria-live="polite">{results.map(({ person }) => {
         const active = selected.includes(person.id);
-        return <button className={active ? "active" : ""} type="button" key={person.id} onClick={() => { onMergePeople([person]); onChange(active ? selected.filter((id) => id !== person.id) : [...selected, person.id]); setQuery(""); }}><Avatar person={person} /><span><strong>{person.name}</strong><small>{person.email}</small></span>{active ? <CircleCheck size={16} /> : mode === "add" ? <Plus size={16} /> : <UserMinus size={16} />}</button>;
-      })}{loading ? <div className="manual-audience-loading">Searching...</div> : null}</div> : null}
+        return <button className={active ? "active" : ""} type="button" aria-pressed={active} key={person.id} onClick={() => { onMergePeople([person]); onChange(active ? selected.filter((id) => id !== person.id) : [...selected, person.id]); }}><Avatar person={person} /><span><strong>{person.name}</strong><small>{person.email}</small></span>{active ? <CircleCheck size={16} /> : mode === "add" ? <Plus size={16} /> : <UserMinus size={16} />}</button>;
+      })}{loading ? <div className="manual-audience-loading"><span className="loading-spinner" /> Searching people…</div> : error ? <div className="manual-audience-loading manual-audience-error" role="alert">{error}</div> : !results.length ? <div className="manual-audience-loading">No people match “{query.trim()}”.</div> : null}</div> : null}
     </div>
   );
 }

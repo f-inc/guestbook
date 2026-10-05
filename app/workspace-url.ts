@@ -216,9 +216,19 @@ export function parseWorkspaceUrl(search: string): WorkspaceUrlState {
   };
 }
 
-export function buildWorkspaceUrlSearch(currentSearch: string, state: WorkspaceUrlState): string {
+export function guestsPageUrlSearch(currentSearch: string): string {
+  const params = new URLSearchParams(currentSearch);
+  WORKSPACE_PARAMS.filter(key => key !== "profile").forEach(key => params.delete(key));
+  return params.toString();
+}
+
+export function buildWorkspaceUrlSearch(currentSearch: string, state: WorkspaceUrlState, guestsPage = false): string {
   const params = new URLSearchParams(currentSearch.startsWith("?") ? currentSearch.slice(1) : currentSearch);
   WORKSPACE_PARAMS.forEach((key) => params.delete(key));
+  if (guestsPage) {
+    if (state.profileId) params.set("profile", state.profileId);
+    return params.toString();
+  }
 
   const eventIds = unique(state.eventIds?.length ? state.eventIds : state.eventId ? [state.eventId] : []);
   eventIds.forEach((eventId) => params.append("event", eventId));

@@ -73,7 +73,7 @@ import {
 } from "./event-switch-diagnostics";
 import { aggregateEventFeedback } from "./api/luma/event-feedback";
 import { buildPeopleSearchUrlSearch, parsePeopleSearchUrl } from "./people-search-url";
-import { buildWorkspaceUrlSearch, isEventDirectoryPath, parseWorkspaceUrl, workspaceHistoryStateWithScroll, workspacePathname, workspaceScrollTopFromHistoryState, type EventDirectoryMetricFilter, type EventDirectorySortKey, type WorkspaceGuestAnswerGroup, type WorkspaceUrlState } from "./workspace-url";
+import { buildWorkspaceUrlSearch, guestsPageUrlSearch, isEventDirectoryPath, parseWorkspaceUrl, workspaceHistoryStateWithScroll, workspacePathname, workspaceScrollTopFromHistoryState, type EventDirectoryMetricFilter, type EventDirectorySortKey, type WorkspaceGuestAnswerGroup, type WorkspaceUrlState } from "./workspace-url";
 
 const statusLabels = {
   registered: "Registered",
@@ -667,6 +667,7 @@ export default function Home() {
     }
     const guestsUrl = new URL(window.location.href);
     guestsUrl.pathname = "/guests";
+    guestsUrl.search = guestsPageUrlSearch(guestsUrl.search);
     window.history.pushState(window.history.state, "", guestsUrl);
     searchOpenRef.current = true;
     setOpenTagPersonId("");
@@ -741,7 +742,7 @@ export default function Home() {
   // People search can be shared even before an event has loaded.
   useEffect(() => {
     if (!workspaceUrlReady) return;
-    const nextSearch = buildPeopleSearchUrlSearch(window.location.search, {
+    const nextSearch = buildPeopleSearchUrlSearch(searchOpen ? guestsPageUrlSearch(window.location.search) : window.location.search, {
       open: searchOpen,
       query: universalQuery,
       filters: universalPeopleFilters,
@@ -1157,7 +1158,7 @@ export default function Home() {
       guestAnswerGroups: state.filters.guestAnswerGroups,
       guestPage: Math.max(guestPageTarget, loadedGuestPage),
       profileId,
-    });
+    }, searchOpenRef.current);
     const currentSearch = window.location.search.replace(/^\?/, "");
     const nextPathname = searchOpenRef.current ? "/guests" : workspacePathname(eventDirectoryOpen);
     const mode = workspaceUrlModeRef.current;
@@ -1173,6 +1174,7 @@ export default function Home() {
   }, [
     workspaceUrlReady,
     state.events.length,
+    searchOpen,
     selectedEvent?.id,
     selectedEventIdsKey,
     eventDirectoryOpen,

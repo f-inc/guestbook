@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { RefreshCw } from "lucide-react";
+import { RefreshCw, Trash2 } from "lucide-react";
 
 export function EmailRemovalControls({request, query, selected, onChanged}) {
   const [status,setStatus] = useState<any>(null), [modal,setModal] = useState(false);
@@ -49,12 +49,14 @@ export function EmailRemovalControls({request, query, selected, onChanged}) {
   const job=status?.job;
   return <div className="email-removal-controls">
     <div className="email-removal-bar">
-      <button className="button" disabled={!status?.configured || busy || job?.status==="running"} onClick={open}>Remove blocked emails from Luma{selected.length?` (${selected.length} selected)`:""}</button>
-      {!status?.configured && status ? <small>Removal is awaiting database setup.</small>:null}
+      <button className="button email-removal-button" title="Review blocked email removal from Luma calendars" disabled={!status?.configured || busy || job?.status==="running"} onClick={open}><Trash2 size={15} aria-hidden="true" />{selected.length ? `Remove selected (${selected.length})` : "Remove blocked emails"}</button>
+    </div>
+    {job || (!status?.configured && status) ? <div className="email-removal-feedback">
+      {!status?.configured && status ? <small>Removal is not enabled in this environment.</small>:null}
       {job ? <span role="status">{job.status==="running"?<RefreshCw size={14} className="motion-safe:animate-spin"/>:null} {job.status==="running"?"Removing":job.status==="completed"?"Removal complete":"Removal needs attention"} · {job.succeeded}/{job.total} calendar removals confirmed{job.skipped?` · ${job.skipped} no longer blocked`:""}{job.failed?` · ${job.failed} failed`:""}{job.unknown?` · ${job.unknown} unconfirmed`:""}</span>:null}
       {job && job.status!=="draft" ? <button className="plain" onClick={async()=>{setBusy(true);try{setPreview(await api(`/api/email-removal?job=${job.id}`));setOffset(0);setModal(true);}catch(e:any){setError(e.message);}finally{setBusy(false);}}}>View removal details</button>:null}
-    </div>
-    {error&&!modal?<p role="alert" className="verification-notice">{error}</p>:null}
+    </div>:null}
+    {error&&!modal?<p role="alert" className="verification-notice email-removal-error">{error}</p>:null}
     {modal?<dialog ref={modalRef} className="email-removal-dialog" onCancel={e=>{if(busy)e.preventDefault();else setModal(false);}} onClose={()=>setModal(false)}>
       <h3>{preview?preview.job.status==="draft"?"Review removal":"Removal details":"Remove blocked emails"}</h3>
       {!preview?<>

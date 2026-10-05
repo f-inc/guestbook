@@ -153,8 +153,8 @@ export function EmailVerificationSummary({ request, onOpenPerson }) {
           <option value="issues">Needs review</option><option value="blocked">Blocked</option><option value="bounced">Recorded Luma bounces</option><option value="all">Active emails</option><option value="inactive">Inactive</option>
           {Object.entries(labels).map(([value, label]) => <option key={value} value={value}>{value === "risky" ? "At risk / Unconfirmed" : label}</option>)}
         </select>
+        <EmailRemovalControls request={request} query={query} selected={selectedRemoval} onChanged={() => { setRevision(v => v + 1); setSelectedRemoval([]); }} />
       </div>
-      <EmailRemovalControls request={request} query={query} selected={selectedRemoval} onChanged={() => { setRevision(v => v + 1); setSelectedRemoval([]); }} />
       <div className="table-wrap"><table className="guest-table">
         <thead><tr><th><input type="checkbox" aria-label="Select blocked emails on this page" checked={!!data?.rows.some(r=>r.decision.status==="blocked") && data.rows.filter(r=>r.decision.status==="blocked").every(r=>selectedRemoval.includes(r.emailLower))} onChange={e=>setSelectedRemoval(e.target.checked ? [...new Set([...selectedRemoval,...data.rows.filter(r=>r.decision.status==="blocked").map(r=>r.emailLower)])] : selectedRemoval.filter(email=>!data.rows.some(r=>r.emailLower===email)))}/></th><th>Guest</th><th>Email Verified?</th><th>Reason</th><th>Sending decision</th></tr></thead>
         <tbody>{data?.rows.map((row) => <tr key={row.emailLower}>

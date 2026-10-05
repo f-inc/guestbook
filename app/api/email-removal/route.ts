@@ -1,5 +1,7 @@
 import { after } from "next/server";
 import { requireGuestbookKey } from "../session-auth";
+import { prisma } from "../luma/db";
+import { removalCsv } from "../luma/email-removal-csv";
 import { removalCanPreview, removalCanConfirm } from "../luma/email-removal-policy";
 import { confirmRemoval, previewRemoval, removalCalendars, removalStatus, requireRemovalEnabled, retryFailedRemoval, runRemovalBatch } from "../luma/email-removal";
 export const runtime = "nodejs";
@@ -7,8 +9,18 @@ const failure = (e: any) => Response.json({ error: e.publicMessage ? e.message :
 export async function GET(request: Request) {
   try {
     requireGuestbookKey(request);
-    if (!removalCanPreview()) return Response.json({ configured: false, canConfirm:false });
     const p = new URL(request.url).searchParams;
+    if (p.get("format") === "csv") {
+      requireRemovalEnabled();
+      const csv = await removalCsv(p.get("job") || "", prisma());
+      return new Response(csv, { headers: {
+        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Disposition": 'attachment; filename="guestbook-removals.csv"',
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+      } });
+    }
+    if (!removalCanPreview()) return Response.json({ configured: false, canConfirm:false });
     if (p.get("calendars") === "1") return Response.json({ calendars: (await removalCalendars()).map(({id,name}) => ({id,name})) });
     return Response.json({ configured: true, canConfirm:removalCanConfirm(), ...await removalStatus(p.get("job") || undefined, Math.max(0, Math.min(50000, Math.floor(Number(p.get("offset")) || 0)))) });
   } catch(e) { return failure(e); }

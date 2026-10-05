@@ -243,6 +243,11 @@ rejections can be retried explicitly. Timeouts, server failures and expired
 worker claims become **unconfirmed** and require checking the contact in Luma
 before a new request; they are never retried automatically. Current blocking is
 rechecked before each removal. If an address no longer qualifies, it is skipped.
+**Download CSV**, beside the removal status or inside removal details, exports
+the entire saved job (not just the current page), including failed and unconfirmed
+entries. Each row represents one email/calendar operation and includes its name,
+email, calendar, reason, status, error, UTC timestamps and job ID. Downloads require
+the Guestbook key and do not change records or retry requests.
 After every selected calendar confirms success, `email_inactive` records the
 email's inactive state. Partial successes remain excluded from new invitations
 until reviewed, even if verification subsequently becomes deliverable.

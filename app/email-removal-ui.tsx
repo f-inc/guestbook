@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { RefreshCw, Trash2 } from "lucide-react";
+import { Download, RefreshCw, Trash2 } from "lucide-react";
 
 export function EmailRemovalControls({request, query, selected, onChanged}) {
   const [status,setStatus] = useState<any>(null), [modal,setModal] = useState(false);
@@ -56,6 +56,21 @@ export function EmailRemovalControls({request, query, selected, onChanged}) {
       setOffset(next);
     } catch(e:any){setError(e.message);} finally{setBusy(false);}
   }
+  async function downloadCsv(jobId: string) {
+    setBusy(true);setError("");
+    try {
+      const res = await refs.current.request(`/api/email-removal?format=csv&job=${encodeURIComponent(jobId)}`);
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || "Unable to download removals.");
+      }
+      const url = URL.createObjectURL(await res.blob());
+      const link = document.createElement("a");
+      link.href = url;link.download = `guestbook-removals-${jobId}.csv`;
+      document.body.appendChild(link);link.click();link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch(e:any){setError(e.message);} finally{setBusy(false);}
+  }
   const job=status?.job;
   return <div className="email-removal-controls">
     <div className="email-removal-bar">
@@ -65,6 +80,7 @@ export function EmailRemovalControls({request, query, selected, onChanged}) {
       {!status?.configured && status ? <small>Removal is not enabled in this environment.</small>:null}
       {job ? <span role="status">{job.status==="running"?<RefreshCw size={14} className="motion-safe:animate-spin"/>:null} {job.status==="running"?"Removing":job.status==="completed"?"Removal complete":"Removal needs attention"} · {job.succeeded}/{job.total} calendar removals confirmed{job.skipped?` · ${job.skipped} no longer blocked`:""}{job.failed?` · ${job.failed} failed`:""}{job.unknown?` · ${job.unknown} unconfirmed`:""}</span>:null}
       {job && job.status!=="draft" ? <button className="plain" onClick={async()=>{setBusy(true);try{setPreview(await api(`/api/email-removal?job=${job.id}`));setOffset(0);setModal(true);}catch(e:any){setError(e.message);}finally{setBusy(false);}}}>View removal details</button>:null}
+      {job && job.status!=="draft" ? <button className="plain" disabled={busy} onClick={()=>downloadCsv(job.id)}>Download CSV</button>:null}
     </div>:null}
     {error&&!modal?<p role="alert" className="verification-notice email-removal-error">{error}</p>:null}
     {modal?<dialog ref={modalRef} className={`email-removal-dialog${preview ? " email-removal-dialog-wide" : ""}`} onCancel={e=>{if(busy)e.preventDefault();else setModal(false);}} onClose={()=>setModal(false)}>
@@ -87,6 +103,7 @@ export function EmailRemovalControls({request, query, selected, onChanged}) {
       </>}
       {error?<p role="alert">{error}</p>:null}
       <div className="dialog-actions"><button className="button" disabled={busy} onClick={()=>setModal(false)}>Close</button>
+        {preview && preview.job.status!=="draft" ? <button className="button" disabled={busy} title="Download all entries in this removal job, including failures" onClick={()=>downloadCsv(preview.job.id)}><Download size={15} aria-hidden="true"/> Download CSV</button>:null}
         {!preview?<button className="button" disabled={busy||!calendarIds.length} onClick={()=>action({action:"preview",scope,emails:selected,query,calendarIds})}>{busy?"Preparing…":"Preview removal"}</button>:preview.job.status==="draft"?<button className="button danger" disabled={busy||!confirmed||!status?.canConfirm||preview.previewOnly} onClick={()=>action({action:"confirm",jobId:preview.job.id,confirmation:"REMOVE_BLOCKED_EMAILS"})}>{busy?"Starting…":"Confirm removal"}</button>:preview.job.failed&&preview.job.status==="needs_attention"?<button className="button" disabled={busy||!status?.canConfirm} onClick={()=>action({action:"retry",jobId:preview.job.id})}>Retry failed requests</button>:null}
       </div>
     </dialog>:null}

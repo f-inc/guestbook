@@ -267,3 +267,17 @@ PostgreSQL socket under `/private/tmp/guestbook-removal-test-*`; they refuse the
 normal application connection and verify the server's data directory before
 fixture writes. Initialize the existing schema plus the removal migration there,
 then run `node --import tsx --test app/api/luma/email-removal.test.ts`.
+
+
+Removal previews are available in `next dev` even when `EMAIL_REMOVAL_ENABLED`
+is unset. These previews query existing records only: they do not persist draft
+jobs or change the shared database. Preview pagination is live, so its counts
+may change while production cleanup runs. Confirmation and retries are disabled
+in the development UI and rejected server-side; development workers cannot
+claim or dispatch removal jobs either.
+
+Executing removals requires `EMAIL_REMOVAL_ENABLED=true`, `NODE_ENV=production`,
+and a production deployment identity (`RAILWAY_ENVIRONMENT_NAME=production`,
+or `GUESTBOOK_ENVIRONMENT=production` on other hosts). Railway's environment
+identity takes precedence. The existing preview-and-confirm flow still applies
+in production. No new migration is required for this restriction.

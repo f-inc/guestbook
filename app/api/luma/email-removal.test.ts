@@ -1,10 +1,19 @@
-import test from "node:test";
+import test, {beforeEach, afterEach} from "node:test";
+import { removalCanConfirm, removalCanPreview } from "./email-removal-policy";
 import assert from "node:assert/strict";
 import { calendarIdentity, confirmRemoval, previewRemoval, removalStatus, removeCalendarEmail, retryFailedRemoval, runRemovalTick } from "./email-removal";
 import { activePersonSql, removedEmails } from "./email-inactivity";
 import { Prisma, PrismaClient } from "@prisma/client";
 import { verificationOverview } from "./email-verification";
 import { eligibleInvitationRecipients } from "./invite-tracking-store";
+
+const policyKeys = ["NODE_ENV", "RAILWAY_ENVIRONMENT_NAME", "GUESTBOOK_ENVIRONMENT", "EMAIL_REMOVAL_ENABLED"];
+let savedPolicy: Record<string,string|undefined>;
+beforeEach(() => {
+  savedPolicy = Object.fromEntries(policyKeys.map(k=>[k,process.env[k]]));
+  Object.assign(process.env, {NODE_ENV:"production", RAILWAY_ENVIRONMENT_NAME:"production", EMAIL_REMOVAL_ENABLED:"true"});
+});
+afterEach(() => { for(const k of policyKeys) { if(savedPolicy[k]===undefined)delete process.env[k];else process.env[k]=savedPolicy[k]; } });
 
 test("removal verifies calendar identity before any destructive call", async () => {
   process.env.LUMA_API_KEY_987 = "test-only-key";
@@ -124,4 +133,41 @@ test("isolated database: preview, confirmation, partial failure, recovery and vi
     if(originalEnabled===undefined)delete process.env.EMAIL_REMOVAL_ENABLED;else process.env.EMAIL_REMOVAL_ENABLED=originalEnabled;
     await db.$disconnect();
   }
+});
+
+test("only an enabled production deployment can execute removals", () => {
+  for (const env of [
+    {NODE_ENV:"development", EMAIL_REMOVAL_ENABLED:"true", RAILWAY_ENVIRONMENT_NAME:"production"},
+    {NODE_ENV:"production", EMAIL_REMOVAL_ENABLED:"true", RAILWAY_ENVIRONMENT_NAME:"staging"},
+    {NODE_ENV:"production", EMAIL_REMOVAL_ENABLED:"true"},
+    {NODE_ENV:"production", EMAIL_REMOVAL_ENABLED:"false", RAILWAY_ENVIRONMENT_NAME:"production"},
+  ]) assert.equal(removalCanConfirm(env),false);
+  assert.equal(removalCanConfirm({NODE_ENV:"production",EMAIL_REMOVAL_ENABLED:"true",RAILWAY_ENVIRONMENT_NAME:"production"}),true);
+  assert.equal(removalCanPreview({NODE_ENV:"development"}),true);
+});
+test("development cannot confirm, retry, dispatch or claim production jobs", async () => {
+  Object.assign(process.env,{NODE_ENV:"development"});
+  const db:any=new Proxy({}, {get(){throw Error("Must not access database for removal execution");}});
+  await assert.rejects(confirmRemoval("any","REMOVE_BLOCKED_EMAILS",db),/only in production/);
+  await assert.rejects(retryFailedRemoval("any",db),/only in production/);
+  await assert.rejects(removeCalendarEmail({id:"cal-test",envName:"LUMA_API_KEY"},"fake@example.com",async()=>{throw Error("Must not call Luma");}),/only in production/);
+  assert.equal(await runRemovalTick(db),undefined);
+});
+test("development preview and pagination never persist a job", async () => {
+  Object.assign(process.env,{NODE_ENV:"development",EMAIL_REMOVAL_ENABLED:"false"});
+  const keys=Object.fromEntries(Object.entries(process.env).filter(([k])=>/^LUMA_API_KEY(?:_\d+)?$/.test(k)));
+  Object.keys(keys).forEach(k=>delete process.env[k]);process.env.LUMA_API_KEY="mock-key";
+  const originalFetch=globalThis.fetch;
+  globalThis.fetch=async()=>Response.json({calendar:{id:"cal-test",name:"Test"}});
+  let reads=0;
+  const db:any={
+    $queryRaw:async()=> ++reads%2===1 ? Array.from({length:55},(_,i)=>({emailLower:`test${i}@example.com`,lumaBlockedReason:"bounced"})) : [{total:55}],
+    $transaction:async()=>{throw Error("Preview must not write to the shared database");},
+  };
+  try {
+    const first:any=await previewRemoval({scope:"all",calendarIds:["cal-test"]},db);
+    assert.equal(first.previewOnly,true);assert.equal(first.job.id,undefined);assert.equal(first.rows.length,50);assert.equal(first.hasMore,true);
+    const last:any=await previewRemoval({scope:"all",calendarIds:["cal-test"],offset:50},db);
+    assert.equal(last.rows.length,5);assert.equal(last.hasMore,false);assert.equal(last.job.affectedPeople,55);
+  }finally{globalThis.fetch=originalFetch;delete process.env.LUMA_API_KEY;Object.assign(process.env,keys);}
 });

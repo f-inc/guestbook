@@ -1,13 +1,13 @@
+import { removalCanPreview, removalCanConfirm, requireRemovalProduction } from "./email-removal-policy";
 import { Prisma } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 import { prisma } from "./db";
 import { lumaApiKeys, type LumaApiKey } from "./api-keys";
 import { emailDecision, VERIFICATION_MAX_AGE_MS } from "./email-policy";
-import { activeEmailSql, emailRemovalEnabled } from "./email-inactivity";
 
 const fail = (message: string, status = 409) => Object.assign(new Error(message), { status, publicMessage: true });
 export function requireRemovalEnabled() {
-  if (!emailRemovalEnabled()) throw fail("Email removal needs its database migration and server configuration before it can be used.", 503);
+  if (!removalCanPreview()) throw fail("Email removal needs its database migration and server configuration before it can be used.", 503);
 }
 export function calendarIdentity(data: any) {
   const c = data?.calendar || data;
@@ -45,11 +45,23 @@ export async function previewRemoval(input: any, db: any = prisma()) {
   const rows = await db.$queryRaw(Prisma.sql`SELECT v."emailLower", v.name, v.state, v."checkedAt", v."lumaBlockedReason"
     FROM email_addresses v
     WHERE (v."lumaBlockedReason" IS NOT NULL OR (v.state = 'undeliverable' AND v."checkedAt" >= ${new Date(Date.now() - VERIFICATION_MAX_AGE_MS)}))
-      AND ${activeEmailSql(Prisma.sql`v."emailLower"`)}
+      AND NOT EXISTS (SELECT 1 FROM email_inactive i WHERE i."emailLower"=v."emailLower")
       AND ${input.scope === "all" ? Prisma.sql`(strpos(v."emailLower", lower(${q})) > 0 OR strpos(lower(coalesce(v.name, '')), lower(${q})) > 0)` : Prisma.sql`v."emailLower" IN (${Prisma.join(selected)})`}
     ORDER BY v."emailLower" LIMIT 10001`);
   if (!rows.length) throw fail("No currently blocked, active addresses match this selection.");
   if (rows.length > 10000 || rows.length * calendars.length > 50000) throw fail("This selection is too large. Narrow the search or choose fewer calendars.");
+  if (!removalCanConfirm()) {
+    // Development may share production's database: previews must never create jobs.
+    const emails = rows.map(r => r.emailLower);
+    const hidden = await db.$queryRaw(Prisma.sql`SELECT count(*)::int AS total FROM (
+      SELECT p.person_id FROM guestbook_person_email_addresses p
+      WHERE p.person_id IN (SELECT pe.person_id FROM guestbook_person_email_addresses pe WHERE pe.email=ANY(${emails}::text[]))
+      GROUP BY p.person_id HAVING bool_and(p.email=ANY(${emails}::text[]) OR EXISTS (SELECT 1 FROM email_inactive i WHERE i."emailLower"=p.email))
+    ) affected`);
+    const items = rows.flatMap(r => calendars.map(c => ({emailLower:r.emailLower, name:r.name, reason:emailDecision(r).reason, calendarId:c.id, status:"pending"})));
+    const offset = Math.max(0, Math.min(50000, Math.floor(Number(input.offset) || 0)));
+    return {previewOnly:true, job:{status:"draft", emails:rows.length, total:items.length, affectedPeople:hidden[0].total, calendars:calendars.map(({id,name})=>({id,name}))}, rows:items.slice(offset,offset+50), hasMore:items.length>offset+50};
+  }
   const id = randomUUID();
   await db.$transaction(async tx => {
     await tx.$executeRaw(Prisma.sql`INSERT INTO email_removal_jobs (id, calendars, "expiresAt") VALUES (${id}, ${JSON.stringify(calendars)}::jsonb, now() + interval '15 minutes')`);
@@ -81,7 +93,7 @@ export async function removalStatus(id?: string, offset = 0, db: any = prisma())
   return { job: { ...job, calendars: job.calendars.map(({ id, name }) => ({ id, name })), ...counts[0], affectedPeople: hidden[0].total }, rows: rows.slice(0,50), hasMore: rows.length > 50 };
 }
 export async function confirmRemoval(id: string, confirmation: string, db: any = prisma()) {
-  requireRemovalEnabled();
+  requireRemovalProduction();
   if (confirmation !== "REMOVE_BLOCKED_EMAILS") throw fail("Confirm the removal preview first.", 400);
   await db.$transaction(async tx => {
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(72483193)::text`;
@@ -94,6 +106,7 @@ export async function confirmRemoval(id: string, confirmation: string, db: any =
 // Never retry an uncertain POST automatically. A timeout or server error might
 // mean Luma removed the contact, even when the response was not received.
 export async function removeCalendarEmail(scope: { id: string; envName: string }, email: string, fetcher = fetch): Promise<{ status: string; error?: string }> {
+  requireRemovalProduction();
   const key = lumaApiKeys().find(k => k.envName === scope.envName);
   if (!key) return { status: "failed", error: "Calendar API key is missing. Reconnect it and retry." };
   try {
@@ -109,7 +122,7 @@ export async function removeCalendarEmail(scope: { id: string; envName: string }
   return { status: "unknown", error: "Luma did not confirm the result. Check this contact in Luma before making a new removal request." };
 }
 export async function runRemovalTick(db: any = prisma(), remove = removeCalendarEmail) {
-  if (!emailRemovalEnabled()) return;
+  if (!removalCanConfirm()) return;
   // Expired claims are uncertain, not safe to put back in the queue.
   await db.$executeRaw`UPDATE email_removal_items SET status='unknown', error='Worker stopped before confirmation. Check the contact in Luma.' WHERE status='processing' AND "startedAt" < now() - interval '2 minutes'`;
   const attempt = randomUUID();
@@ -142,7 +155,7 @@ export async function runRemovalTick(db: any = prisma(), remove = removeCalendar
   return Boolean(item);
 }
 export async function retryFailedRemoval(id: string, db: any = prisma()) {
-  requireRemovalEnabled();
+  requireRemovalProduction();
   await db.$transaction(async tx => {
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(72483193)::text`;
     const running = await tx.$queryRaw`SELECT id FROM email_removal_jobs WHERE status='running' LIMIT 1`;

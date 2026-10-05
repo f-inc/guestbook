@@ -1,6 +1,8 @@
+import { optOutFromWebhook } from "../tracking-policy";
 import { appendFile, mkdir } from "node:fs/promises";
 import nodePath from "node:path";
 import {
+  prisma,
   claimLumaWebhookDelivery,
   finishLumaWebhookDelivery,
   hasLumaDb,
@@ -59,6 +61,13 @@ export async function POST(request: Request) {
       throw httpError("Invalid Luma webhook signature.", 401);
     }
 
+    const optOut = optOutFromWebhook(JSON.parse(rawBody), verification.secretName);
+    if (optOut) {
+      // Upsert is idempotent. Do not turn a generic opt-out into a spam report.
+      await prisma().lumaCalendarOptOut.upsert({where: {calendarId_emailLower: optOut}, create: optOut, update: {}});
+      await webhookLog(requestId, "calendar opt-out recorded", {calendarId: optOut.calendarId});
+      return json({ok: true, webhookId});
+    }
     const parsed = parseLumaGuestWebhook(rawBody);
     if (!parsed.supported) {
       await webhookLog(requestId, "event ignored", { webhookType: parsed.type, durationMs: Date.now() - startedAt });
@@ -90,6 +99,13 @@ export async function POST(request: Request) {
       guests: [normalized.guest],
       rawGuests: [normalized.rawGuest],
     });
+    if (parsed.data.approval_status !== "invited") {
+
+      await prisma().lumaInviteTracking.updateMany({
+        where: {eventId: parsed.eventId, personId: parsed.personId, status: {in: ["sent", "delivered", "opened", "clicked"]}, checkedAt: {not: null}, nextCheckAt: {not: null}},
+        data: {nextCheckAt: null, priority: 0},
+      });
+    }
     await refreshIndexedEventOverviewStats([parsed.eventId]);
     const automaticTags = await runAutomaticTagClassifier({ personIds: [parsed.personId] });
     await recordLumaWebhookState({ eventId: parsed.eventId, webhookId });

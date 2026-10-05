@@ -18,6 +18,10 @@ export const GUEST_FILTER_VALUES = [
   "new_faces",
   "referrals",
   "new_referrals",
+  "invited_opened",
+  "invited_clicked",
+  "invited_bounced",
+  "invited_reported",
   "invited_no_response",
   "invited_accepted",
   "invited_going",
@@ -34,6 +38,11 @@ export const GUEST_REGISTRATION_STATUSES = ["registered", "going", "waitlisted",
 export const GUEST_ACCEPTED_STATUSES = ["going", "checked_in", "no_show"];
 export const GUEST_REGISTERED_STATUSES = ["registered", "waitlisted", ...GUEST_ACCEPTED_STATUSES];
 const INDEXED_ONLY_GUEST_FILTERS = new Set<GuestFilter>([
+  "invited_opened",
+  "invited_clicked",
+  "invited_bounced",
+  "invited_reported",
+
   "referrals",
   "new_referrals",
   "invited_referrals",

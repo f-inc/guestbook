@@ -624,3 +624,14 @@ test("keeps historical active referrals in totals without marking them new", () 
   assert.deepEqual(matchingIds("referrals"), ["historical", "new"]);
   assert.deepEqual(matchingIds("new_referrals"), ["new"]);
 });
+
+test("invitation email outcomes require the indexed query for included and excluded filters", () => {
+  for (const status of ["invited_opened", "invited_clicked", "invited_bounced", "invited_reported"]) {
+    const included = parseGuestListQuery(new URLSearchParams({ guest_status: status }));
+    assert.equal(included.filter, status);
+    assert.equal(guestQueryRequiresIndex(included), true);
+    const excluded = parseGuestListQuery(new URLSearchParams({ guest_status_not: status }));
+    assert.deepEqual(excluded.excludedFilters, [status]);
+    assert.equal(guestQueryRequiresIndex(excluded), true);
+  }
+});

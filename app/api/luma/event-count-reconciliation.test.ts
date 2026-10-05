@@ -99,3 +99,16 @@ test("updates live header counts without discarding derived event metrics", () =
     firstRegisters: 7,
   });
 });
+
+
+test("incomplete background responses cannot erase loaded guest counts", () => {
+  for (const guest_counts of [undefined, {}, { approved: 0 }, { approved: null, waitlist: 0, pending_approval: 0, invited: 0, declined: 0, checked_in: 0 }]) {
+    assert.equal(liveEventCountsFromLumaEvent({ id: "evt-1", guest_counts }), null);
+  }
+});
+
+test("a complete empty event still reconciles to zero", () => {
+  const counts = liveEventCountsFromLumaEvent({ id: "evt-1", guest_counts: Object.fromEntries(["approved", "waitlist", "pending_approval", "invited", "declined", "checked_in"].map(key => [key, { guests: 0 }])) });
+  assert.ok(counts);
+  assert.equal(mergeLiveEventCounts({ accepted: 429, registered: 568, checkedIn: 178 }, counts).accepted, 0);
+});

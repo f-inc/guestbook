@@ -1,5 +1,8 @@
 "use client";
 
+import { AudienceVerification } from "./email-verification-ui";
+import { inviteStatusLabels } from "./invite-tracking";
+import { InvitationTrackingProvider, InvitationStatus, TrackingControls, InvitationOutcomes, GuestsPageFrame } from "./invitation-tracking-ui";
 import type { CSSProperties } from "react";
 import { startTransition, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -131,6 +134,10 @@ const guestFilterOptions = [
   { value: "new_faces", label: "New faces", color: "#1d4f47" },
   { value: "referrals", label: "Referrals", color: "#316c86" },
   { value: "new_referrals", label: "New referrals", color: "#316c86" },
+  { value: "invited_opened", label: "Invitation: opened", color: "#316c86" },
+  { value: "invited_clicked", label: "Invitation: clicked", color: "#316c86" },
+  { value: "invited_bounced", label: "Invitation: bounced", color: "#316c86" },
+  { value: "invited_reported", label: "Invitation: reported", color: "#316c86" },
   { value: "invited_no_response", label: "Invitation: no response", color: "#9a6418" },
   { value: "invited_accepted", label: "Invitation: accepted", color: "#047857" },
   { value: "invited_going", label: "Invitation: going", color: "#047857" },
@@ -296,6 +303,7 @@ export default function Home() {
   const [tagSettingsOpen, setTagSettingsOpen] = useState(false);
   const [tagSettingsSaving, setTagSettingsSaving] = useState(false);
   const [superTags, setSuperTags] = useState<any[]>([]);
+  const [trackingRevision, setTrackingRevision] = useState(0);
   const [searchOpen, setSearchOpen] = useState(false);
   const searchOpenRef = useRef(false);
   const universalSearchClosedAtRef = useRef(0);
@@ -389,13 +397,14 @@ export default function Home() {
   const applyWorkspaceUrlState = (urlState: WorkspaceUrlState) => {
     workspaceUrlModeRef.current = "replace";
     const peopleState = parsePeopleSearchUrl(window.location.search);
-    searchOpenRef.current = peopleState.open;
+    const guestsPage = window.location.pathname === "/guests" || peopleState.open;
+    searchOpenRef.current = guestsPage;
     universalSearchClosedAtRef.current = 0;
     universalSearchScrollTopRef.current = 0;
-    setSearchOpen(peopleState.open);
+    setSearchOpen(guestsPage);
     setUniversalQuery(peopleState.query);
     setUniversalPeopleFilters(peopleState.filters);
-    setUniversalSearchExpanded(peopleState.open && Boolean(peopleState.query || peopleSearchFiltersActive(peopleState.filters)));
+    setUniversalSearchExpanded(guestsPage);
     pendingProfileIdRef.current = urlState.profileId;
     setGuestPageTarget(urlState.guestPage);
     setActiveEventTab(urlState.tab);
@@ -643,6 +652,7 @@ export default function Home() {
 
   const openUniversalSearch = () => {
     if (searchOpenRef.current) {
+      window.dispatchEvent(new Event("guestbook:focus-guests-search"));
       window.requestAnimationFrame(() => universalSearchInputRef.current?.focus());
       return;
     }
@@ -655,6 +665,9 @@ export default function Home() {
       setUniversalPeopleSearch({ query: "", status: "idle", results: [], error: "", hasMore: false, nextOffset: 0 });
       setUniversalSearchExpanded(false);
     }
+    const guestsUrl = new URL(window.location.href);
+    guestsUrl.pathname = "/guests";
+    window.history.pushState(window.history.state, "", guestsUrl);
     searchOpenRef.current = true;
     setOpenTagPersonId("");
     setSearchOpen(true);
@@ -665,6 +678,10 @@ export default function Home() {
     searchOpenRef.current = false;
     setOpenTagPersonId("");
     setSearchOpen(false);
+    const backUrl = new URL(window.location.href);
+    backUrl.pathname = workspacePathname(eventDirectoryOpen);
+    backUrl.searchParams.delete("guests_tab");
+    window.history.pushState(window.history.state, "", backUrl);
   };
 
   const clearUniversalSearch = () => {
@@ -698,7 +715,6 @@ export default function Home() {
           setAvatarPreview(null);
           return;
         }
-        closeUniversalSearch();
         setProfilePanelOpen(false);
         setGuestStatusDraft((current) => current?.submitting ? current : null);
         setGuestNoteDraft((current) => current?.saving ? current : null);
@@ -714,6 +730,13 @@ export default function Home() {
     if (!searchOpen) return;
     window.requestAnimationFrame(() => universalSearchInputRef.current?.focus());
   }, [searchOpen]);
+
+  const [emailRemovalRevision, setEmailRemovalRevision] = useState(0);
+  useEffect(() => {
+    const refresh = () => { universalSearchClosedAtRef.current = 0; setEmailRemovalRevision(v => v + 1); };
+    window.addEventListener("guestbook:email-removal", refresh);
+    return () => window.removeEventListener("guestbook:email-removal", refresh);
+  }, []);
 
   // People search can be shared even before an event has loaded.
   useEffect(() => {
@@ -732,12 +755,8 @@ export default function Home() {
   useEffect(() => {
     const query = universalQuery.trim().toLocaleLowerCase();
     const requestKey = `${query}\u0000${universalPeopleFiltersKey}`;
-    if (!searchOpen) return;
-    if (!query && !hasUniversalPeopleFilters) {
-      setUniversalPeopleSearch({ query: "", status: "idle", results: [], error: "", hasMore: false, nextOffset: 0 });
-      setUniversalSearchExpanded(false);
-      return;
-    }
+    if (!searchOpen || sessionStatus !== "ready" || !guestbookKey) return;
+
     const canReuseCachedResults = universalPeopleSearch.query === requestKey
       && universalPeopleSearch.status === "ready"
       && universalSearchClosedAtRef.current > 0
@@ -785,7 +804,7 @@ export default function Home() {
       window.clearTimeout(timeout);
       controller.abort();
     };
-  }, [searchOpen, universalQuery, universalPeopleFiltersKey, guestbookKey]);
+  }, [searchOpen, universalQuery, universalPeopleFiltersKey, guestbookKey, sessionStatus, emailRemovalRevision]);
 
   const loadMoreUniversalPeople = async () => {
     const query = universalQuery.trim().toLocaleLowerCase();
@@ -1043,7 +1062,7 @@ export default function Home() {
       ? []
       : null;
   const universalResults = useMemo(
-    () => universalSearchResults(state, universalQuery, activeUniversalIndexedPeople),
+    () => universalSearchResults(state, universalQuery, activeUniversalIndexedPeople || []),
     [state.events, state.people, state.groups, state.tags, state.tagDefinitions, state.filters, universalQuery, activeUniversalIndexedPeople],
   );
   const universalResultCount = universalResults.people.length;
@@ -1140,7 +1159,7 @@ export default function Home() {
       profileId,
     });
     const currentSearch = window.location.search.replace(/^\?/, "");
-    const nextPathname = workspacePathname(eventDirectoryOpen);
+    const nextPathname = searchOpenRef.current ? "/guests" : workspacePathname(eventDirectoryOpen);
     const mode = workspaceUrlModeRef.current;
     workspaceUrlModeRef.current = "replace";
     if (nextSearch === currentSearch && nextPathname === window.location.pathname) return;
@@ -3625,6 +3644,7 @@ export default function Home() {
     }
     const pending = lumaSessionPrompt.pending;
     window.localStorage.setItem(LUMA_SESSION_TOKEN_STORAGE_KEY, token);
+    window.dispatchEvent(new Event("guestbook:luma-session-updated"));
     setLumaSessionPrompt((current) => current ? { ...current, token, error: "", submitting: true } : current);
     const updated = pending.kind === "referrer"
       ? await loadGuestReferrer(pending, token)
@@ -3761,19 +3781,27 @@ export default function Home() {
     const targetLabel = targets.length === 1 ? targets[0].title : `${targets.length} selected events`;
     if (confirm && !window.confirm(`Send ${deliveryCount} invitation${deliveryCount === 1 ? "" : "s"} to ${guests.length} people across ${targetLabel}?`)) return false;
 
+    const skippedByEvent = new Map<string, Set<string>>();
+    let processedRequests = 0;
+    let skippedRequests = 0;
     for (const target of targets.filter((event) => event.source === "luma")) {
       try {
         for (let index = 0; index < lumaGuests.length; index += 50) {
-          await postLumaAction({
+          const result = await postLumaAction({
             action: "sendInvites",
             confirm: LIVE_WRITE_CONFIRMATION,
             eventId: target.id,
             guests: lumaGuests.slice(index, index + 50),
             message,
           }, apiFetch);
+          processedRequests += Number(result.invited || 0);
+          skippedRequests += Number(result.skipped || 0);
+          const skipped = skippedByEvent.get(target.id) || new Set<string>();
+          (result.skippedEmails || []).forEach(email => skipped.add(email));
+          skippedByEvent.set(target.id, skipped);
         }
       } catch (error) {
-        setApiState({ status: "error", message: `Stopped after an invite failed for ${target.title}: ${error.message}` });
+        setApiState({ status: "error", message: `Stopped while sending to ${target.title}. ${processedRequests} earlier requests were accepted; ${skippedRequests} skipped. Check Analytics before retrying. ${error.message}` });
         return false;
       }
     }
@@ -3785,13 +3813,15 @@ export default function Home() {
         const existing = new Set(nextTarget.guests.map((guest) => guest.personId));
         const queuedEmails = new Set((target.source === "luma" ? lumaGuests : guests).map((guest) => guest.email));
         uniquePeople.forEach((person) => {
-          if (!queuedEmails.has(person.email) || existing.has(person.id)) return;
+          if (!queuedEmails.has(person.email) || existing.has(person.id) || skippedByEvent.get(target.id)?.has(person.email?.toLowerCase())) return;
           nextTarget.guests.push({ personId: person.id, status: "invited", invitedAt: new Date().toISOString() });
         });
       });
     });
     invalidateMultiEventStats();
-    setApiState({ status: "live", message: `Sent ${deliveryCount} invitations across ${targetLabel}.` });
+    setActiveEventTab("overview");
+    setTrackingRevision(v => v + 1);
+    setApiState({ status: "live", message: `Processed invitations for ${targetLabel}: ${processedRequests} accepted, ${skippedRequests} skipped. Delivery details are in Analytics.` });
     return true;
   };
 
@@ -3832,11 +3862,13 @@ export default function Home() {
         message,
       }, apiFetch);
       invalidateMultiEventStats();
+      setActiveEventTab("overview");
+      setTrackingRevision(v => v + 1);
       setApiState({
         status: "live",
         message: refreshBeforeSending
-          ? `Refreshed ${targetLabel}, then sent ${Number(result.invited || deliveryCount).toLocaleString()} invitations.`
-          : `Sent ${Number(result.invited || deliveryCount).toLocaleString()} invitations across ${targetLabel} without refreshing the guest list.`,
+          ? `Refreshed ${targetLabel}, then submitted ${Number(result.invited ?? 0).toLocaleString()} invitation requests (${result.skipped || 0} skipped).`
+          : `Submitted ${Number(result.invited ?? 0).toLocaleString()} invitation requests across ${targetLabel} (${result.skipped || 0} skipped).`,
       });
       return true;
     } catch (error) {
@@ -3933,7 +3965,6 @@ export default function Home() {
     });
     setProfilePersonId(result.id);
     setProfilePanelOpen(true);
-    closeUniversalSearch();
   };
 
   if (sessionStatus !== "ready") {
@@ -3949,12 +3980,13 @@ export default function Home() {
   }
 
   return (
+    <InvitationTrackingProvider targets={visibleGuests.filter(({guest}) => guest.status === "invited").map(({person, sourceEvent}) => ({personId: person.id, eventId: sourceEvent?.id || selectedEvent?.id})).filter(t => t.eventId)} request={apiFetch} eventIds={selectedEvents.filter(e => e.source === "luma").map(e => e.id)} active={!searchOpen && ["overview", "invite", "analytics"].includes(activeEventTab)} revision={trackingRevision}>
     <div className="app-shell">
       <header className="topbar">
-        <div className="brand-lockup flex min-w-0 items-center gap-2">
+        <a href="/" className="brand-lockup flex min-w-0 items-center gap-2" aria-label="Guestbook home" style={{ color: "inherit", textDecoration: "none" }}>
           <img className="brand-mark size-11 shrink-0 object-contain mix-blend-multiply" src="/guestbook-logo.png" alt="" width="44" height="44" />
           <h1 className="text-2xl font-bold tracking-normal">Guestbook</h1>
-        </div>
+        </a>
         <button className="command-button" type="button" onClick={openUniversalSearch}>
           <span className="command-label">
             <Search size={17} aria-hidden="true" />
@@ -3978,7 +4010,7 @@ export default function Home() {
         </div>
       </header>
 
-      <main className={`workspace ${showProfilePanel ? "" : "workspace-no-profile"}`}>
+      <main style={searchOpen ? { display: "none" } : undefined} className={`workspace ${showProfilePanel ? "" : "workspace-no-profile"}`}>
         <aside className="rail panel">
           <div className="panel-heading">
             <button
@@ -4264,6 +4296,7 @@ export default function Home() {
               })}
             </nav>
 
+            {activeEventTab === "invite" ? <TrackingControls /> : null}
             {activeEventTab === "overview" ? (
             <div className="workbench-grid event-tab-panel" role="tabpanel" aria-label="Overview">
               <section className="guest-panel">
@@ -4492,7 +4525,7 @@ export default function Home() {
                               />
                             </td>
                             <td className="status-cell">
-                              <StatusPill status={guest.status} />
+                              <>{guest.status === "invited" ? <InvitationStatus status={guest.status} personId={person.id} email={person.email} eventId={sourceEvent?.id || selectedEvent.id} /> : <StatusPill status={guest.status} />}</>
                               {multiEventMode && sourceEvent ? <small className="guest-event-context">{eventCount > 1 ? `${eventCount} selected events · ` : ""}{sourceEvent.title}</small> : null}
                             </td>
                             {showGuestReferrer ? (
@@ -4680,7 +4713,10 @@ export default function Home() {
           )}
         </section>
 
-        {!eventDirectoryOpen && showProfilePanel ? (
+
+      </main>
+
+        {(!eventDirectoryOpen || searchOpen) && showProfilePanel ? (
           <ProfilePanel
             state={state}
             person={selectedPerson}
@@ -4698,8 +4734,6 @@ export default function Home() {
             }}
           />
         ) : null}
-      </main>
-
       {apiState.message ? (
         <div
           className={`api-toast toast-${apiState.status} ${toastVisible ? "toast-visible" : "toast-hidden"}`}
@@ -4718,9 +4752,13 @@ export default function Home() {
       ) : null}
 
       {searchOpen ? (
+        <GuestsPageFrame request={apiFetch} onBack={closeUniversalSearch} onOpenPerson={async (row) => {
+          if (row.personId) { await openAnalyticsResponsePerson(row.personId); return; }
+          selectUniversalResult({type: "person", id: `email:${row.emailLower}`, person: {id: `email:${row.emailLower}`, name: row.name || row.emailLower, email: row.emailLower}, eventId: row.eventId});
+        }}>
         <UniversalSearchModal
           query={universalQuery}
-          expanded={universalSearchExpanded}
+          expanded={true}
           results={universalResults}
           resultCount={universalResultCount}
           tagDefinitions={state.tagDefinitions}
@@ -4756,6 +4794,7 @@ export default function Home() {
             universalSearchScrollTopRef.current = scrollTop;
           }}
         />
+        </GuestsPageFrame>
       ) : null}
 
       {avatarPreview ? (
@@ -4873,6 +4912,7 @@ export default function Home() {
         />
       ) : null}
     </div>
+    </InvitationTrackingProvider>
   );
 }
 
@@ -6740,8 +6780,8 @@ function UniversalSearchModal({
     + peopleFilters.excludedTags.length
     + (peopleFilters.comments !== "any" ? 1 : 0);
   return (
-    <div className="search-scrim" role="presentation" onMouseDown={onClose}>
-      <section className={`search-dialog ${expanded ? "expanded" : "compact"} ${filtersOpen ? "filters-open" : ""}`} role="dialog" aria-modal="true" aria-label="People search" onMouseDown={(event) => event.stopPropagation()}>
+    <div className="guests-directory">
+      <section className={`search-dialog expanded ${filtersOpen ? "filters-open" : ""}`} aria-label="Guest directory">
         <div className="search-input-wrap">
           <input
             ref={inputRef}
@@ -6762,9 +6802,7 @@ function UniversalSearchModal({
               <ListFilter size={17} aria-hidden="true" />
               {activeFilterCount ? <span className="search-filter-count">{activeFilterCount}</span> : null}
             </button>
-            <button className="icon-button" type="button" aria-label="Close search" title="Close" onClick={onClose}>
-              <X size={18} aria-hidden="true" />
-            </button>
+
           </div>
         </div>
         {filtersOpen ? (
@@ -6776,7 +6814,7 @@ function UniversalSearchModal({
         ) : null}
         {expanded ? (
           <>
-            {!hasCriteria ? null : resultCount || peopleSearchStatus === "loading" || peopleSearchError ? (
+            {resultCount || peopleSearchStatus === "loading" || peopleSearchError ? (
               <div className="search-results">
                 <PeopleSearchTable
                   key={`${query}\u0000${peopleSearchFiltersKey(peopleFilters)}`}
@@ -7728,7 +7766,8 @@ function InviteTab({
 
         {stage === "message" ? (
           <>
-            <div className="invite-stage-head"><div><p className="eyebrow">Step 3</p><h3>Write the invitation</h3><p>This message will be emailed to {audienceTotal.toLocaleString()} selected {audienceTotal === 1 ? "person" : "people"}.</p></div></div>
+            <div className="invite-stage-head"><div><p className="eyebrow">Step 3</p><h3>Write the invitation</h3><p>This message is prepared for up to {audienceTotal.toLocaleString()} selected {audienceTotal === 1 ? "person" : "people"}.</p></div></div>
+            <AudienceVerification request={request} criteria={audienceCriteria} eventIds={confirmationEvents.map(e => e.id)} />
             <InviteMarkdownEditor value={message} templateId={templateId} onChange={onMessageChange} onTemplateChange={onTemplateChange} />
             <div className="invite-stage-actions"><button className="button ghost" type="button" onClick={() => goToStage("subtract")}>Back</button><button className="button primary" type="button" disabled={!audienceTotal || resolvedAudience.countLoading || !confirmationEvents.length} onClick={() => goToStage("confirm")}><Send size={16} aria-hidden="true" /> Review invitations</button></div>
           </>
@@ -7749,7 +7788,7 @@ function InviteTab({
 
             <div className="invite-confirmation-count">
               <strong>{confirmationInvitationCount.toLocaleString()}</strong>
-              <span>invitation{confirmationInvitationCount === 1 ? "" : "s"} will be sent</span>
+              <span>invitation{confirmationInvitationCount === 1 ? "" : "s"} planned; blocked addresses are skipped</span>
               {confirmationEvents.length > 1 ? <small>{audienceTotal.toLocaleString()} people × {confirmationEvents.length} events</small> : <small>{audienceTotal.toLocaleString()} selected {audienceTotal === 1 ? "person" : "people"}</small>}
             </div>
 
@@ -8623,41 +8662,8 @@ function AnalyticsTab({ event, analytics, loading = false, uniquePeople = false,
 
       <div className="analytics-overview-grid">
         <article className="analytics-card invitation-funnel-card">
-          <div className="chart-heading"><div><p className="eyebrow">Invitations</p><h3><Send size={17} aria-hidden="true" /> Invitation outcomes</h3></div></div>
-          <ol className="funnel-chart invitation-funnel-chart">
-            {invitationFunnel.map((stage) => (
-              <li className={`invitation-stage-${stage.id}`} key={stage.id} aria-label={`${stage.label}: ${stage.value}`}>
-                <span className="invitation-stage-content">
-                  <span className="invitation-stage-copy">
-                    <button className="analytics-funnel-filter invitation-stage-primary" type="button" onClick={() => onFilter(stage.filter)}>
-                      <strong>{stage.value}</strong><small>{stage.label}</small>
-                    </button>
-                    {stage.referrals ? (
-                      <button className="analytics-funnel-filter invitation-referrals" type="button" onClick={() => onFilter(stage.referralFilter)}>
-                        <Gem size={11} aria-hidden="true" /><strong>{stage.referrals}</strong><small>Referrals</small>
-                      </button>
-                    ) : null}
-                  </span>
-                  <button className="analytics-funnel-filter invitation-stage-bar-row" type="button" aria-label={`View ${stage.label}: ${stage.value}`} onClick={() => onFilter(stage.filter)}>
-                    <span className="invitation-stage-track" aria-hidden="true">
-                      <i style={{ width: `${stage.width}%` }} />
-                    </span>
-                    <em>{stage.rate}%</em>
-                  </button>
-                  {stage.segments ? (
-                    <span className="invitation-stage-breakdown">
-                      {stage.segments.map((segment) => (
-                        <button className="analytics-funnel-filter" type="button" key={segment.id} onClick={() => onFilter(segment.filter)}>
-                          <strong>{segment.value}</strong>
-                          <small>{segment.label}</small>
-                        </button>
-                      ))}
-                    </span>
-                  ) : null}
-                </span>
-              </li>
-            ))}
-          </ol>
+          <div className="chart-heading"><div><p className="eyebrow">Invitations</p><h3><Send size={17} aria-hidden="true" /> Invitation funnel</h3></div></div>
+          <InvitationOutcomes stages={invitationFunnel} onFilter={onFilter} cohort={cohort} />
         </article>
 
         <article className="analytics-card funnel-card">
@@ -8689,7 +8695,7 @@ function AnalyticsTab({ event, analytics, loading = false, uniquePeople = false,
           </ol>
         </article>
 
-        <article className="analytics-card tag-distribution-card">
+        <article className="analytics-card tag-distribution-card" hidden>
           <div className="chart-heading">
             <div><p className="eyebrow">Attendance</p><h3><Tag size={17} aria-hidden="true" /> Tag distribution</h3></div>
             <span className="tag-distribution-total">{taggedAttendeeTotal} {uniquePeople ? "check-ins" : "checked in"}</span>
@@ -9501,7 +9507,11 @@ function TraceTimeline({ records, traced, onSelectEvent }) {
             <span className="timeline-marker" />
             <span className="timeline-body">
               <strong>
-                {record.eventTitle} <StatusPill status={activityStatus} />
+                {record.eventTitle} {activityStatus === "invited" && inviteStatusLabels[record.invitationStatus] ? (
+                  <span className={`status-pill invite-status-${record.invitationStatus}`}>
+                    {inviteStatusLabels[record.invitationStatus]}
+                  </span>
+                ) : <StatusPill status={activityStatus} />}
               </strong>
               <span>
                 {formatDate(record.eventDate)} - {record.eventCategory}

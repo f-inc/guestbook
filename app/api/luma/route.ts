@@ -1,10 +1,13 @@
+import { recordLumaIssue } from "./email-policy";
+import { withActivityInvitationStatuses } from "./activity-invitation-status";
+import { trackedSend, eligibleInvitationRecipients, cacheReinviteEmail } from "./invite-tracking-store";
 import { appendFile, mkdir } from "node:fs/promises";
 import { after } from "next/server";
 
 type AnyRecord = Record<string, any>;
 type HttpError = Error & { status?: number; code?: string };
 import nodePath from "node:path";
-import { archiveIndexedEventsMissingFromCatalog, getIndexedEventAnalytics, getIndexedLifetimeEventCounts, getIndexedMultiEventStats, getIndexedTrace, hasLumaDb, listIndexedAnalyticsRespondents, listIndexedAudienceInviteRecipients, listIndexedEventGuestMutationTargets, listIndexedEventGuests, listIndexedEvents, listIndexedGuestReferrerTargets, listIndexedMultiEventGuests, normalizeIndexedAudienceCriteria, recordEventSyncState, recordIndexedEventFeedbackStats, refreshIndexedEventOverviewStats, removeIndexedEventGuestsMissingFromSnapshot, removeIndexedTraceRecordsMissingFromEvents, runAutomaticTagClassifier, updateIndexedGuestCheckIn, updateIndexedGuestReferrers, updateIndexedGuestStatus, upsertNormalizedLumaEvents, upsertNormalizedLumaGuestActivity, upsertNormalizedLumaSnapshot } from "./db";
+import { archiveIndexedEventsMissingFromCatalog, getIndexedEventAnalytics, getIndexedLifetimeEventCounts, getIndexedMultiEventStats, getIndexedTrace, prisma, hasLumaDb, listIndexedAnalyticsRespondents, listIndexedAudienceInviteRecipients, listIndexedEventGuestMutationTargets, listIndexedEventGuests, listIndexedEvents, listIndexedGuestReferrerTargets, listIndexedMultiEventGuests, normalizeIndexedAudienceCriteria, recordEventSyncState, recordIndexedEventFeedbackStats, refreshIndexedEventOverviewStats, removeIndexedEventGuestsMissingFromSnapshot, removeIndexedTraceRecordsMissingFromEvents, runAutomaticTagClassifier, updateIndexedGuestCheckIn, updateIndexedGuestReferrers, updateIndexedGuestStatus, upsertNormalizedLumaEvents, upsertNormalizedLumaGuestActivity, upsertNormalizedLumaSnapshot } from "./db";
 import { lumaEventDate } from "./event-date";
 import { filterGuestPayload, guestQueryRequiresIndex, parseGuestListQuery } from "./guest-query";
 import { orderAvatarCandidates } from "../../avatar-order";
@@ -58,7 +61,7 @@ const DEFAULT_DEBUG_LOG_PATH = nodePath.join(process.cwd(), ".debug", "luma-api.
 const lumaClient = createLumaClient({ logger: debugLog, inFlight: inFlightStore() });
 const fetchBounded = lumaClient.fetchBounded;
 const fetchEventsAcrossCredentials = lumaClient.fetchEventsAcrossCredentials;
-const fetchSessionGuestsBounded = lumaClient.fetchSessionGuestsBounded;
+const fetchEventGuestsBounded = lumaClient.fetchEventGuestsBounded;
 const lumaFetch = lumaClient.publicRequest;
 const lumaFetchForEvent = lumaClient.publicRequestForEvent;
 const lumaPrivateGet = lumaClient.privateGet;
@@ -123,7 +126,7 @@ export async function GET(request: Request) {
               operation: `event counts (${credential.value.envName})`,
             }).then((payload) => ({
               ...sessionEventFromAdmin(payload),
-              guest_counts: payload?.guest_status_to_counts || {},
+              guest_counts: payload?.guest_status_to_counts ?? payload?.event?.guest_counts ?? payload?.guest_counts,
             }));
         return liveEventCountsFromLumaEvent(event);
       }));
@@ -131,7 +134,7 @@ export async function GET(request: Request) {
         eventCount: counts.length,
         durationMs: Date.now() - startedAt,
       });
-      return Response.json({ counts, requestId });
+      return Response.json({ counts: counts.filter((count) => count !== null), requestId });
     }
 
     if (analyticsRespondentsOnly) {
@@ -188,6 +191,16 @@ export async function GET(request: Request) {
     }
 
     if (tracePersonId || traceEmail) {
+      // Enrich after reading the activity cache so invitation outcomes stay current.
+      const enrichTrace = async (payload: AnyRecord) => {
+        if (!hasLumaDb()) return payload;
+        try {
+          return await withActivityInvitationStatuses(prisma(), payload, tracePersonId, traceEmail);
+        } catch (error) {
+          await debugLog(requestId, "activity invitation cache unavailable", { message: error.message }, "error");
+          return payload;
+        }
+      };
       if (!forceRefresh && hasLumaDb()) {
         try {
           const traceCacheKey = indexedTraceCacheKey(tracePersonId, traceEmail);
@@ -197,7 +210,7 @@ export async function GET(request: Request) {
               recordCount: cachedTrace.records?.length || 0,
               cacheExpiresAt: cachedTrace.cacheExpiresAt,
             });
-            return Response.json({ ...cachedTrace, requestId });
+            return Response.json({ ...await enrichTrace(cachedTrace), requestId });
           }
           const indexStartedAt = Date.now();
           const indexedTrace = await getIndexedTrace({
@@ -210,7 +223,7 @@ export async function GET(request: Request) {
             recordCount: indexedTrace.records.length,
             durationMs: Date.now() - indexStartedAt,
           });
-          return Response.json({ ...indexedTrace, requestId });
+          return Response.json({ ...await enrichTrace(indexedTrace), requestId });
         } catch (error) {
           await debugLog(requestId, "trace person index skipped", { status: error.status || 500, message: error.message }, "error");
         }
@@ -224,7 +237,7 @@ export async function GET(request: Request) {
         traceScope,
         startedAt,
       });
-      return Response.json({ ...payload, requestId });
+      return Response.json({ ...await enrichTrace(payload), requestId });
     }
 
     if (eventId && guestHistoryOnly && hasLumaDb()) {
@@ -378,29 +391,10 @@ export async function GET(request: Request) {
             params: { event_api_id: eventId },
             operation: `event details (${credential.value.envName})`,
           }));
-      const scan = () => credential.type === "api-key"
-        ? fetchBounded("/v1/events/guests/list", {
-            requestId,
-            apiKey: credential.value,
-            params: {
-              event_id: eventId,
-              pagination_limit: String(pageSize),
-              sort_column: "registered_at",
-              sort_direction: "desc nulls last",
-            },
-            maxEntries,
-            maxPages,
-            requestDelayMs: forceRefresh ? safeInt("LUMA_EVENT_SYNC_REQUEST_DELAY_MS", 200, 0, 5000) : 0,
-          })
-        : fetchSessionGuestsBounded({
-            requestId,
-            sessionToken: credential.value,
-            eventId,
-            pageSize,
-            maxEntries,
-            maxPages,
-            requestDelayMs: forceRefresh ? safeInt("LUMA_EVENT_SYNC_REQUEST_DELAY_MS", 200, 0, 5000) : 0,
-          });
+      const scan = () => fetchEventGuestsBounded({
+        requestId, eventId, pageSize, maxEntries, maxPages,
+        requestDelayMs: forceRefresh ? safeInt("LUMA_EVENT_SYNC_REQUEST_DELAY_MS", 200, 0, 5000) : 0,
+      });
       const rawGuests = forceRefresh
         ? await coalesceEventGuestScan(eventId, requestId, scan)
         : await scan();
@@ -428,14 +422,14 @@ export async function GET(request: Request) {
         rawGuests: rawGuests.entries,
       });
       let automaticTags = null;
-      if (forceRefresh && indexWrite && hasLumaDb()) {
+      if (indexWrite && hasLumaDb()) {
         await recordEventSyncState({
           eventId,
           guestCount: eventGuests.length,
           status: rawGuests.truncated ? "truncated" : "success",
           truncated: rawGuests.truncated,
         });
-        if (!rawGuests.truncated) {
+        if (forceRefresh && !rawGuests.truncated) {
           const reconciliation = await removeIndexedEventGuestsMissingFromSnapshot({
             eventId,
             personIds: eventGuests.map((guest) => guest.personId),
@@ -991,6 +985,9 @@ export async function POST(request: Request) {
     }
 
     if (body.action === "reinviteGuest") {
+      if (typeof body.email === "string" && (await eligibleInvitationRecipients([{email: body.email}], undefined, body.eventId)).excluded.length) {
+        return Response.json({error:"This address is blocked by a recorded Luma restriction, calendar opt-out, or recent undeliverable verification.", requestId},{status:409});
+      }
       assertString(body.eventId, "eventId");
       assertString(body.guestId, "guestId");
       assertString(body.lumaUserId, "lumaUserId");
@@ -1011,6 +1008,7 @@ export async function POST(request: Request) {
         operation: "email issue check",
       });
       if (emailIssue === true || emailIssue?.has_issue === true || emailIssue?.bounced_at || emailIssue?.marked_as_spam_at) {
+        await recordLumaIssue(body.email.trim().toLowerCase(), "restricted", new Date());
         const error = new Error("Luma has this email marked inactive, bounced, or reported as spam.") as HttpError;
         error.status = 409;
         error.code = "LUMA_EMAIL_INACTIVE";
@@ -1077,6 +1075,7 @@ export async function POST(request: Request) {
         throw error;
       }
 
+      await cacheReinviteEmail(body.eventId, body.email, emailEntry);
       const email = emailEntry.email || {};
       const emailStatus = firstString(email.status);
       if (email.bounced_at || email.marked_as_spam_at || ["bounced", "marked-spam"].includes(emailStatus)) {
@@ -1148,24 +1147,24 @@ export async function POST(request: Request) {
         inviteLimit,
         hasMessage: Boolean(message),
       });
+      let acceptedCount = 0;
+      let skippedCount = 0;
       for (const eventId of eventIds) {
         for (let index = 0; index < recipients.length; index += inviteLimit) {
           const guests = recipients.slice(index, index + inviteLimit).map(({ email, name }) => ({ email, name: name || null }));
-          await lumaFetchForEvent("/v1/events/guests/send-invites", eventId, {
-            requestId,
-            method: "POST",
-            body: { event_id: eventId, guests, message },
-          });
+          const result = await trackedSend(eventId, guests, message, requestId, lumaClient);
+          acceptedCount += result.accepted;
+          skippedCount += result.skipped;
         }
       }
-      const invited = recipients.length * eventIds.length;
+      const invited = acceptedCount;
       await debugLog(requestId, "send audience invites success", {
         eventCount: eventIds.length,
         recipientCount: recipients.length,
         invited,
         durationMs: Date.now() - startedAt,
       });
-      return Response.json({ ok: true, recipients: recipients.length, invited, requestId });
+      return Response.json({ ok: true, recipients: recipients.length, invited, skipped: skippedCount, requestId });
     }
 
     if (body.action === "sendInvites") {
@@ -1188,17 +1187,9 @@ export async function POST(request: Request) {
         return Response.json({ ok: false, error: "Refusing to invite " + guests.length + " people at once. Limit is " + inviteLimit + ".", requestId }, { status: 400 });
       }
 
-      await lumaFetchForEvent("/v1/events/guests/send-invites", body.eventId, {
-        requestId,
-        method: "POST",
-        body: {
-          event_id: body.eventId,
-          guests,
-          message,
-        },
-      });
+      const sendResult = await trackedSend(body.eventId, guests, message, requestId, lumaClient);
       await debugLog(requestId, "send invites success", { eventId: body.eventId, invited: guests.length, durationMs: Date.now() - startedAt });
-      return Response.json({ ok: true, invited: guests.length, requestId });
+      return Response.json({ ok: true, invited: sendResult.accepted, skipped: sendResult.skipped, skippedEmails: sendResult.skippedEmails, requestId });
     }
 
     await debugLog(requestId, "unsupported action", { action: body.action }, "error");
@@ -1384,7 +1375,7 @@ function writeCache(key, value, ttlMs) {
 }
 
 function eventGuestCacheKey(eventId) {
-  return "event-guests:v3:" + eventId;
+  return "event-guests:v4:" + eventId;
 }
 
 function clearEventGuestCache(eventId) {
@@ -1460,7 +1451,8 @@ async function loadIndexedGuestPage(
     includeSummary: false,
     includeEventCounts: guestQuery.filter === "new_referrals" || guestQuery.sortBy === "events_attended" || guestQuery.sortBy === "events_registered",
   }, diagnosticReporter, knownEventBoundary);
-  const { indexHasGuests: _indexHasGuests, ...payload } = indexedResult;
+  const { indexHasGuests, ...payload } = indexedResult;
+  if (!indexHasGuests) return null;
   return { payload, snapshotCached: false };
 }
 
@@ -1512,30 +1504,11 @@ async function refreshManagedData({ requestId, rawEvents }: AnyRecord) {
     const event = normalizeEvent(rawEvent);
     if (index > 0 && limits.requestDelayMs) await wait(limits.requestDelayMs);
     try {
-      const credential = await resolveLumaEventReadCredential(event.id, requestId);
-      const rawGuests = credential.type === "api-key"
-        ? await fetchBounded("/v1/events/guests/list", {
-            requestId,
-            apiKey: credential.value,
-            params: {
-              event_id: event.id,
-              pagination_limit: String(limits.guestPageSize),
-              sort_column: "registered_at",
-              sort_direction: "desc nulls last",
-            },
-            maxEntries: limits.maxGuestsPerEvent,
-            maxPages: limits.maxGuestPagesPerEvent,
-            requestDelayMs: limits.requestDelayMs,
-          })
-        : await fetchSessionGuestsBounded({
-            requestId,
-            sessionToken: credential.value,
-            eventId: event.id,
-            pageSize: limits.guestPageSize,
-            maxEntries: limits.maxGuestsPerEvent,
-            maxPages: limits.maxGuestPagesPerEvent,
-            requestDelayMs: limits.requestDelayMs,
-          });
+      const rawGuests = await fetchEventGuestsBounded({
+        requestId, eventId: event.id, pageSize: limits.guestPageSize,
+        maxEntries: limits.maxGuestsPerEvent, maxPages: limits.maxGuestPagesPerEvent,
+        requestDelayMs: limits.requestDelayMs,
+      });
       const guests = rawGuests.entries.map((guest) => normalizeGuest(rawEvent, guest));
       const result = await writeSnapshotToIndex({ requestId, rawEvent, event, guests, rawGuests: rawGuests.entries });
       if (result && !rawGuests.truncated && hasLumaDb()) {

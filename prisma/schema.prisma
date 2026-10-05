@@ -273,3 +273,162 @@ model LumaWebhookDelivery {
   @@index([eventId, receivedAt(sort: Desc)])
   @@map("luma_webhook_deliveries")
 }
+
+// Bulk invitation evidence and optional email timelines; RSVP remains on LumaEventGuest.
+model LumaInviteTracking {
+  eventId       String
+  emailLower    String
+  personId      String?
+  lumaUserId    String?
+  name          String?
+  eventTitle    String?
+  status        String   @default("unknown")
+  messages      Json     @default("[]")
+  issueMessages Json     @default("[]")
+  bulkInvite    Json     @default("{}")
+  bulkCheckedAt DateTime? @db.Timestamptz(6)
+  checkedAt     DateTime? @db.Timestamptz(6)
+  requestedAt   DateTime? @db.Timestamptz(6)
+  nextCheckAt   DateTime? @default(now()) @db.Timestamptz(6)
+  priority      Int @default(0)
+  retryCount    Int @default(0)
+  lastError     String?
+  issueReason   String?
+  removedAt     DateTime? @db.Timestamptz(6)
+  updatedAt     DateTime  @updatedAt @db.Timestamptz(6)
+  @@id([eventId, emailLower])
+  @@index([status, checkedAt])
+  @@index([nextCheckAt, priority])
+  @@index([emailLower])
+  @@map("luma_invite_tracking")
+}
+
+model LumaInviteAttempt {
+  id          String @id @default(cuid())
+  batchId     String
+  eventId     String
+  emailLower  String
+  status      String @default("processing")
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+  @@index([eventId, createdAt])
+  @@index([batchId])
+  @@map("luma_invite_attempts")
+}
+
+// Shared worker lease, credential pause, and resumable explicit event backfills.
+model LumaTrackingState {
+  key String @id
+  leaseUntil DateTime? @db.Timestamptz(6)
+  owner String?
+  cursor String?
+  active Boolean @default(false)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+  @@map("luma_tracking_state")
+}
+
+model LumaCalendarOptOut {
+  calendarId String
+  emailLower String
+  observedAt DateTime @default(now()) @db.Timestamptz(6)
+  @@id([calendarId, emailLower])
+  @@map("luma_calendar_opt_outs")
+}
+
+model EmailAddress {
+  emailLower String @id
+  personId String?
+  name String?
+  state String @default("unchecked")
+  reason String?
+  score Int?
+  flags Json @default("{}")
+  checkedAt DateTime? @db.Timestamptz(6)
+  queuedRunId String?
+  @@index([queuedRunId, emailLower])
+  @@index([state, emailLower])
+  lumaBlockedReason String?
+  lumaBlockedAt DateTime? @db.Timestamptz(6)
+  lumaCheckedAt DateTime? @db.Timestamptz(6)
+  lumaClearedAt DateTime? @db.Timestamptz(6)
+  checks EmailVerificationCheck[]
+  @@map("email_addresses")
+}
+
+model EmailVerificationCheck {
+  id String @id
+  emailLower String
+  address EmailAddress @relation(fields: [emailLower], references: [emailLower])
+  provider String
+  providerBatchId String?
+  state String
+  reason String?
+  score Int?
+  flags Json
+  checkedAt DateTime @default(now()) @db.Timestamptz(6)
+  @@index([emailLower, checkedAt])
+  @@map("email_verification_checks")
+}
+
+model EmailVerificationRun {
+  id String @id
+  status String @default("running")
+  total Int @default(0)
+  processed Int @default(0)
+  skipped Int @default(0)
+  eventIds Json @default("[]")
+  startedAt DateTime @default(now()) @db.Timestamptz(6)
+  completedAt DateTime? @db.Timestamptz(6)
+  lockUntil DateTime? @db.Timestamptz(6)
+  nextCheckAt DateTime @default(now()) @db.Timestamptz(6)
+  error String?
+  @@map("email_verification_runs")
+}
+
+model EmailVerificationBatch {
+  id String @id
+  runId String
+  providerId String?
+  status String @default("submitting")
+  emails Json
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  @@index([runId, status])
+  @@map("email_verification_batches")
+}
+
+// Durable cleanup ledger, independent of contact sync and verification refreshes.
+model EmailRemovalJob {
+  id String @id
+  status String @default("draft")
+  calendars Json
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  expiresAt DateTime @db.Timestamptz(6)
+  confirmedAt DateTime? @db.Timestamptz(6)
+  completedAt DateTime? @db.Timestamptz(6)
+  items EmailRemovalItem[]
+  inactive EmailInactive[]
+  @@map("email_removal_jobs")
+}
+model EmailRemovalItem {
+  jobId String
+  job EmailRemovalJob @relation(fields: [jobId], references: [id])
+  emailLower String
+  calendarId String
+  name String?
+  reason String
+  status String @default("pending")
+  attemptId String?
+  startedAt DateTime? @db.Timestamptz(6)
+  completedAt DateTime? @db.Timestamptz(6)
+  error String?
+  @@id([jobId, emailLower, calendarId])
+  @@index([status, jobId], map: "email_removal_work")
+  @@index([emailLower, status], map: "email_removal_email")
+  @@map("email_removal_items")
+}
+model EmailInactive {
+  emailLower String @id
+  inactiveAt DateTime @default(now()) @db.Timestamptz(6)
+  jobId String
+  job EmailRemovalJob @relation(fields: [jobId], references: [id])
+  @@map("email_inactive")
+}

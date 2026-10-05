@@ -23,7 +23,7 @@ const SYNC_IN_FLIGHT_KEY = "__guestbookLumaSyncInFlight";
 const lumaClient = createLumaClient({ logger: debugLog, beforeRequest: throttleSyncRequest, logPrefix: "sync " });
 const fetchBounded = lumaClient.fetchBounded;
 const fetchEventsAcrossCredentials = lumaClient.fetchEventsAcrossCredentials;
-const fetchSessionGuestsBounded = lumaClient.fetchSessionGuestsBounded;
+const fetchEventGuestsBounded = lumaClient.fetchEventGuestsBounded;
 const lumaFetch = lumaClient.publicRequest;
 const lumaPrivateGet = lumaClient.privateGet;
 const resolveLumaEventReadCredential = lumaClient.resolveEventReadCredential;
@@ -178,28 +178,10 @@ async function runSync(request: Request) {
         }
 
         await debugLog(requestId, "luma sync event guests start", { eventId: event.id, maxGuestsPerEvent: limits.maxGuestsPerEvent });
-        const credential = await resolveLumaEventReadCredential(event.id, requestId);
-        const rawGuests = credential.type === "api-key"
-          ? await fetchBounded("/v1/events/guests/list", {
-              requestId,
-              apiKey: credential.value,
-              params: {
-                event_id: event.id,
-                pagination_limit: String(limits.guestPageSize),
-                sort_column: "registered_at",
-                sort_direction: "desc nulls last",
-              },
-              maxEntries: limits.maxGuestsPerEvent,
-              maxPages: limits.maxGuestPagesPerEvent,
-            })
-          : await fetchSessionGuestsBounded({
-              requestId,
-              sessionToken: credential.value,
-              eventId: event.id,
-              pageSize: limits.guestPageSize,
-              maxEntries: limits.maxGuestsPerEvent,
-              maxPages: limits.maxGuestPagesPerEvent,
-            });
+        const rawGuests = await fetchEventGuestsBounded({
+          requestId, eventId: event.id, pageSize: limits.guestPageSize,
+          maxEntries: limits.maxGuestsPerEvent, maxPages: limits.maxGuestPagesPerEvent,
+        });
 
         const guests = rawGuests.entries.map((guest) => normalizeGuest(rawEvent, guest));
         guests.forEach((guest) => {

@@ -1,3 +1,5 @@
+import { activePersonSql, emailRemovalEnabled } from "./email-inactivity";
+import { guestIndexIsReady } from "./guest-index-readiness";
 import { Prisma, PrismaClient } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 
@@ -28,8 +30,8 @@ import { phoneSearchDigits } from "../../phone-search";
 import { AUTOMATIC_TAG_DEFINITIONS, AUTOMATIC_TAG_RULESET_VERSION, NEW_GUEST_MAX_REGISTRATIONS, automaticTagRunMode, normalizeAutomaticTagPersonIds } from "./auto-tags";
 import type { AnalyticsRespondentQuery } from "./analytics-respondents";
 
-const PRISMA_KEY = "__guestbookPrismaClientV4";
-const LEGACY_PRISMA_KEYS = ["__guestbookPrismaClientV3", "__guestbookPrismaClientV2", "__guestbookPrismaClient"];
+const PRISMA_KEY = "__guestbookPrismaClientV9";
+const LEGACY_PRISMA_KEYS = ["__guestbookPrismaClientV8", "__guestbookPrismaClientV7", "__guestbookPrismaClientV6", "__guestbookPrismaClientV5", "__guestbookPrismaClientV4", "__guestbookPrismaClientV3", "__guestbookPrismaClientV2", "__guestbookPrismaClient"];
 const AUDIENCE_TAG_GROUP_CACHE_MS = 120_000;
 const AUDIENCE_EVENT_COUNT_CACHE_MS = 30_000;
 const AUDIENCE_RESOLUTION_CACHE_MS = 30_000;
@@ -571,7 +573,7 @@ export async function searchIndexedPeople(search: string, {
   const hasFilters = normalizedIncludedTags.length > 0
     || normalizedExcludedTags.length > 0
     || normalizedComments !== "any";
-  if (!query && !hasFilters) return { people: [], hasMore: false, nextOffset: 0 };
+
 
   const db = prisma();
   const escapedQuery = query.replace(/[\\%_]/g, "\\$&");
@@ -583,7 +585,7 @@ export async function searchIndexedPeople(search: string, {
   const resultLimit = pageSize + 1;
   const personCandidateLimit = (resultOffset + resultLimit) * 10;
   const guestCandidateLimit = (resultOffset + resultLimit) * 20;
-  const personFilterConditions: Prisma.Sql[] = [];
+  const personFilterConditions: Prisma.Sql[] = [activePersonSql(Prisma.sql`person.person_id`)];
   if (normalizedIncludedTags.length) {
     personFilterConditions.push(tagMode === "all"
       ? Prisma.sql`(
@@ -795,6 +797,7 @@ export async function searchIndexedPeopleByName(search: string, { limit = 20, of
     SELECT person.person_id AS "personId"
     FROM luma_people AS person
     WHERE LOWER(person.name) LIKE LOWER(${containsQuery}) ESCAPE '\\'
+      AND ${activePersonSql(Prisma.sql`person.person_id`)}
     ORDER BY
       CASE
         WHEN LOWER(person.name) = LOWER(${query}) THEN 0
@@ -1115,7 +1118,7 @@ export async function resolveIndexedAudiencePersonIds(
   const criteria = normalizeIndexedAudienceCriteria(rawCriteria);
   const cacheKey = JSON.stringify(criteria);
   const cached = audienceResolutionCache.get(cacheKey);
-  if (useCache && cached && cached.expiresAt > Date.now()) return cached.personIds;
+  if (!emailRemovalEnabled() && useCache && cached && cached.expiresAt > Date.now()) return cached.personIds;
   const include = new Set(criteria.includePersonIds || []);
   const exclude = new Set(criteria.excludePersonIds || []);
   const collect = async (target: Set<string>, resultPromise: Promise<any>) => {
@@ -1179,7 +1182,11 @@ export async function resolveIndexedAudiencePersonIds(
     existingGuests.forEach(({ personId }) => exclude.add(personId));
   }
 
-  const personIds = [...include].filter((personId) => !exclude.has(personId));
+  let personIds = [...include].filter((personId) => !exclude.has(personId));
+  if (emailRemovalEnabled() && personIds.length) {
+    const visible = await prisma().$queryRaw<Array<{personId: string}>>(Prisma.sql`SELECT person_id AS "personId" FROM luma_people person WHERE person_id = ANY(${personIds}::text[]) AND ${activePersonSql(Prisma.sql`person.person_id`)}`);
+    personIds = visible.map(p => p.personId);
+  }
   if (audienceResolutionCache.size >= 50) {
     const oldestKey = audienceResolutionCache.keys().next().value;
     if (oldestKey) audienceResolutionCache.delete(oldestKey);
@@ -1449,7 +1456,8 @@ export async function listIndexedAudiencePage(
       FROM audience_people AS audience
       JOIN luma_people AS person ON person.person_id = audience.person_id
       LEFT JOIN target_members AS target ON target.person_id = audience.person_id
-      WHERE ${cursorPersonId ? Prisma.sql`person.person_id > ${cursorPersonId}` : Prisma.sql`TRUE`}
+      WHERE ${activePersonSql(Prisma.sql`person.person_id`)}
+        AND ${cursorPersonId ? Prisma.sql`person.person_id > ${cursorPersonId}` : Prisma.sql`TRUE`}
         AND ${normalizedQuery ? Prisma.sql`(
           person.name ILIKE ${searchPattern}
           OR person.email ILIKE ${searchPattern}
@@ -1633,6 +1641,7 @@ export async function countIndexedAudience(criteria: IndexedAudienceCriteria) {
     FROM audience_people AS audience
     JOIN luma_people AS person ON person.person_id = audience.person_id
     LEFT JOIN target_members AS target ON target.person_id = audience.person_id
+    WHERE ${activePersonSql(Prisma.sql`person.person_id`)}
   `);
   const total = Number(result?.total) || 0;
   const existingTotal = Number(result?.existingTotal) || 0;
@@ -1646,6 +1655,20 @@ export async function countIndexedAudience(criteria: IndexedAudienceCriteria) {
 export async function listIndexedAudienceInviteRecipients(criteria: IndexedAudienceCriteria) {
   const personIds = await resolveIndexedAudiencePersonIds(criteria, { useCache: false });
   if (!personIds.length) return [];
+  if (emailRemovalEnabled()) {
+    // Keep the current address when active; fall back only when it was removed.
+    const recipients = await prisma().$queryRaw<Array<{id:string;email:string;name:string}>>(Prisma.sql`
+      SELECT person.person_id AS id, active.email, person.name
+      FROM luma_people person
+      JOIN LATERAL (
+        SELECT pe.email FROM guestbook_person_email_addresses pe
+        LEFT JOIN email_inactive i ON i."emailLower"=pe.email
+        WHERE pe.person_id=person.person_id AND i."emailLower" IS NULL
+        ORDER BY (pe.email=lower(trim(person.email))) DESC NULLS LAST, pe.email LIMIT 1
+      ) active ON TRUE WHERE person.person_id = ANY(${personIds}::text[])
+    `);
+    return recipients.map(person => ({...person, source:"luma"}));
+  }
   const people = await prisma().lumaPerson.findMany({
     where: { personId: { in: personIds } },
     select: { personId: true, email: true, name: true },
@@ -1857,7 +1880,13 @@ export async function listIndexedEventGuests(
     people: [...peopleById.values()],
     loadedAt: new Date().toISOString(),
     indexed: true,
-    indexHasGuests: includeSummary ? Boolean(stats?.total) : true,
+    indexHasGuests: await guestIndexIsReady(rows.length > 0 || Boolean(stats?.total), async () => {
+      const [guest, sync] = await Promise.all([
+        db.lumaEventGuest.findFirst({ where: { eventId }, select: { eventId: true } }),
+        db.lumaEventSyncState.findUnique({ where: { eventId }, select: { lastGuestSyncAt: true, lastStatus: true, truncated: true, lastGuestCount: true } }),
+      ]);
+      return { hasAnyGuests: Boolean(guest), sync };
+    }),
     ...(stats ? { stats, analyticsQuestions, analyticsAllQuestions } : {}),
     pageInfo: {
       total: filteredCount,
@@ -2534,6 +2563,10 @@ function indexedNewReferralFilterCtesSql(query: GuestListQuery) {
 }
 
 const INDEXED_INVITATION_OUTCOME_FILTERS = new Set<GuestListQuery["filter"]>([
+  "invited_opened",
+  "invited_clicked",
+  "invited_bounced",
+  "invited_reported",
   "invited_no_response",
   "invited_accepted",
   "invited_going",
@@ -2560,6 +2593,15 @@ function isIndexedReferralFilter(filter: GuestListQuery["filter"]) {
 }
 
 function indexedInvitationOutcomeFilterPredicateSql(filter: GuestListQuery["filter"]) {
+  if (["invited_opened", "invited_clicked", "invited_bounced", "invited_reported"].includes(filter)) {
+    const statuses = filter === "invited_opened" ? ["opened", "clicked"] : [filter.replace("invited_", "")];
+    return Prisma.sql`EXISTS (
+      SELECT 1 FROM luma_invite_tracking AS tracking
+      WHERE tracking."eventId" = guest.event_id
+        AND (tracking."personId" = guest.person_id OR tracking."emailLower" = guest.email_lower)
+        AND tracking.status IN (${Prisma.join(statuses)})
+    )`;
+  }
   if (filter === "invited_no_response") return Prisma.sql`guest.status = 'invited'`;
   if (filter === "invited_accepted") {
     return Prisma.sql`(
@@ -5054,7 +5096,7 @@ export async function upsertNormalizedLumaGuestActivity({ event, guest, rawGuest
   return { skipped: false, guestCount: 1, personCount: uniquePeople.size };
 }
 
-function prisma() {
+export function prisma() {
   if (!hasLumaDb()) {
     const error = new Error("Missing DB_URL. Add a PostgreSQL connection string before using the Luma index.") as HttpError;
     error.status = 503;

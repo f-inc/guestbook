@@ -23,7 +23,7 @@ export async function GET(request: Request) {
       comments,
       hasFilters,
     } = parsePeopleSearchQuery(new URL(request.url).searchParams);
-    if (!query && (scope === "name" || !hasFilters)) {
+    if (!query && scope === "name") {
       return Response.json({ people: [], hasMore: false, nextOffset: 0 });
     }
     return Response.json(await (scope === "name"

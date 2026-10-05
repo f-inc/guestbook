@@ -24,12 +24,16 @@ function guestCount(value: unknown) {
   const nested = value && typeof value === "object" && "guests" in value
     ? (value as { guests?: unknown }).guests
     : value;
+  if (typeof nested !== "number" && (typeof nested !== "string" || !nested.trim())) return null;
   const count = Number(nested);
-  return Number.isFinite(count) ? Math.max(0, count) : 0;
+  return Number.isFinite(count) && count >= 0 ? count : null;
 }
 
-export function liveEventCountsFromLumaEvent(event: Record<string, any>): LiveEventCounts {
-  const counts = event?.guest_counts || {};
+export function liveEventCountsFromLumaEvent(event: Record<string, any>): LiveEventCounts | null {
+  const counts = event?.guest_counts;
+  // Missing fields are unavailable evidence, not proof that an event is empty.
+  // Only reconcile a complete snapshot; explicit zero counts remain valid.
+  if (!event?.id || !counts || ["approved", "waitlist", "pending_approval", "invited", "declined", "checked_in"].some((key) => guestCount(counts[key]) === null)) return null;
   const accepted = guestCount(counts.approved);
   const waitlisted = guestCount(counts.waitlist);
   const pending = guestCount(counts.pending_approval);

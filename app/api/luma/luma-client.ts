@@ -361,6 +361,50 @@ export function createLumaClient({
     return publicRequest(path, { ...options, apiKey });
   }
 
+  // Guest access is independent of public event visibility. Keep its verified
+  // credential separate from the catalog credential (also used for writes).
+  const guestCredentials = new Map<string, { type: LumaCredentialSource["type"]; envName: string; expiresAt: number }>();
+
+  async function fetchEventGuestsBounded(options: {
+    requestId: string; eventId: string; pageSize: number;
+    maxEntries: number; maxPages: number; requestDelayMs?: number;
+  }) {
+    const { eventId, requestId, pageSize, ...limits } = options;
+    const configured: LumaCredentialSource[] = [
+      ...lumaApiKeys().map((value): LumaCredentialSource => ({ type: "api-key", value })),
+      ...lumaSessionTokens().map((value): LumaCredentialSource => ({ type: "session-token", value })),
+    ];
+    const cached = guestCredentials.get(eventId);
+    const verified = cached && cached.expiresAt > Date.now()
+      ? configured.find((source) => source.type === cached.type && source.value.envName === cached.envName)
+      : undefined;
+    const preferred = verified || knownLumaEventCredential(eventId);
+    const candidates = preferred
+      ? [preferred, ...configured.filter((source) => source.type !== preferred.type || source.value.envName !== preferred.value.envName)]
+      : configured;
+    let lastError: HttpError | null = null;
+    for (const source of candidates) {
+      try {
+        const result = source.type === "api-key"
+          ? await fetchBounded("/v1/events/guests/list", {
+              ...limits, requestId, apiKey: source.value,
+              params: { event_id: eventId, pagination_limit: String(pageSize), sort_column: "registered_at", sort_direction: "desc nulls last" },
+            })
+          : await fetchSessionGuestsBounded({ ...options, sessionToken: source.value });
+        guestCredentials.delete(eventId);
+        guestCredentials.set(eventId, { type: source.type, envName: source.value.envName, expiresAt: Date.now() + 6 * 60 * 60 * 1000 });
+        if (guestCredentials.size > 1000) guestCredentials.delete(guestCredentials.keys().next().value!);
+        return result;
+      } catch (error: any) {
+        if (![401, 403, 404].includes(error.status)) throw error;
+        lastError = error;
+        guestCredentials.delete(eventId);
+        await log(requestId, "guest credential denied; trying remaining credentials", { eventId, credentialType: source.type, status: error.status });
+      }
+    }
+    throw lastError || httpError("No configured Luma credential can read this event's guests.", 403);
+  }
+
   async function fetchSessionGuestsBounded({ requestId, sessionToken, eventId, pageSize, maxEntries, maxPages, requestDelayMs = 0 }: {
     requestId: string;
     sessionToken: LumaSessionToken;
@@ -400,6 +444,7 @@ export function createLumaClient({
     fetchEventsAcrossCredentials,
     fetchSessionEventCatalog,
     fetchSessionGuestsBounded,
+    fetchEventGuestsBounded,
     privateGet,
     privatePost,
     publicRequest,

@@ -1,0 +1,8 @@
+.results { margin-top: 24px; }
+.heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 15px; margin-bottom: 15px; }
+.heading h4 { margin: 0; font-size: 16px; font-weight: 500; letter-spacing: -.02em; }
+.heading p { margin: 0; color: var(--color-muted); font-size: 12px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 0; }
+.result { padding: 20px; border-radius: 15px; background: #f1f1f1; color: #000; letter-spacing: -.02em; }
+.result dt { font-size: 13px; font-weight: 500; }
+.result dd { margin: 8px 0 0; font-size: 28px; line-height: 1.2; font-variant-numeric: tabular-nums; }

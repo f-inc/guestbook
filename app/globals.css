@@ -6007,7 +6007,10 @@
   overscroll-behavior: contain;
   box-shadow: 0 1px 2px rgba(25,25,24,.03);
 }
-.guests-page-heading { @apply mb-5 flex items-start justify-between gap-4; }
+.guests-page-heading { @apply mb-5 flex flex-col items-start gap-4; }
+.workspace .guests-page { width: 100%; margin: 0; }
+.workspace .guests-page-heading { flex-direction: column; align-items: flex-start; justify-content: flex-start; }
+.guests-directory .person-email { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .guests-page-heading h2 { @apply mt-1 text-2xl font-bold tracking-tight; }
 .guests-page-heading p:last-child { @apply mt-1 text-sm text-muted; }
 .guests-directory .search-dialog {

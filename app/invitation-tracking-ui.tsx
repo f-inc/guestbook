@@ -446,17 +446,17 @@ export function GuestsPageFrame({
     window.history.replaceState(window.history.state, "", u);
   }
   return (
-    <main className="guests-page">
+    <section className="guests-page" aria-label="Guests">
       <div className="guests-page-heading">
+        <button className="button" type="button" onClick={onBack}>
+          <ArrowLeft size={16} />
+          Back to overview
+        </button>
         <div>
           <p className="eyebrow">Your community</p>
           <h2>Guests</h2>
           <p>Find people, revisit their history, and manage email issues.</p>
         </div>
-        <button className="button" onClick={onBack}>
-          <ArrowLeft size={16} />
-          Back to events
-        </button>
       </div>
       <nav className="event-tabs" aria-label="Guests sections">
         <button
@@ -477,7 +477,7 @@ export function GuestsPageFrame({
       ) : (
         <EmailIssues request={request} onOpenPerson={onOpenPerson} />
       )}
-    </main>
+    </section>
   );
 }
 function EmailIssues({ request, onOpenPerson }) {

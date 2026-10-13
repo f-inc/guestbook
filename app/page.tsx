@@ -307,6 +307,9 @@ export default function Home() {
   const [searchOpen, setSearchOpen] = useState(false);
   const searchOpenRef = useRef(false);
   const universalSearchClosedAtRef = useRef(0);
+  const universalSearchReturnUrlRef = useRef<string | null>(null);
+  const closeUniversalSearchRef = useRef<() => void>(() => {});
+  const pendingGuestRevealRef = useRef("");
   const universalSearchScrollTopRef = useRef(0);
   const [universalSearchExpanded, setUniversalSearchExpanded] = useState(false);
   const [universalQuery, setUniversalQuery] = useState("");
@@ -530,6 +533,7 @@ export default function Home() {
   };
 
   const openEventDirectory = () => {
+    if (searchOpenRef.current) closeUniversalSearchRef.current();
     if (!eventDirectoryOpen) workspaceUrlModeRef.current = "push";
     setEventDirectoryOpen(true);
     setProfilePanelOpen(false);
@@ -665,6 +669,7 @@ export default function Home() {
       setUniversalPeopleSearch({ query: "", status: "idle", results: [], error: "", hasMore: false, nextOffset: 0 });
       setUniversalSearchExpanded(false);
     }
+    universalSearchReturnUrlRef.current = window.location.href;
     const guestsUrl = new URL(window.location.href);
     guestsUrl.pathname = "/guests";
     guestsUrl.search = guestsPageUrlSearch(guestsUrl.search);
@@ -679,11 +684,21 @@ export default function Home() {
     searchOpenRef.current = false;
     setOpenTagPersonId("");
     setSearchOpen(false);
-    const backUrl = new URL(window.location.href);
-    backUrl.pathname = workspacePathname(eventDirectoryOpen);
+    const backUrl = new URL(universalSearchReturnUrlRef.current || window.location.href);
+    backUrl.pathname = "/";
+    backUrl.searchParams.set("tab", "overview");
+    setEventDirectoryOpen(false);
+    setActiveEventTab("overview");
     backUrl.searchParams.delete("guests_tab");
+    backUrl.search = buildPeopleSearchUrlSearch(backUrl.search, {
+      open: false,
+      query: "",
+      filters: emptyPeopleSearchFilters(),
+    });
+    universalSearchReturnUrlRef.current = null;
     window.history.pushState(window.history.state, "", backUrl);
   };
+  closeUniversalSearchRef.current = closeUniversalSearch;
 
   const clearUniversalSearch = () => {
     universalSearchClosedAtRef.current = 0;
@@ -714,6 +729,11 @@ export default function Home() {
         if (avatarPreviewRef.current) {
           event.preventDefault();
           setAvatarPreview(null);
+          return;
+        }
+        if (searchOpenRef.current) {
+          event.preventDefault();
+          closeUniversalSearchRef.current();
           return;
         }
         setProfilePanelOpen(false);
@@ -1055,6 +1075,15 @@ export default function Home() {
     : `${state.filters.guestAnswerQuestion}:${state.filters.guestAnswerKey}:${state.filters.guestAnswer}`;
   const multiEventGuestQueryKey = `${multiEventStatsKey}:${guestStatusFilterKey}:${debouncedGuestSearch}:${guestTagFilterKey}:${guestLatestTagFilterKey}:${state.filters.guestHasNotes ? 1 : 0}:${state.filters.guestAttendedGreaterThan}:${guestAnswerFilterKey}:${guestSortField}:${guestDateSortDirection}`;
   const normalizedUniversalQuery = universalQuery.trim().toLocaleLowerCase();
+  useEffect(() => {
+    const personId = pendingGuestRevealRef.current;
+    if (!personId || searchOpen || activeEventTab !== "overview") return;
+    const row = Array.from(document.querySelectorAll<HTMLElement>("[data-guest-person-id]"))
+      .find((element) => element.dataset.guestPersonId === personId);
+    if (!row) return;
+    row.scrollIntoView({ block: "nearest" });
+    pendingGuestRevealRef.current = "";
+  }, [searchOpen, activeEventTab, visibleGuests]);
   const universalPeopleRequestKey = `${normalizedUniversalQuery}\u0000${universalPeopleFiltersKey}`;
   const activeUniversalPeopleSearch = universalPeopleSearch.query === universalPeopleRequestKey ? universalPeopleSearch : null;
   const activeUniversalIndexedPeople = activeUniversalPeopleSearch?.status === "ready" || activeUniversalPeopleSearch?.status === "loadingMore"
@@ -1582,8 +1611,14 @@ export default function Home() {
       preserveProfile = false,
     }: { additive?: boolean; range?: boolean; preserveProfile?: boolean } = {},
   ) => {
+    if (searchOpenRef.current) {
+      closeUniversalSearchRef.current();
+      workspaceUrlModeRef.current = "push";
+    }
+    setActiveEventTab("overview");
     if (eventDirectoryOpen) workspaceUrlModeRef.current = "push";
     setEventDirectoryOpen(false);
+    if (mainStackRef.current) mainStackRef.current.scrollTop = 0;
     const selection = nextEventSelection({
       currentIds: selectedWorkspaceEvents(state).map((event) => event.id),
       eventId,
@@ -4012,7 +4047,7 @@ export default function Home() {
         </div>
       </header>
 
-      <main style={searchOpen ? { display: "none" } : undefined} className={`workspace ${showProfilePanel ? "" : "workspace-no-profile"}`}>
+      <main className={`workspace ${showProfilePanel ? "" : "workspace-no-profile"}`}>
         <aside className="rail panel">
           <div className="panel-heading">
             <button
@@ -4143,7 +4178,51 @@ export default function Home() {
         </aside>
 
         <section className="main-stack" ref={mainStackRef}>
-          {eventDirectoryOpen ? (
+          {searchOpen ? (
+        <GuestsPageFrame request={apiFetch} onBack={closeUniversalSearch} onOpenPerson={async (row) => {
+          if (row.personId) { await openAnalyticsResponsePerson(row.personId); return; }
+          selectUniversalResult({type: "person", id: `email:${row.emailLower}`, person: {id: `email:${row.emailLower}`, name: row.name || row.emailLower, email: row.emailLower}, eventId: row.eventId});
+        }}>
+        <UniversalSearchModal
+          query={universalQuery}
+          expanded={true}
+          results={universalResults}
+          resultCount={universalResultCount}
+          tagDefinitions={state.tagDefinitions}
+          peopleFilters={universalPeopleFilters}
+          peopleSearchStatus={activeUniversalPeopleSearch?.status || (normalizedUniversalQuery || hasUniversalPeopleFilters ? "loading" : "idle")}
+          peopleSearchError={activeUniversalPeopleSearch?.error || ""}
+          hasMorePeople={Boolean(activeUniversalPeopleSearch?.hasMore)}
+          loadingMorePeople={activeUniversalPeopleSearch?.status === "loadingMore"}
+          cachedScrollTop={universalSearchScrollTopRef.current}
+          openTagPersonId={openTagPersonId}
+          savingTagPersonId={savingTagPersonId}
+          savingPhonePersonId={savingPhonePersonId}
+          inputRef={universalSearchInputRef}
+          onQueryChange={(value) => {
+            universalSearchScrollTopRef.current = 0;
+            setUniversalQuery(value);
+          }}
+          onPeopleFiltersChange={(value) => {
+            universalSearchScrollTopRef.current = 0;
+            setUniversalPeopleFilters(value);
+          }}
+          onClose={closeUniversalSearch}
+          onSelect={selectUniversalResult}
+          onAvatarClick={setAvatarPreview}
+          onOpenComments={openGuestNote}
+          onOpenTags={setOpenTagPersonId}
+          onCloseTags={() => setOpenTagPersonId("")}
+          onChangeTags={(person, tags, mutation) => savePersonTags(person.id, tags, { ...mutation, eventId: "" })}
+          onCreateTag={(person, name, tags) => createAndAssignTag(person.id, name, tags, "")}
+          onSavePhone={savePersonPhone}
+          onLoadMorePeople={loadMoreUniversalPeople}
+          onScrollPositionChange={(scrollTop) => {
+            universalSearchScrollTopRef.current = scrollTop;
+          }}
+        />
+        </GuestsPageFrame>
+          ) : eventDirectoryOpen ? (
             <EventDirectory
               events={eventDirectoryState.events}
               eventFeedbackById={eventFeedbackById}
@@ -4476,6 +4555,7 @@ export default function Home() {
                           return (
                           <tr
                             className={`guest-row ${selectedPerson?.id === person.id ? "selected" : ""} ${allMatchingGuestsSelected || selectedGuestIds.has(person.id) ? "bulk-selected" : ""}`}
+                            data-guest-person-id={person.id}
                             key={person.id}
                             tabIndex={0}
                             aria-label={`View ${person.name}'s profile`}
@@ -4727,7 +4807,15 @@ export default function Home() {
             reinvitingGuestKey={reinvitingGuestKey}
             onGuestAction={requestGuestStatusChange}
             onTraceActivity={() => tracePersonActivity(selectedPerson, { force: true })}
-            onSelectEvent={selectEvent}
+            onSelectEvent={(eventId) => {
+              pendingGuestRevealRef.current = selectedPerson?.id || "";
+              selectEvent(eventId, { preserveProfile: true });
+              clearGuestFilters();
+              const query = selectedPerson?.email || selectedPerson?.name || "";
+              setDebouncedGuestSearch(query);
+              updateState((draft) => { draft.filters.guestSearch = query; });
+              setProfilePanelOpen(true);
+            }}
             onAvatarClick={setAvatarPreview}
             onClose={() => {
               workspaceUrlModeRef.current = "push";
@@ -4753,51 +4841,6 @@ export default function Home() {
         </div>
       ) : null}
 
-      {searchOpen ? (
-        <GuestsPageFrame request={apiFetch} onBack={closeUniversalSearch} onOpenPerson={async (row) => {
-          if (row.personId) { await openAnalyticsResponsePerson(row.personId); return; }
-          selectUniversalResult({type: "person", id: `email:${row.emailLower}`, person: {id: `email:${row.emailLower}`, name: row.name || row.emailLower, email: row.emailLower}, eventId: row.eventId});
-        }}>
-        <UniversalSearchModal
-          query={universalQuery}
-          expanded={true}
-          results={universalResults}
-          resultCount={universalResultCount}
-          tagDefinitions={state.tagDefinitions}
-          peopleFilters={universalPeopleFilters}
-          peopleSearchStatus={activeUniversalPeopleSearch?.status || (normalizedUniversalQuery || hasUniversalPeopleFilters ? "loading" : "idle")}
-          peopleSearchError={activeUniversalPeopleSearch?.error || ""}
-          hasMorePeople={Boolean(activeUniversalPeopleSearch?.hasMore)}
-          loadingMorePeople={activeUniversalPeopleSearch?.status === "loadingMore"}
-          cachedScrollTop={universalSearchScrollTopRef.current}
-          openTagPersonId={openTagPersonId}
-          savingTagPersonId={savingTagPersonId}
-          savingPhonePersonId={savingPhonePersonId}
-          inputRef={universalSearchInputRef}
-          onQueryChange={(value) => {
-            universalSearchScrollTopRef.current = 0;
-            setUniversalQuery(value);
-          }}
-          onPeopleFiltersChange={(value) => {
-            universalSearchScrollTopRef.current = 0;
-            setUniversalPeopleFilters(value);
-          }}
-          onClose={closeUniversalSearch}
-          onSelect={selectUniversalResult}
-          onAvatarClick={setAvatarPreview}
-          onOpenComments={openGuestNote}
-          onOpenTags={setOpenTagPersonId}
-          onCloseTags={() => setOpenTagPersonId("")}
-          onChangeTags={(person, tags, mutation) => savePersonTags(person.id, tags, { ...mutation, eventId: "" })}
-          onCreateTag={(person, name, tags) => createAndAssignTag(person.id, name, tags, "")}
-          onSavePhone={savePersonPhone}
-          onLoadMorePeople={loadMoreUniversalPeople}
-          onScrollPositionChange={(scrollTop) => {
-            universalSearchScrollTopRef.current = scrollTop;
-          }}
-        />
-        </GuestsPageFrame>
-      ) : null}
 
       {avatarPreview ? (
         <AvatarPhotoViewer preview={avatarPreview} onClose={() => setAvatarPreview(null)} />
@@ -6804,7 +6847,9 @@ function UniversalSearchModal({
               <ListFilter size={17} aria-hidden="true" />
               {activeFilterCount ? <span className="search-filter-count">{activeFilterCount}</span> : null}
             </button>
-
+            <button className="icon-button" type="button" aria-label="Close search and return to events" title="Back to events (Esc)" onClick={onClose}>
+              <X size={18} aria-hidden="true" />
+            </button>
           </div>
         </div>
         {filtersOpen ? (
@@ -10580,6 +10625,7 @@ function peopleSearchFiltersKey(filters) {
 function universalSearchResults(state, query, indexedPeople = null) {
   const normalized = query.trim().toLowerCase();
   if (!normalized && indexedPeople === null) return { people: [] };
+  const peopleById = new Map(state.people.map((person) => [person.id, person]));
 
   return {
     people: (indexedPeople === null
@@ -10588,8 +10634,8 @@ function universalSearchResults(state, query, indexedPeople = null) {
           .filter(({ text }) => text.includes(normalized))
           .slice(0, 8)
       : indexedPeople.map(({ person, eventId }) => {
-          const currentPerson = getPerson(state, person.id) || person;
-          return { person: currentPerson, eventId, text: personSearchText(state, currentPerson) };
+          const currentPerson = peopleById.get(person.id) || person;
+          return { person: currentPerson, eventId, text: normalized ? personSearchText(state, currentPerson) : "" };
         }))
       .map(({ person, eventId, text }) => ({
         type: "person",

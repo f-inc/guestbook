@@ -10631,7 +10631,9 @@ function universalSearchResults(state, query, indexedPeople = null) {
     people: (indexedPeople === null
       ? state.people
           .map((person) => ({ person, text: personSearchText(state, person), eventId: mostRecentPersonEventId(state, person.id) }))
-          .filter(({ text }) => text.includes(normalized))
+          .filter(({ person, text }) => text.includes(normalized)
+            || phoneMatchesSearch(person.phoneNumber, normalized)
+            || personGuestRecords(state, person.id).some(({ guest }) => phoneMatchesSearch(guest.phoneNumber, normalized)))
           .slice(0, 8)
       : indexedPeople.map(({ person, eventId }) => {
           const currentPerson = peopleById.get(person.id) || person;
@@ -10657,6 +10659,7 @@ function personSearchText(state, person) {
     event.title,
     event.category,
     guest.profileDescription,
+    guest.phoneNumber,
     guest.searchText,
     registrationAnswerText(guest.registrationAnswers),
     socialLinksText(guest.socialLinks),
@@ -10665,6 +10668,7 @@ function personSearchText(state, person) {
   return [
     person.name,
     person.email,
+    person.phoneNumber,
     person.title,
     person.profileDescription,
     person.bio,

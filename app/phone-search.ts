@@ -1,4 +1,4 @@
-const PHONE_QUERY_CHARACTERS = /^[\d\s()+.\-\u00a0]+$/;
+const PHONE_QUERY_CHARACTERS = /^[\d\s()+.\-\u2010-\u2015\u2212]+$/;
 
 export function phoneSearchDigits(value: unknown): string {
   const text = String(value || "").trim();

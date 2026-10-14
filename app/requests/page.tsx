@@ -64,13 +64,16 @@ export default function RequestsPage() {
 
   if (key === null) return <main className="session-shell"><section className="session-panel"><div className="session-brand"><img className="brand-mark" src="/guestbook-logo.png" alt="" /><h1>Guestbook</h1></div><form className="session-form" onSubmit={event => { event.preventDefault(); void unlock(draftKey.trim()); }}><label>Guestbook key<input type="password" value={draftKey} onChange={event => setDraftKey(event.target.value)} autoComplete="current-password" required /></label>{authError && <p className="session-error" role="alert">{authError}</p>}<button className="button primary" disabled={checking}>{checking ? "Checking access…" : "Unlock Guestbook"}</button></form></section></main>;
 
-  return <div className="app-shell submissions-shell">
+  return <div className="app-shell submissions-shell requests-shell">
     <header className="topbar"><a href="/" className="brand-lockup flex items-center gap-2 no-underline"><img className="brand-mark size-11 object-contain" src="/guestbook-logo.png" alt="" /><h1 className="text-2xl font-bold">Guestbook</h1></a><nav className="topbar-actions" aria-label="Guestbook"><a className="button" href="/events">Events</a><a className="button" href="/guests">Guests</a><a className="button primary" href="/requests" aria-current="page"><FileText size={17} />Requests</a><button className="button" onClick={lock}><Lock size={17} />Lock</button></nav></header>
     <main className="submissions-content">
-      <div className="submissions-heading"><div><span className="eyebrow">Campus OS</span><h2>Requests</h2><p className="text-muted">Review event plans, space needs, and organizer details.</p></div><button className="button" disabled={loading} onClick={() => setRevision(value => value + 1)}><RefreshCw size={16} />Refresh</button></div>
-      <form className="requests-filter" onSubmit={event => { event.preventDefault(); setHistory([]); setQuery({ search: searchDraft.trim(), offset: 0 }); }}><label><span>Search requests</span><input type="search" value={searchDraft} onChange={event => setSearchDraft(event.target.value)} placeholder="Search any submitted field…" /></label><button className="button primary" disabled={loading}>Search</button>{query.search && <button type="button" className="button" disabled={loading} onClick={() => { setSearchDraft(""); setHistory([]); setQuery({ search: "", offset: 0 }); }}>Clear</button>}</form>
       <div className="submissions-grid" aria-busy={loading}>
-        <section className="panel submissions-results" aria-label="Requests">
+        <aside className="panel submissions-results" aria-label="Requests">
+          <div className="requests-sidebar-controls">
+      <div className="submissions-heading"><div><h2>Requests</h2><p className="text-muted">Review event plans and organizers.</p></div><button className="button" disabled={loading} onClick={() => setRevision(value => value + 1)}><RefreshCw size={16} />Refresh</button></div>
+      <form className="requests-filter" onSubmit={event => { event.preventDefault(); setHistory([]); setQuery({ search: searchDraft.trim(), offset: 0 }); }}><label><span>Search requests</span><input type="search" value={searchDraft} onChange={event => setSearchDraft(event.target.value)} placeholder="Search requests…" /></label><button className="button primary" disabled={loading}>Search</button>{query.search && <button type="button" className="button" disabled={loading} onClick={() => { setSearchDraft(""); setHistory([]); setQuery({ search: "", offset: 0 }); }}>Clear</button>}</form>
+          </div>
+          <div className="requests-sidebar-list">
           {loading && <p role="status">Loading requests…</p>}
           {error && <div role="alert"><p>{error}</p><button className="button" onClick={() => setRevision(value => value + 1)}>Try again</button></div>}
           {result && !result.data.length && <p role="status">{result.pagination.nextOffset !== null ? "No matches in this batch. Continue to search more requests." : "No matching requests found."}</p>}
@@ -85,7 +88,8 @@ export default function RequestsPage() {
             </button>;
           })}</div>}
           {result && (history.length > 0 || result.pagination.nextOffset !== null) && <div className="submissions-pagination"><span>{result.data.length ? `${result.data.length}` : "0"} requests</span><div className="flex gap-2"><button className="button" disabled={!history.length || loading} onClick={() => { const offset = history[history.length - 1]; setHistory(history.slice(0, -1)); setQuery({ ...query, offset }); }}>Previous</button><button className="button" disabled={result.pagination.nextOffset === null || loading} onClick={() => { if (result.pagination.nextOffset === null) return; setHistory([...history, query.offset]); setQuery({ ...query, offset: result.pagination.nextOffset }); }}>Next</button></div></div>}
-        </section>
+          </div>
+        </aside>
         <section className="panel submissions-detail" aria-label="Request details" aria-live="polite">{selected ? <EventRequestDetail request={selected} /> : <div className="request-empty-detail"><FileText size={32} aria-hidden="true" /><h3>Select an event request</h3><p className="text-muted">Event plans and organizer details will appear here.</p></div>}</section>
       </div>
     </main>

@@ -286,3 +286,33 @@ and a production deployment identity (`RAILWAY_ENVIRONMENT_NAME=production`,
 or `GUESTBOOK_ENVIRONMENT=production` on other hosts). Railway's environment
 identity takes precedence. The existing preview-and-confirm flow still applies
 in production. No new migration is required for this restriction.
+
+### Campus form submissions
+
+Configure server-only `CAMPUS_API_KEY` with the Campus `form-submissions.read` scope.
+`CAMPUS_API_URL` defaults to `https://api.f.inc` and accepts an API origin (no path).
+Authenticated Guestbook requests can query
+`GET /api/campus/form-submissions?formKey=guest-confirmation&limit=50&offset=0`.
+Optional `email` matches case-insensitively. The response contains `data` rows with
+`id`, `form_key`, `form_version`, `created_at`, `name`, `email`, and `answers`, plus
+`pagination.nextOffset` (null at the end). Pages are ordered newest first; concurrent
+new submissions can shift offsets. The Campus key never goes to the browser.
+Campus must deploy migration `20261013210000_form_submission_read_scope.sql` and the
+new API endpoint before use; existing keys need the new scope explicitly granted.
+
+The production key scope and Campus scope migration were applied on 2026-10-13.
+The API and proxy code still need deployment. Requests from the local investigation environment to `api.f.inc` encounter a
+Cloudflare browser challenge even with Inbox0's named User-Agent; hosted runtime
+access has not been verified. The known Campus Railway origin authenticates this
+key (whoami HTTP 200), but form-submissions returned HTTP 404 before deployment.
+Verify `api.f.inc` from the actual Guestbook runtime before changing edge rules.
+
+### Campus requests UI
+
+Open `/requests` from the Guestbook header. Guestbook authentication is required. The page always filters to `event-request` and supports case-insensitive partial search across all submitted values, including nested custom answers. Search returns up to 25 matches per page, scanning at most 20 upstream pages per batch; “Next” resumes scanning when more records remain. Select a request to see its event details, organizer, and additional answers. The three initial example submissions are marked “Sample” by explicit request ID. No submissions are imported into the database or persisted in browser storage.
+
+Set the server-only `CAMPUS_API_URL=https://os-v2-production.up.railway.app`. Verified from the local Guestbook environment: Railway returned HTTP 200 for guest confirmations, while `https://api.f.inc` returned HTTP 403 with a Cloudflare browser challenge. The proxy retains its configurable origin and uncached reads. Restart a running production server after changing environment configuration.
+
+The former `/form-submissions` URL redirects to `/requests`. Verified that the Campus event request form posts to `/api/event-requests` and persists `form_key=event-request`; the live integration returned two matching requests during verification.
+
+Requests display company and event names together. Company icons use a protected, uncached server route: Google’s domain favicon service first, comparing against its generic placeholder, then the company LinkedIn page image when available. Redirects and image hosts are bounded to the provider hosts. If both sources fail or LinkedIn blocks access, company initials appear.

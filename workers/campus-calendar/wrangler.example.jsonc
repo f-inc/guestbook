@@ -1,0 +1,32 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "REPLACE_WITH_WORKER_NAME",
+  "main": "src/index.ts",
+  "account_id": "REPLACE_WITH_CLOUDFLARE_ACCOUNT_ID",
+  "compatibility_date": "2026-10-13",
+  "workers_dev": true,
+  "vars": {
+    "LUMA_CALENDAR_ID": "REPLACE_WITH_LUMA_CALENDAR_ID",
+    "GOOGLE_CALENDAR_ID": "REPLACE_WITH_GOOGLE_CALENDAR_ID",
+    "SYNC_OWNER": "REPLACE_WITH_SYNC_OWNER"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "EVENT_SYNC",
+        "class_name": "EventSync"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "EventSync"
+      ]
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}

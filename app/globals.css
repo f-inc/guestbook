@@ -6009,6 +6009,13 @@
 }
 .guests-page-heading { @apply mb-5 flex flex-col items-start gap-4; }
 .workspace .guests-page { width: 100%; margin: 0; }
+/* main-stack owns workspace scrolling. An auto-height nested scroll container
+   with overscroll containment traps wheel gestures before they reach it. */
+.workspace .main-stack > .guests-page {
+  min-width: 0;
+  overflow: visible;
+  overscroll-behavior: auto;
+}
 .workspace .guests-page-heading { flex-direction: column; align-items: flex-start; justify-content: flex-start; }
 .guests-directory .person-email { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .guests-page-heading h2 { @apply mt-1 text-2xl font-bold tracking-tight; }

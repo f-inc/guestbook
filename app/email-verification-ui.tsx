@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown, RefreshCw, Search } from "lucide-react";
 import { EmailRemovalControls } from "./email-removal-ui";
+import { EmailVerificationHistory } from "./email-verification-history";
 import summaryStyles from "./email-verification-summary.module.css";
 const labels = { deliverable: "Deliverable", undeliverable: "Undeliverable", risky: "Unconfirmed", unknown: "Unverified", unchecked: "Not checked" };
 
@@ -143,6 +144,7 @@ export function EmailVerificationSummary({ request, onOpenPerson }) {
           ))}
         </dl>
       </section>
+      <EmailVerificationHistory request={request} />
       <div className="verification-toolbar">
         <div className="verification-filters" role="group" aria-label="Filter email health">
           {[["issues", "Needs review", s ? s.issues : null], ["unchecked", "Not checked", s?.unchecked], ["all", "Active emails", s?.total], ["inactive", "Inactive", s?.inactive]].map(([value, label, count]) => (

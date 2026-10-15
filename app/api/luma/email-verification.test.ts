@@ -253,3 +253,25 @@ test("new audience merges into paused scan with deduplication and reserved credi
     if (old === undefined) delete process.env.EMAILABLE_API_KEY; else process.env.EMAILABLE_API_KEY = old;
   }
 });
+
+test("scan history paginates with bounded reads and excludes recipient datasets", async () => {
+  const { verificationHistory, verificationBatchHistory } = await import("./email-verification");
+  let runQuery: any;
+  let batchQuery: any;
+  const db: any = {
+    emailVerificationRun: { findMany: async (q: any) => { runQuery = q; return Array.from({ length: 21 }, (_, i) => ({ id: String(i) })); } },
+    $queryRaw: async (q: any) => { batchQuery = q; return Array.from({ length: 21 }, (_, i) => ({ id: String(i), total: 10 })); },
+  };
+  const runs = await verificationHistory(20, db);
+  assert.equal(runs.runs.length, 20);
+  assert.equal(runs.hasMore, true);
+  assert.equal(runQuery.take, 21);
+  assert.equal(runQuery.skip, 20);
+  const batches = await verificationBatchHistory("run-id", 40, db);
+  assert.equal(batches.batches.length, 20);
+  assert.equal(batches.hasMore, true);
+  assert.match(batchQuery.sql, /jsonb_array_length/);
+  assert.match(batchQuery.sql, /LIMIT 21/);
+  assert.deepEqual(batchQuery.values, ["run-id", 40]);
+  assert.doesNotMatch(batchQuery.sql, /SELECT \*/);
+});

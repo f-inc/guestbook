@@ -26,6 +26,23 @@ const community = Prisma.sql`
 const activeStatuses = ["running", "paused", "submission_unknown"];
 const freshness = () => new Date(Date.now() - 30 * 86400000);
 
+// Read-only, bounded history. Recipient lists never leave the server here.
+export async function verificationHistory(offset = 0, db = prisma()) {
+  const rows = await db.emailVerificationRun.findMany({
+    orderBy: [{ startedAt: "desc" }, { id: "desc" }], skip: offset, take: 21,
+    select: { id: true, status: true, total: true, processed: true, skipped: true, eventIds: true, startedAt: true, completedAt: true, nextCheckAt: true, error: true },
+  });
+  return { runs: rows.slice(0, 20), hasMore: rows.length > 20 };
+}
+
+export async function verificationBatchHistory(runId: string, offset = 0, db = prisma()) {
+  const rows = await db.$queryRaw<any[]>(Prisma.sql`
+    SELECT id, status, "providerId", "createdAt", jsonb_array_length(emails::jsonb)::int AS total
+    FROM email_verification_batches WHERE "runId" = ${runId}
+    ORDER BY "createdAt" DESC, id DESC LIMIT 21 OFFSET ${offset}`);
+  return { batches: rows.slice(0, 20), hasMore: rows.length > 20 };
+}
+
 export async function verificationOverview(query = "", filter = "issues", offset = 0, db = prisma()) {
   const filterSql = filter === "inactive" ? Prisma.sql`NOT (${activeEmailSql(Prisma.sql`c.email`)})` : filter === "all" ? Prisma.sql`true`
     : filter === "bounced" ? Prisma.sql`EXISTS (SELECT 1 FROM luma_invite_tracking t WHERE t."emailLower" = c.email AND t."issueReason" = 'bounced')`

@@ -1,5 +1,5 @@
 import { prisma } from "../luma/db";
-import { verificationAudience } from "../luma/email-verification";
+import { verificationAudience, verificationHistory, verificationBatchHistory } from "../luma/email-verification";
 import { emailableCredits } from "../luma/emailable-client";
 import { after } from "next/server";
 import { requireGuestbookKey } from "../session-auth";
@@ -12,6 +12,13 @@ export async function GET(request: Request) {
   try {
     requireGuestbookKey(request);
     const params = new URL(request.url).searchParams;
+    if (params.get("history") === "1") {
+      const rawOffset = Number(params.get("offset") || 0);
+      const offset = Number.isFinite(rawOffset) ? Math.max(0, Math.min(100000, Math.floor(rawOffset))) : 0;
+      const runId = params.get("runId");
+      if (runId && !/^[a-zA-Z0-9-]{1,100}$/.test(runId)) return Response.json({ error: "Invalid scan ID." }, { status: 400 });
+      return Response.json(runId ? await verificationBatchHistory(runId, offset) : await verificationHistory(offset));
+    }
     if (params.get("credits") === "1") {
       try { return Response.json({ available: await emailableCredits(), checkedAt: new Date().toISOString() }); }
       catch { return Response.json({ available: null, error: "Unable to check Emailable credits. Refresh to try again." }, { status: 503 }); }

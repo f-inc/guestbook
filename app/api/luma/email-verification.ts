@@ -6,6 +6,7 @@ import { Prisma } from "@prisma/client";
 import { createHash, randomUUID } from "node:crypto";
 import { prisma } from "./db";
 import { emailableCredits, verificationBudget, emailableRequest, parseVerificationBatch } from "./emailable-client";
+import { logVerification, redactVerificationMessage } from "./verification-log";
 
 // The indexed community only: no live contacts/list or calendar guest scans.
 const community = Prisma.sql`
@@ -89,26 +90,44 @@ export async function verificationOverview(query = "", filter = "issues", offset
 
 export async function startVerification(maxEmails = Number.MAX_SAFE_INTEGER, db = prisma(), getCredits = emailableCredits, scope?: { emails: string[]; eventIds: string[] }) {
   if (!process.env.EMAILABLE_API_KEY?.trim()) throw new Error("Set EMAILABLE_API_KEY on the server to enable verification.");
-  const budget = verificationBudget(await getCredits(), maxEmails);
+  const credits = await getCredits();
+  const budget = verificationBudget(credits, maxEmails);
   if (!budget) throw Object.assign(new Error("No Emailable credits available. Add credits before starting a scan."), { status: 409, publicMessage: true });
   return db.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(72483192)::text`;
     const active = await tx.emailVerificationRun.findFirst({ where: { status: { in: activeStatuses } } });
-    if (active) throw Object.assign(new Error("Another email scan is already active. Finish or resume it in Guests → Email health before starting a new audience."), { status: 409, publicMessage: true });
+    if (active && (active.status !== "paused" || (active.lockUntil && active.lockUntil > new Date())))
+      throw Object.assign(new Error(active.status === "submission_unknown"
+        ? "A submission has an unknown outcome. Check Emailable before adding more addresses to avoid duplicate credit use."
+        : "An email scan is currently working. Try adding this audience again after it finishes its current batch."), { status: 409, publicMessage: true });
+    if (active && await tx.emailVerificationBatch.findFirst({ where: { runId: active.id, status: "submitting" } }))
+      throw Object.assign(new Error("A submission needs reconciliation before pending scans can be combined."), { status: 409, publicMessage: true });
     await tx.$executeRaw(Prisma.sql`${community}
       INSERT INTO email_addresses ("emailLower", "personId", name)
       SELECT email, "personId", name FROM community
       ON CONFLICT ("emailLower") DO UPDATE SET "personId" = EXCLUDED."personId", name = EXCLUDED.name`);
-    const id = randomUUID();
+    const id = active?.id || randomUUID();
+    // Existing queued addresses already reserve credits; duplicates consume no extra slots.
+    const reserved = active ? await tx.emailAddress.count({ where: { queuedRunId: id } }) : 0;
+    const remainingBudget = Math.min(budget, Math.max(0, credits - reserved));
     const count = await tx.$executeRaw(Prisma.sql`${community}
       , candidates AS (
         SELECT v."emailLower" FROM email_addresses v JOIN community c ON v."emailLower" = c.email
         WHERE ${activeEmailSql(Prisma.sql`v."emailLower"`)} AND (v."checkedAt" IS NULL OR v."checkedAt" < ${freshness()}) AND v."lumaBlockedReason" IS NULL
+          AND (v."queuedRunId" IS NULL OR v."queuedRunId" <> ${id})
           AND ${scope ? Prisma.sql`v."emailLower" = ANY(${scope.emails}::text[])` : Prisma.sql`true`}
-        ORDER BY v."checkedAt" ASC NULLS FIRST, v."emailLower" LIMIT ${budget}
+        ORDER BY v."checkedAt" ASC NULLS FIRST, v."emailLower" LIMIT ${remainingBudget}
       )
       UPDATE email_addresses v SET "queuedRunId" = ${id}
       FROM candidates c WHERE v."emailLower" = c."emailLower"`);
+    if (active) {
+      const previousEvents = Array.isArray(active.eventIds) ? active.eventIds as string[] : [];
+      // A community-wide scan remains community-wide when adding an event audience.
+      const eventIds = !previousEvents.length || !scope ? [] : [...new Set([...previousEvents, ...scope.eventIds])];
+      return tx.emailVerificationRun.update({ where: { id }, data: {
+        total: { increment: count }, eventIds, status: "running", error: null, nextCheckAt: new Date(),
+      } });
+    }
     return tx.emailVerificationRun.create({ data: { id, eventIds: scope?.eventIds || [], total: count, status: count ? "running" : "completed", completedAt: count ? null : new Date() } });
   }, { timeout: 30000 });
 }
@@ -165,13 +184,13 @@ export async function runVerificationTick(db = prisma(), request = emailableRequ
       // Persist intent before the billable POST; never blindly retry an ambiguous POST.
       batch = await db.emailVerificationBatch.create({ data: { id: randomUUID(), runId: run.id, emails: recipients.map((p) => p.emailLower) } });
       submittingId = batch.id;
-      const response: any = await request("POST", { emails: batch.emails as string[] });
+      const response: any = await request("POST", { emails: batch.emails as string[] }, undefined, { runId: run.id, batchId: batch.id });
       if (typeof response.id !== "string" || !response.id) throw new Error("Emailable did not return a batch ID.");
       await db.emailVerificationBatch.update({ where: { id: batch.id }, data: { status: "waiting", providerId: response.id } });
       submittingId = null;
       return;
     }
-    const response = await request("GET", { id: batch.providerId! });
+    const response = await request("GET", { id: batch.providerId! }, undefined, { runId: run.id, batchId: batch.id });
     if (/paused/i.test((response as any)?.message || "")) throw new Error("Emailable batch is paused.");
     const { complete, results } = parseVerificationBatch(response, batch.emails as string[]);
     await db.$transaction(async (tx) => {
@@ -196,6 +215,7 @@ export async function runVerificationTick(db = prisma(), request = emailableRequ
       }
     }, { timeout: 30000 });
   } catch (error: any) {
+    await logVerification("worker-failed", { runId: run.id, batchId: submittingId, message: redactVerificationMessage(error?.message), definitive: error?.definitive === true });
     if (submittingId && error.definitive) {
       await db.emailVerificationBatch.update({ where: { id: submittingId }, data: { status: "rejected" } });
       submittingId = null;

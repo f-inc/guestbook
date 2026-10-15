@@ -1,3 +1,4 @@
+import { logVerification, redactVerificationMessage } from "./verification-log";
 export const VERIFICATION_STATES = ["deliverable", "undeliverable", "risky", "unknown"];
 export function normalizeVerification(value: any) {
   if (!value || typeof value.email !== "string" || !VERIFICATION_STATES.includes(value.state))
@@ -29,7 +30,7 @@ export function parseVerificationBatch(payload: any, expected: string[]) {
     throw new Error("Emailable returned an incomplete result set.");
   return { complete, results };
 }
-export async function emailableRequest(method: "GET" | "POST", batch?: { emails: string[] } | { id: string }, fetchImpl = fetch) {
+export async function emailableRequest(method: "GET" | "POST", batch?: { emails: string[] } | { id: string }, fetchImpl = fetch, context?: { runId: string; batchId: string }) {
   const key = process.env.EMAILABLE_API_KEY?.trim();
   if (!key) throw new Error("Set EMAILABLE_API_KEY on the server to enable verification.");
   const url = new URL("https://api.emailable.com/v1/batch");
@@ -50,6 +51,12 @@ export async function emailableRequest(method: "GET" | "POST", batch?: { emails:
   if (!response.ok) {
     const error: any = new Error(response.status === 402 ? "Emailable needs more credits. Check your account and resume the scan." : response.status === 401 || response.status === 403 ? "Emailable rejected the API key. Update EMAILABLE_API_KEY and resume." : response.status === 429 ? "Emailable rate limit reached. Resume the scan shortly." : "Emailable request failed. Saved results are still available.");
     error.definitive = [400, 401, 402, 403, 422, 429].includes(response.status);
+    let providerMessage: string | undefined;
+    try {
+      const body = await response.json();
+      providerMessage = redactVerificationMessage(body && typeof body === "object" && "message" in body ? body.message : undefined, batch && "emails" in batch ? batch.emails : []);
+    } catch { /* Non-JSON error bodies are deliberately omitted. */ }
+    await logVerification("provider-rejected", { ...context, method, endpoint: "/v1/batch", httpStatus: response.status, definitive: error.definitive, providerMessage });
     throw error;
   }
   // Never propagate raw provider bodies or request headers into logs/errors.

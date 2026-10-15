@@ -87,6 +87,7 @@ export function EmailVerificationSummary({ request, onOpenPerson }) {
   }
   const s = data?.summary;
   const active = data?.run && ["running", "paused", "submission_unknown"].includes(data.run.status);
+  const canMerge = data?.run?.status === "paused";
   const pending = s ? s.pending : 0;
   const scanCount = Math.min(pending, credits ?? 0);
   function changeFilter(value: string) { setFilter(value); setOffset(0); }
@@ -98,8 +99,8 @@ export function EmailVerificationSummary({ request, onOpenPerson }) {
           <p>Assess bounce risk before sending Luma invitations.</p>
         </div>
         <div className="verification-scan">
-          <button className="button primary" disabled={busy || !data?.configured || !!active || !scanCount || checkingCredits} onClick={() => run("start")}>
-            <RefreshCw size={16} className={busy || data?.run?.status === "running" ? "motion-safe:animate-spin" : undefined} />{busy ? "Starting…" : active ? "Scan in progress" : `Scan ${scanCount.toLocaleString()} emails`}
+          <button className="button primary" disabled={busy || !data?.configured || (!!active && !canMerge) || !scanCount || checkingCredits} onClick={() => run("start")}>
+            <RefreshCw size={16} className={busy || data?.run?.status === "running" ? "motion-safe:animate-spin" : undefined} />{busy ? "Starting…" : canMerge ? "Combine pending scans & resume" : active ? "Scan in progress" : `Scan ${scanCount.toLocaleString()} emails`}
           </button>
           <span>{checkingCredits ? "Checking credits…" : credits === null ? "Credits unavailable" : `${credits.toLocaleString()} credits available`}</span>
         </div>

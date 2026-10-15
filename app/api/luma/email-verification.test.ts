@@ -201,3 +201,55 @@ test("repeated partial polling keeps one history identity; a later check has ano
   await runVerificationTickWithCredits(db,response);
   assert.equal(ids.size,2);
 });
+
+test("provider rejection logs status and scan context without credentials or recipients", async () => {
+  const oldKey = process.env.EMAILABLE_API_KEY;
+  const originalError = console.error;
+  const lines: string[] = [];
+  process.env.EMAILABLE_API_KEY = "private-test-key";
+  console.error = (line) => { lines.push(String(line)); };
+  try {
+    await assert.rejects(emailableRequest("POST", { emails: ["private@example.com"] },
+      (async () => Response.json({ message: "Invalid emails private@example.com private-test-key", emails: ["other@example.com"], authorization: "private-test-key" }, { status: 422 })) as typeof fetch,
+      { runId: "test-run", batchId: "test-batch" }));
+    const entry = JSON.parse(lines[0]);
+    assert.equal(entry.httpStatus, 422);
+    assert.equal(entry.runId, "test-run");
+    assert.equal(entry.batchId, "test-batch");
+    assert.match(entry.providerMessage, /Invalid emails/);
+    assert.doesNotMatch(lines.join(""), /private@example.com|other@example.com|private-test-key|authorization/);
+  } finally {
+    console.error = originalError;
+    if (oldKey === undefined) delete process.env.EMAILABLE_API_KEY; else process.env.EMAILABLE_API_KEY = oldKey;
+  }
+});
+
+test("new audience merges into paused scan with deduplication and reserved credit budget", async () => {
+  const { startVerification } = await import("./email-verification");
+  const old = process.env.EMAILABLE_API_KEY;
+  process.env.EMAILABLE_API_KEY = "test-key";
+  try {
+    let query: any;
+    let update: any;
+    const tx: any = {
+      $queryRaw: async () => [],
+      $executeRaw: async (q: any) => { if (q.sql.includes("candidates AS")) { query = q; return 24; } return 0; },
+      emailAddress: { count: async () => 1 },
+      emailVerificationBatch: { findFirst: async () => null },
+      emailVerificationRun: {
+        findFirst: async () => ({ id: "existing", status: "paused", eventIds: ["event-one"] }),
+        update: async (q: any) => { update = q; return q.data; },
+        create: async () => assert.fail("must reuse paused scan"),
+      },
+    };
+    await startVerification(24, { $transaction: async (fn: any) => fn(tx) } as any, async () => 478, { emails: ["a@b.co"], eventIds: ["event-two"] });
+    assert.equal(update.where.id, "existing");
+    assert.equal(update.data.total.increment, 24);
+    assert.equal(update.data.status, "running");
+    assert.deepEqual(update.data.eventIds, ["event-one", "event-two"]);
+    assert.match(query.sql, /"queuedRunId" IS NULL/);
+    assert.equal(query.values.at(-2), 24);
+  } finally {
+    if (old === undefined) delete process.env.EMAILABLE_API_KEY; else process.env.EMAILABLE_API_KEY = old;
+  }
+});

@@ -34,3 +34,16 @@ test("request titles combine company and event names with a legacy fallback", as
   assert.equal(requestTitle({ companyName: "Vercel", eventName: "AI Workshop" }), "Vercel - AI Workshop");
   assert.equal(requestTitle({ companyName: "Vercel" }), "Vercel");
 });
+
+test("portfolio requests distinguish event costs from legacy space budgets", async () => {
+  const { EventRequestDetail } = await import("../../../requests/event-request-ui");
+  const request = { id: "portfolio-request", form_key: "event-request", created_at: "2026-10-19T10:00:00Z", name: "Test organizer", email: "test@example.test", answers: { companyName: "Example company", budget: "None" } };
+  const portfolioHtml = renderToStaticMarkup(createElement(EventRequestDetail, { request: { ...request, form_version: 6 } }));
+  for (const text of ["In-network event request", "Event budget", "None", "costs the host is covering"]) assert.ok(portfolioHtml.includes(text), text);
+  assert.ok(!portfolioHtml.includes("Space budget"));
+  for (const form_version of [1, 5]) {
+    const publicHtml = renderToStaticMarkup(createElement(EventRequestDetail, { request: { ...request, form_version } }));
+    assert.ok(publicHtml.includes("Space budget"));
+    assert.ok(!publicHtml.includes("In-network event request"));
+  }
+});

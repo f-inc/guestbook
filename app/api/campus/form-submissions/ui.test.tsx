@@ -38,12 +38,38 @@ test("request titles combine company and event names with a legacy fallback", as
 test("portfolio requests distinguish event costs from legacy space budgets", async () => {
   const { EventRequestDetail } = await import("../../../requests/event-request-ui");
   const request = { id: "portfolio-request", form_key: "event-request", created_at: "2026-10-19T10:00:00Z", name: "Test organizer", email: "test@example.test", answers: { companyName: "Example company", budget: "None" } };
-  const portfolioHtml = renderToStaticMarkup(createElement(EventRequestDetail, { request: { ...request, form_version: 6 } }));
-  for (const text of ["In-network event request", "Event budget", "None", "costs the host is covering"]) assert.ok(portfolioHtml.includes(text), text);
-  assert.ok(!portfolioHtml.includes("Space budget"));
+  for (const form_version of [6, 7]) {
+    const portfolioHtml = renderToStaticMarkup(createElement(EventRequestDetail, { request: { ...request, form_version } }));
+    for (const text of ["In-network event request", "Event budget", "None", "costs the host is covering"]) assert.ok(portfolioHtml.includes(text), text);
+    assert.ok(!portfolioHtml.includes("Space budget"));
+  }
   for (const form_version of [1, 5]) {
     const publicHtml = renderToStaticMarkup(createElement(EventRequestDetail, { request: { ...request, form_version } }));
     assert.ok(publicHtml.includes("Space budget"));
     assert.ok(!publicHtml.includes("In-network event request"));
   }
+});
+
+test("involvement review shows all four choices, optional notes, and legacy context", async () => {
+  const { EventRequestDetail } = await import("../../../requests/event-request-ui");
+  const { EVENT_INVOLVEMENT_OPTIONS } = await import("../../../requests/event-involvement");
+  const request = { id: "involvement-request", form_key: "event-request", created_at: "2026-10-19T10:00:00Z", name: "Test organizer", email: "test@example.test" };
+  const render = (form_version: number, answers: Record<string, unknown>) => renderToStaticMarkup(createElement(EventRequestDetail, { request: { ...request, form_version, answers } }));
+  for (const option of EVENT_INVOLVEMENT_OPTIONS) {
+    const html = render(7, { foundersInvolvement: option.value, involvementDetails: "I’ll organize it. <script>alert(1)</script>" });
+    assert.ok(html.includes(option.label));
+    assert.ok(!html.includes(option.value));
+    assert.ok(html.includes("I’ll organize it. &lt;script&gt;alert(1)&lt;/script&gt;"));
+    assert.ok(!html.includes("<script>"));
+    assert.ok(!html.includes("Additional answers"));
+  }
+  for (const version of [1, 5, 6]) assert.ok(render(version, {}).includes("Not asked on this form version."));
+  const missing = render(7, {});
+  assert.ok(!missing.includes("Not asked on this form version."));
+  assert.ok(missing.includes("Not provided"));
+  assert.ok(missing.includes("No additional details provided."));
+  const unknown = render(7, { foundersInvolvement: "future_choice<script>", extraField: "Preserve this" });
+  assert.ok(unknown.includes("future_choice&lt;script&gt;"));
+  assert.ok(unknown.includes("Preserve this"));
+  assert.ok(unknown.includes("Additional answers"));
 });

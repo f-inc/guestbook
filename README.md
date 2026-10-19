@@ -311,10 +311,19 @@ Verify `api.f.inc` from the actual Guestbook runtime before changing edge rules.
 
 Open `/requests` from the Guestbook header. Guestbook authentication is required. The page always filters to `event-request` and supports case-insensitive partial search across all submitted values, including nested custom answers. Search returns up to 25 matches per page, scanning at most 20 upstream pages per batch; “Next” resumes scanning when more records remain. Select a request to see its event details, organizer, and additional answers. The three initial example submissions are marked “Sample” by explicit request ID. No submissions are imported into the database or persisted in browser storage.
 
-Campus form version 6 identifies portfolio/in-network hosting requests. These show
+Campus form versions 6 and 7 identify portfolio/in-network hosting requests. These show
 “In-network event request” and “Event budget” for food, equipment, and other costs
-the host is covering; “None” is a valid answer. Older versions retain “Space budget”.
+the host is covering; “None” is a valid answer. Versions 1–5 retain “Space budget”.
 The version records the form context and does not verify portfolio membership.
+Version 7 adds `foundersInvolvement` (four stable hosting/sponsorship enum choices)
+and optional `involvementDetails` (up to 5,000 characters), stored in Campus’s existing
+answers JSONB. The detail view shows the human label and organizer’s plans; versions
+1–6 show “Not asked on this form version.” Missing version 7 answers are marked as
+not provided, never assigned a default level of commitment. Unknown future answers
+remain visible and HTML is escaped. Keep `app/requests/event-involvement.ts` in sync
+with os-v2’s shared contract and os-web’s `src/lib/event-request.ts`. Deploy os-v2’s
+version 7 validation before the new portfolio frontend; no database migration,
+Prisma change, or backfill is needed in either service.
 
 Set the server-only `CAMPUS_API_URL=https://os-v2-production.up.railway.app`. Verified from the local Guestbook environment: Railway returned HTTP 200 for guest confirmations, while `https://api.f.inc` returned HTTP 403 with a Cloudflare browser challenge. The proxy retains its configurable origin and uncached reads. Restart a running production server after changing environment configuration.
 

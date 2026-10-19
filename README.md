@@ -311,6 +311,11 @@ Verify `api.f.inc` from the actual Guestbook runtime before changing edge rules.
 
 Open `/requests` from the Guestbook header. Guestbook authentication is required. The page always filters to `event-request` and supports case-insensitive partial search across all submitted values, including nested custom answers. Search returns up to 25 matches per page, scanning at most 20 upstream pages per batch; “Next” resumes scanning when more records remain. Select a request to see its event details, organizer, and additional answers. The three initial example submissions are marked “Sample” by explicit request ID. No submissions are imported into the database or persisted in browser storage.
 
+Campus form version 6 identifies portfolio/in-network hosting requests. These show
+“In-network event request” and “Event budget” for food, equipment, and other costs
+the host is covering; “None” is a valid answer. Older versions retain “Space budget”.
+The version records the form context and does not verify portfolio membership.
+
 Set the server-only `CAMPUS_API_URL=https://os-v2-production.up.railway.app`. Verified from the local Guestbook environment: Railway returned HTTP 200 for guest confirmations, while `https://api.f.inc` returned HTTP 403 with a Cloudflare browser challenge. The proxy retains its configurable origin and uncached reads. Restart a running production server after changing environment configuration.
 
 The former `/form-submissions` URL redirects to `/requests`. Verified that the Campus event request form posts to `/api/event-requests` and persists `form_key=event-request`; the live integration returned two matching requests during verification.

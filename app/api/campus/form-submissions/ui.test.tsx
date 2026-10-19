@@ -38,7 +38,7 @@ test("request titles combine company and event names with a legacy fallback", as
 test("portfolio requests distinguish event costs from legacy space budgets", async () => {
   const { EventRequestDetail } = await import("../../../requests/event-request-ui");
   const request = { id: "portfolio-request", form_key: "event-request", created_at: "2026-10-19T10:00:00Z", name: "Test organizer", email: "test@example.test", answers: { companyName: "Example company", budget: "None" } };
-  for (const form_version of [6, 7]) {
+  for (const form_version of [6, 7, 8]) {
     const portfolioHtml = renderToStaticMarkup(createElement(EventRequestDetail, { request: { ...request, form_version } }));
     for (const text of ["In-network event request", "Event budget", "None", "costs the host is covering"]) assert.ok(portfolioHtml.includes(text), text);
     assert.ok(!portfolioHtml.includes("Space budget"));
@@ -48,6 +48,33 @@ test("portfolio requests distinguish event costs from legacy space budgets", asy
     assert.ok(publicHtml.includes("Space budget"));
     assert.ok(!publicHtml.includes("In-network event request"));
   }
+});
+
+test("version 8 goals and itinerary stay distinct from historical equipment requests", async () => {
+  const { EventRequestDetail } = await import("../../../requests/event-request-ui");
+  const request = { id: "details-request", form_key: "event-request", created_at: "2026-10-19T10:00:00Z", name: "Test organizer", email: "test@example.test" };
+  const render = (form_version: number, answers: Record<string, unknown>) => renderToStaticMarkup(createElement(EventRequestDetail, { request: { ...request, form_version, answers } }));
+  const current = render(8, {eventDescription:"Help builders connect. 6pm demos, 7pm dinner. <script>unsafe</script>", foundersInvolvement:"fully_host_find_sponsors"});
+  assert.ok(current.includes("Event goal &amp; itinerary"));
+  assert.ok(current.includes("6pm demos, 7pm dinner. &lt;script&gt;unsafe&lt;/script&gt;"));
+  assert.ok(!current.includes("<script>"));
+  assert.ok(!current.includes("Equipment &amp; special requests"));
+  assert.ok(!current.includes("Additional answers"));
+  assert.ok(current.indexOf("Event goal &amp; itinerary") < current.indexOf("Founders, Inc. involvement"));
+  assert.ok(current.includes("I will fully host the event + find sponsors"));
+  assert.ok(!current.includes("Not asked on this form version."));
+  const missing = render(8, {});
+  assert.ok(missing.includes("Event goal &amp; itinerary"));
+  assert.ok(missing.includes("Not provided"));
+  for (const version of [5, 6, 7]) {
+    const legacy = render(version, {specialRequests:"Projector please"});
+    assert.ok(legacy.includes("Equipment &amp; special requests"));
+    assert.ok(legacy.includes("Projector please"));
+    assert.ok(!legacy.includes("Event goal &amp; itinerary"));
+  }
+  const both = render(8, {eventDescription:"Community demos",specialRequests:"Keep this equipment answer"});
+  assert.ok(both.includes("Community demos"));
+  assert.ok(both.includes("Keep this equipment answer"));
 });
 
 test("involvement review shows all four choices, optional notes, and legacy context", async () => {

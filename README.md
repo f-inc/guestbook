@@ -67,6 +67,11 @@ Open `http://localhost:3000`.
 
 ## Data Refresh
 
+For the optional, disabled-by-default Luma to Customer.io audience sync, see
+[the rollout guide](docs/runbooks/cio-sync.md). It adds a durable delivery queue,
+resumable reconciliation, read-only preview, and health endpoints. Migration,
+production writes, segments, and scheduling require separate rollout steps.
+
 Guestbook refreshes the lightweight Luma event catalog on app load and when the browser tab becomes active. For the selected event, it compares Luma's approved, pending, waitlist, invited, declined, and checked-in counts with the local snapshot before fetching guests.
 
 The former hourly full-sync Worker is archived. The `/api/luma/sync` endpoint remains available as a deliberate recovery or backfill command:

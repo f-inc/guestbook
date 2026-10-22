@@ -1,6 +1,7 @@
 import { optOutFromWebhook } from "../tracking-policy";
 import { appendFile, mkdir } from "node:fs/promises";
 import nodePath from "node:path";
+import { createHash } from "node:crypto";
 import {
   prisma,
   claimLumaWebhookDelivery,
@@ -11,6 +12,7 @@ import {
   refreshIndexedEventOverviewStats,
   runAutomaticTagClassifier,
   upsertNormalizedLumaSnapshot,
+  upsertNormalizedLumaEvents,
 } from "../db";
 import {
   lumaWebhookSecrets,
@@ -19,6 +21,9 @@ import {
   parseLumaGuestWebhook,
   verifyLumaWebhook,
 } from "./webhook";
+import { normalizeEvent } from "../snapshot-normalization";
+import { requireCioProductionIdentity } from "../cio-projection";
+import { mergeLumaEventWebhook, parseLumaEventWebhook } from "./event-webhook";
 
 export const runtime = "nodejs";
 
@@ -61,12 +66,28 @@ export async function POST(request: Request) {
       throw httpError("Invalid Luma webhook signature.", 401);
     }
 
-    const optOut = optOutFromWebhook(JSON.parse(rawBody), verification.secretName);
+    const payload = JSON.parse(rawBody);
+    const optOut = optOutFromWebhook(payload, verification.secretName);
     if (optOut) {
       // Upsert is idempotent. Do not turn a generic opt-out into a spam report.
       await prisma().lumaCalendarOptOut.upsert({where: {calendarId_emailLower: optOut}, create: optOut, update: {}});
       await webhookLog(requestId, "calendar opt-out recorded", {calendarId: optOut.calendarId});
       return json({ok: true, webhookId});
+    }
+    // Event-level changes must update audiences even with no guest activity.
+    const eventChange = process.env.CIO_SYNC_SOURCE_ENABLED === "true" ? parseLumaEventWebhook(payload) : null;
+    if (eventChange) {
+      requireCioProductionIdentity();
+      const claim = await claimLumaWebhookDelivery({ webhookId, webhookType: eventChange.type,
+        eventId: eventChange.eventId, guestId: null, payloadSha256: createHash("sha256").update(rawBody).digest("hex") });
+      if (!claim.claimed) return json({ ok: true, duplicate: true, webhookId });
+      claimed = true;
+      const existing = await prisma().lumaEvent.findUnique({ where: { eventId: eventChange.eventId }, select: { raw: true } });
+      const rawEvent = mergeLumaEventWebhook(eventChange, existing?.raw);
+      await upsertNormalizedLumaEvents([{ rawEvent, event: normalizeEvent(rawEvent) }]);
+      invalidateIndexedAudienceCaches();
+      await finishLumaWebhookDelivery(webhookId);
+      return json({ ok: true, webhookId, eventId: rawEvent.id });
     }
     const parsed = parseLumaGuestWebhook(rawBody);
     if (!parsed.supported) {
@@ -99,6 +120,11 @@ export async function POST(request: Request) {
       guests: [normalized.guest],
       rawGuests: [normalized.rawGuest],
     });
+    if (process.env.CIO_SYNC_ENABLED === "true") {
+      // Normal delivery stays ahead of a large history queue. Triggers have
+      // already captured the source transaction; this raises its priority.
+      await prisma().$queryRawUnsafe("SELECT cio_mark_email($1, true)::text", normalized.guest.person.email);
+    }
     if (parsed.data.approval_status !== "invited") {
 
       await prisma().lumaInviteTracking.updateMany({

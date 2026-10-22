@@ -30,6 +30,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260713.1",
+    "@electric-sql/pglite": "0.5.11",
     "@tailwindcss/postcss": "^4.3.2",
     "@types/node": "^26.1.1",
     "@types/react": "^19.2.17",

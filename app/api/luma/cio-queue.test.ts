@@ -32,7 +32,7 @@ beforeEach(async()=>{
     INSERT INTO luma_people(person_id,name,email_lower) VALUES('usr-1','Builder','${email}');
     DELETE FROM cio_projection_queue;`);
   Object.assign(process.env,{NODE_ENV:"production",GUESTBOOK_ENVIRONMENT:"production",CIO_SYNC_ENABLED:"true",CIO_SYNC_SEND_ENABLED:"true",
-    CIO_SYNC_IDENTITY_CONFIRMED:"email_id",CIO_SYNC_AUTOMATIONS_REVIEWED:"true",CIO_SYNC_ALLOWED_EMAILS:email,CUSTOMERIO_SITE_ID:"test",CUSTOMERIO_TRACK_API_KEY:"test"});
+    CIO_SYNC_IDENTITY_CONFIRMED:"email_lookup",CUSTOMERIO_APP_API_KEY:"app-test",CIO_SYNC_PROFILE_MODE:"existing_only",CIO_SYNC_AUTOMATIONS_REVIEWED:"true",CIO_SYNC_ALLOWED_EMAILS:email,CUSTOMERIO_SITE_ID:"test",CUSTOMERIO_TRACK_API_KEY:"test"});
   delete process.env.VERCEL_ENV; delete process.env.CIO_SYNC_FULL_ROLLOUT;
 });
 async function insertGuest(){await pg.query(`INSERT INTO luma_event_guests(event_id,person_id,email_lower,luma_approval_status,registered_at) VALUES('evt-1','usr-1',$1,'approved',now())`,[email]);}
@@ -83,16 +83,16 @@ test("changing an email enqueues both addresses instead of silently migrating id
 });
 test("successful batch is idempotent and duplicate scheduler calls cannot resend unchanged data",async()=>{
   await insertGuest();let sends=0;const mock:typeof fetch=async()=>{sends++;return new Response("",{status:200});};
-  const db=adapter();await runCioProjectionBatch({db,fetchImpl:mock});
+  const db=adapter();await runCioProjectionBatch({db,fetchImpl:withProfileLookup(mock)});
   assert.equal(sends,1);assert.equal((await queue()).sent_revision,(await queue()).revision);
-  await mark();await runCioProjectionBatch({db,fetchImpl:mock});assert.equal(sends,1);
+  await mark();await runCioProjectionBatch({db,fetchImpl:withProfileLookup(mock)});assert.equal(sends,1);
 });
 test("an update during delivery survives acknowledgement and is sent next",async()=>{
   await insertGuest();let sends=0;
   const mock:typeof fetch=async()=>{sends++;if(sends===1)await pg.exec("UPDATE luma_event_guests SET luma_approval_status='declined';");return new Response("",{status:200});};
-  const db=adapter();await runCioProjectionBatch({db,fetchImpl:mock,maxItems:1});
+  const db=adapter();await runCioProjectionBatch({db,fetchImpl:withProfileLookup(mock),maxItems:1});
   assert.ok((await queue()).revision>(await queue()).sent_revision);
-  await runCioProjectionBatch({db,fetchImpl:mock,maxItems:1});assert.equal(sends,2);
+  await runCioProjectionBatch({db,fetchImpl:withProfileLookup(mock),maxItems:1});assert.equal(sends,2);
   assert.equal((await queue()).revision,(await queue()).sent_revision);
 });
 test("outage leaves durable work pending; restart retries the same projection",async()=>{
@@ -100,7 +100,7 @@ test("outage leaves durable work pending; restart retries the same projection",a
   await runCioProjectionBatch({db,fetchImpl:async()=>{throw new Error("network timeout")}});
   const failed=await queue();assert.equal(String(failed.sent_revision),"0");assert.equal(failed.attempts,1);assert.equal(failed.lease_token,null);
   await pg.exec("UPDATE cio_projection_queue SET next_attempt_at=now();");
-  await runCioProjectionBatch({db,fetchImpl:async()=>new Response("",{status:200})});
+  await runCioProjectionBatch({db,fetchImpl:withProfileLookup(async()=>new Response("",{status:200}))});
   assert.equal((await queue()).revision,(await queue()).sent_revision);
 });
 test("rate limit pauses the workspace; authentication failure requires review without response-body leakage",async()=>{
@@ -123,9 +123,9 @@ test("rate limit pauses the workspace; authentication failure requires review wi
 test("expired process lease is reclaimable while active lease is respected",async()=>{
   await insertGuest();let sends=0;const db=adapter();const mock:typeof fetch=async()=>{sends++;return new Response("",{status:200});};
   await pg.exec("UPDATE cio_projection_queue SET lease_token='crashed-worker',lease_until=now()+interval '1 minute'");
-  await runCioProjectionBatch({db,fetchImpl:mock});assert.equal(sends,0);
+  await runCioProjectionBatch({db,fetchImpl:withProfileLookup(mock)});assert.equal(sends,0);
   await pg.exec("UPDATE cio_projection_queue SET lease_until=now()-interval '1 second'");
-  await runCioProjectionBatch({db,fetchImpl:mock});assert.equal(sends,1);
+  await runCioProjectionBatch({db,fetchImpl:withProfileLookup(mock)});assert.equal(sends,1);
 });
 
 // Minimal Prisma-shaped adapter; cursor and queue writes use the same real
@@ -190,7 +190,7 @@ test("queue age survives newer updates and clears only when the current revision
   await pg.exec("UPDATE cio_projection_queue SET pending_since='2026-01-01T00:00:00Z'");
   await mark();
   assert.equal(new Date((await queue()).pending_since).getTime(),Date.parse("2026-01-01"));
-  await runCioProjectionBatch({db:adapter(),fetchImpl:async()=>new Response("",{status:200})});
+  await runCioProjectionBatch({db:adapter(),fetchImpl:withProfileLookup(async()=>new Response("",{status:200}))});
   assert.equal((await queue()).pending_since,null);
   await mark(); assert.ok(new Date((await queue()).pending_since).getTime()>Date.parse("2026-01-01"));
 });
@@ -214,6 +214,42 @@ test("live updates jump ahead of history while every fifth claim allows old work
     await pg.query("SELECT cio_mark_email($1,true)::text",[`live-${i}@example.com`]);
   }
   const sent:string[]=[];
-  await runCioProjectionBatch({db:adapter(),maxItems:5,fetchImpl:async(_url,opts)=>{sent.push(JSON.parse(String(opts?.body)).email);return new Response("",{status:200})}});
+  await runCioProjectionBatch({db:adapter(),maxItems:5,fetchImpl:withProfileLookup(async(url)=>{sent.push(Buffer.from(String(url).split("cio_").at(-1)!,"hex").toString());return new Response("",{status:200})})});
   assert.equal(sent.length,5); assert.ok(sent[0].startsWith("live-")); assert.equal(sent[4],"history@example.com");
+});
+
+// Fake App API lookups are separate from the Track callback so queue tests
+// count actual projection writes and inject failures at the intended boundary.
+function withProfileLookup(track: typeof fetch): typeof fetch {
+  return async (url, options) => {
+    if (options?.method === "GET") {
+      const address = new URL(String(url)).searchParams.get("email")!;
+      return Response.json({results:[{email:address,cio_id:Buffer.from(address).toString("hex"),id:null}]});
+    }
+    return track(url,options);
+  };
+}
+
+test("new profiles remain durable and resume automatically after creation review", async () => {
+  await insertGuest();let writes=0;
+  const mock:typeof fetch=async(_url,opts)=>opts?.method==="GET" ? Response.json({results:[]})
+    : (writes++,new Response("",{status:200}));
+  const db=adapter();const held=await runCioProjectionBatch({db,fetchImpl:mock});
+  assert.ok("held" in held);assert.equal(held.held,1);assert.equal(writes,0);assert.equal((await queue()).attempts,0);
+  assert.equal(String((await queue()).sent_revision),"0");assert.equal((await queue()).payload_hash,null);
+  assert.equal((await queue()).last_error,"cio_profile_creation_disabled");
+  process.env.CIO_SYNC_PROFILE_MODE="create_reviewed";
+  await pg.exec("UPDATE cio_projection_queue SET next_attempt_at=now()");
+  await runCioProjectionBatch({db,fetchImpl:mock});
+  assert.equal(writes,1);assert.equal((await queue()).sent_revision,(await queue()).revision);
+});
+
+test("ambiguous identity is quarantined without acknowledging or writing a profile", async () => {
+  await insertGuest();let writes=0;
+  await runCioProjectionBatch({db:adapter(),fetchImpl:async(_url,opts)=>{
+    if(opts?.method!=="GET")writes++;
+    return Response.json({results:[{email,cio_id:"a1"},{email,cio_id:"a2"}]});
+  }});
+  const row=await queue();assert.equal(writes,0);assert.equal(row.attempts,10);
+  assert.equal(String(row.sent_revision),"0");assert.equal(row.last_error,"cio_identity_ambiguous");
 });

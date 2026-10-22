@@ -1,7 +1,8 @@
 # Luma to Customer.io
 
 Prepared, disabled by default. No production migration, backfill, schedule,
-segment edit or Customer.io request has been performed by this change.
+profile write or Customer.io backfill has been performed by this code change.
+Shadow segments can be prepared separately before deployment.
 
 ## What this implements
 
@@ -34,16 +35,20 @@ before turning on delivery. Registration does not establish newsletter consent.
    captures future changes but performs no backfill or outbound request. The
    additional event metadata webhook handling is gated by the source flag;
    guest webhooks continue through Guestbook's existing handler.
-3. Verify existing CIO IDs are trimmed, lowercase emails. Review active
-   profile-created, attribute-change and segment-entry automation dependencies.
-   Use a test workspace or disable affected message entry paths for the canary.
+3. Verify the CIO workspace permits email identification and both API keys belong
+   to that same workspace/region. Review active profile-created, attribute-change
+   and segment-entry automation dependencies. Start with
+   `CIO_SYNC_PROFILE_MODE=existing_only`. In particular, an audience such as
+   "email exists and double_optin is missing" can email newly imported people.
+   Keep profile creation off until those entry paths are reviewed and corrected.
 4. Dry run one authorized profile: authenticated `POST /api/cio/sync` with
    `{"action":"preview","email":"test@example.com"}`. This reads the index and
    returns the proposed attributes/hash without queue writes or external calls.
    The response contains event facts; do not publish it.
-5. Configure the correct region and server-only Customer.io Track credentials.
+5. Configure the correct region, server-only Customer.io Track credentials and
+   `CUSTOMERIO_APP_API_KEY` with read access for email-to-profile resolution.
    Set `CIO_SYNC_ENABLED=true`, `CIO_SYNC_SEND_ENABLED=true`,
-   `CIO_SYNC_IDENTITY_CONFIRMED=email_id`, `CIO_SYNC_AUTOMATIONS_REVIEWED=true`,
+   `CIO_SYNC_IDENTITY_CONFIRMED=email_lookup`, `CIO_SYNC_AUTOMATIONS_REVIEWED=true`,
    `GUESTBOOK_ENVIRONMENT=production`, and exact-email `CIO_SYNC_ALLOWED_EMAILS`.
    Keep `CIO_SYNC_FULL_ROLLOUT=false`. Vercel previews are refused even if they
    have production secrets. Production here is an explicit runtime identity,
@@ -65,13 +70,22 @@ before turning on delivery. Registration does not establish newsletter consent.
    update, timeout, 429, and a restart halfway through a guest list. Confirm
    no subscriptions or message journeys changed. Compare all target-event counts
    and the complete accessible-calendar inventory before claiming full coverage.
-10. Approve full rollout, then set `CIO_SYNC_FULL_ROLLOUT=true`. Switch audience
+10. Approve full rollout, then set `CIO_SYNC_FULL_ROLLOUT=true`. Only after
+    resolving new-profile message entry paths and validating a synthetic new
+    person, set `CIO_SYNC_PROFILE_MODE=create_reviewed`. Missing profiles held
+    during the existing-only phase retry automatically within 15 minutes.
+    Switch audience
     consumers after count comparisons. Retain old segments until their consumers
     have migrated. Never assume an unused-looking segment has no dependencies.
 
-## Proposed shadow segments
+## Shadow segment contract
 
-This PR does not create or edit live segments.
+Creating these definitions does not connect them to messaging. Use
+`finc_luma_schema_version = 1` as an additional required condition on each
+shadow audience. Definitions can exist before the first profile is synced;
+zero members then is expected. The generic initial set is Registered, Verified
+attendance, Repeat attendees and Source exclusion. Choose actual event IDs and
+a recency window before adding event-specific or recent-attendee segments.
 
 | Audience | Rule |
 | --- | --- |
@@ -126,8 +140,9 @@ priority. Every fifth claim admits the oldest eligible work regardless of
 priority, so the history queue also progresses. Cron returns 503 when a phase
 fails while retaining each phase's result.
 
-Authenticated `GET /api/cio/sync` exposes pending/quarantined counts, oldest pending
-update, last confirmed outbound delivery, seed completion, shared delivery pause,
+Authenticated `GET /api/cio/sync` exposes pending/quarantined and held-new-profile
+counts, oldest pending
+update, last API-accepted outbound delivery, seed completion, shared delivery pause,
 and source cycles/errors. Queue age is retained across repeated source updates;
 an unchanged projection does not pretend to be a fresh outbound success. Connect it to the
 team's existing monitor before rollout. Alert on sustained pending lag, quarantine,
@@ -153,6 +168,16 @@ hold up its calendar lane; other configured calendars continue independently.
 
 Delivery leases prevent concurrent processing of an address. Acknowledgements
 advance only the claimed revision; changes during delivery remain pending.
+Before each changed projection, the App API resolves the exact email. Exactly
+one matching profile is updated by immutable `cio_id`, with `_update=true` and
+without `email` or `id` in the body. Missing profiles stay pending by default;
+multiple matches or source identity conflicts on a new person require review.
+Even reviewed creation never assigns an external ID or changes consent. Both
+App and Track failures use the shared retry/pause policy. The APIs may accept
+a request before it is processed, and a profile deleted between lookup and
+write can cause a dropped update; verify destination attributes in the canary
+and monitoring, rather than treating HTTP success as membership confirmation.
+
 Full-state PUTs are safe to retry after ambiguous network failures. Retries honor
 `Retry-After`; 429 pauses all subsequent queue claims until the shared retry time.
 401/403 pauses delivery pending credential review, so unrelated profiles are not
@@ -186,9 +211,14 @@ and `pending_since`; function definitions changed too.
 | Work | Status / owner |
 | --- | --- |
 | Sync implementation, isolated tests, build, segment rules | Prepared by Codex |
-| Draft PR and follow-up code fixes | Codex can publish through the GitHub connection when the write request is accepted |
-| Review actual CIO IDs, existing segments and message dependencies | Codex can inspect through the connected CIO workspace |
-| Create the agreed shadow segments and compare memberships | Codex can configure through CIO after the fields and audience contract are validated |
+| Draft PR and follow-up code fixes | Published separately on the feature branch; production stays unchanged |
+| Review actual CIO IDs, existing segments and message dependencies | Mixed email-only/custom-ID profiles require exact-email lookup; creation remains gated by automation review |
+| Shadow segments and membership comparison | Definitions can be prepared before deploy; real source/destination count comparison follows the canary |
 | Verify hosting project, database target, backups, API keys and scheduler | Technical owner with deployment/database access |
 | Apply the production migration | Requires explicit authorization for the verified target, per AGENTS.md |
 | Canary, inventory/count reconciliation, monitoring and rollout | Joint final checks after deployment; not completed locally |
+
+## Identity API references
+
+- [App API exact-email lookup](https://docs.customer.io/integrations/api/app/tag/customers/getpeopleemail/)
+- [Track profile updates and update-only behavior](https://docs.customer.io/integrations/api/track/tag/track-customers/identify/)

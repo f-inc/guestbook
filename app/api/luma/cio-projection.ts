@@ -107,9 +107,10 @@ export function cioRuntimeMode(env: Record<string, string | undefined> = process
   if (env.CIO_SYNC_ENABLED !== "true") return "disabled";
   if (env.CIO_SYNC_SEND_ENABLED !== "true") return "preview";
   requireCioProductionIdentity(env);
-  if (!env.CUSTOMERIO_SITE_ID || !env.CUSTOMERIO_TRACK_API_KEY) throw new Error("cio_credentials_required");
+  if (!env.CUSTOMERIO_SITE_ID || !env.CUSTOMERIO_TRACK_API_KEY || !env.CUSTOMERIO_APP_API_KEY) throw new Error("cio_credentials_required");
   if (env.CUSTOMERIO_REGION && !["us", "eu"].includes(env.CUSTOMERIO_REGION)) throw new Error("cio_region_invalid");
-  if (env.CIO_SYNC_IDENTITY_CONFIRMED !== "email_id") throw new Error("cio_identity_confirmation_required");
+  if (env.CIO_SYNC_IDENTITY_CONFIRMED !== "email_lookup") throw new Error("cio_identity_confirmation_required");
+  if (env.CIO_SYNC_PROFILE_MODE && !["existing_only", "create_reviewed"].includes(env.CIO_SYNC_PROFILE_MODE)) throw new Error("cio_profile_mode_invalid");
   if (env.CIO_SYNC_AUTOMATIONS_REVIEWED !== "true") throw new Error("cio_automation_review_required");
   const canary = (env.CIO_SYNC_ALLOWED_EMAILS || "").split(",").map(normalizeCioEmail).filter(Boolean);
   if (!canary.length && env.CIO_SYNC_FULL_ROLLOUT !== "true") throw new Error("cio_canary_or_rollout_required");

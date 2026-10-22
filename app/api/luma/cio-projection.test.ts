@@ -16,7 +16,8 @@ const guest = (changes = {}): any => ({ eventId: "evt-1", personId: "usr-1", ema
 const project = (guests, rest = {}) => buildCioProjection({ email, guests, ...rest });
 const sendEnv = { NODE_ENV: "production", GUESTBOOK_ENVIRONMENT: "production", CIO_SYNC_ENABLED: "true",
   CIO_SYNC_SEND_ENABLED: "true", CUSTOMERIO_SITE_ID: "test", CUSTOMERIO_TRACK_API_KEY: "test",
-  CIO_SYNC_IDENTITY_CONFIRMED: "email_id", CIO_SYNC_AUTOMATIONS_REVIEWED: "true", CIO_SYNC_ALLOWED_EMAILS: email };
+  CUSTOMERIO_APP_API_KEY: "app-test", CIO_SYNC_IDENTITY_CONFIRMED: "email_lookup",
+  CIO_SYNC_AUTOMATIONS_REVIEWED: "true", CIO_SYNC_ALLOWED_EMAILS: email };
 
 test("invitation with a joined date is never a registration or attendance", () => {
   const p = project([guest({ lumaApprovalStatus: "invited" })]);
@@ -100,18 +101,57 @@ test("production sending requires explicit identity, automation review and canar
   assert.throws(()=>cioRuntimeMode({...sendEnv,CIO_SYNC_ALLOWED_EMAILS:""}),/canary/);
   assert.throws(()=>cioRuntimeMode({...sendEnv,CIO_SYNC_ALLOWED_EMAILS:" , invalid "}),/canary/);
   assert.throws(()=>cioRuntimeMode({...sendEnv,CUSTOMERIO_REGION:"typo"}),/region_invalid/);
+  assert.throws(()=>cioRuntimeMode({...sendEnv,CUSTOMERIO_APP_API_KEY:""}),/credentials/);
+  assert.throws(()=>cioRuntimeMode({...sendEnv,CIO_SYNC_PROFILE_MODE:"typo"}),/profile_mode/);
+  assert.throws(()=>cioRuntimeMode({...sendEnv,CIO_SYNC_IDENTITY_CONFIRMED:"email_id"}),/identity_confirmation/);
 });
-test("sender only upserts namespaced attributes and cannot send events, messages or consent",async()=>{
+test("sender resolves email-only profiles and updates cio_id without changing identifiers or consent",async()=>{
   const calls:any[]=[];
-  const mock: typeof fetch=async(url,opts)=>{calls.push([url,opts]);return new Response("",{status:200});};
+  const mock: typeof fetch=async(url,opts)=>{calls.push([url,opts]);return opts?.method==="GET"
+    ? Response.json({results:[{email,id:null,cio_id:"abc123"}]}) : new Response("",{status:200});};
   await sendCioProjection(email,project([guest()]).attrs,mock,sendEnv);
-  assert.equal(calls.length,1); assert.equal(calls[0][1].method,"PUT");
-  assert.equal(calls[0][0],"https://track.customer.io/api/v1/customers/builder%40example.com");
-  const body=JSON.parse(calls[0][1].body); assert.equal(body.email,email);
+  assert.equal(calls.length,2); assert.equal(calls[0][1].method,"GET"); assert.equal(calls[1][1].method,"PUT");
+  assert.equal(new URL(calls[0][0]).searchParams.get("email"),email);
+  assert.equal(calls[1][0],"https://track.customer.io/api/v1/customers/cio_abc123");
+  const body=JSON.parse(calls[1][1].body); assert.equal(body._update,true);
+  assert.equal(body.email,undefined); assert.equal(body.id,undefined);
   assert.equal(body.unsubscribed,undefined); assert.equal(body.double_optin,undefined);
   await assert.rejects(sendCioProjection(email,{unsubscribed:false},mock,sendEnv),/unowned/);
   await assert.rejects(sendCioProjection("other@example.com",{},mock,sendEnv),/canary/);
-  assert.equal(calls.length,1);
+  assert.equal(calls.length,2);
+});
+test("missing profiles stay held by default; explicitly reviewed creation uses email and no external ID",async()=>{
+  const writes:any[]=[];
+  const mock:typeof fetch=async(url,opts)=>opts?.method==="GET" ? Response.json({results:[]})
+    : (writes.push([url,JSON.parse(String(opts?.body))]),new Response("",{status:200}));
+  await assert.rejects(sendCioProjection(email,{},mock,sendEnv),/profile_creation_disabled/);
+  assert.equal(writes.length,0);
+  await sendCioProjection(email,project([guest()]).attrs,mock,{...sendEnv,CIO_SYNC_PROFILE_MODE:"create_reviewed"});
+  assert.equal(writes.length,1);assert.equal(writes[0][1].email,email);assert.equal(writes[0][1].id,undefined);
+  assert.equal(writes[0][0],"https://track.customer.io/api/v1/customers/builder%40example.com");
+  await assert.rejects(sendCioProjection(email,{finc_luma_identity_review:true},mock,{...sendEnv,CIO_SYNC_PROFILE_MODE:"create_reviewed"}),/identity_review_required/);
+  assert.equal(writes.length,1);
+});
+test("ambiguous or malformed identity responses never produce a profile write",async()=>{
+  for(const result of [{results:[{email,cio_id:"a1"},{email,cio_id:"a2"}]},
+    {results:[{email:"other@example.com",cio_id:"a1"}]},{results:[{email,cio_id:null}]},{unexpected:[]}]) {
+    let writes=0;
+    await assert.rejects(sendCioProjection(email,{},async(_url,opts)=>{
+      if(opts?.method!=="GET")writes++;return Response.json(result);
+    },sendEnv),/cio_identity_/);
+    assert.equal(writes,0);
+  }
+});
+test("EU identity resolution encodes plus-addresses and preserves custom IDs",async()=>{
+  const address="builder+test@example.com",calls:any[]=[];
+  await sendCioProjection(address.toUpperCase(),{},async(url,opts)=>{
+    calls.push([String(url),opts]);return opts?.method==="GET"
+      ? Response.json({results:[{email:address,id:"custom-external-id",cio_id:"fed123"}]}) : new Response("",{status:200});
+  },{...sendEnv,CUSTOMERIO_REGION:"eu",CIO_SYNC_ALLOWED_EMAILS:address});
+  assert.ok(calls[0][0].startsWith("https://api-eu.customer.io/"));
+  assert.ok(calls[0][0].includes("%2B"));assert.equal(new URL(calls[0][0]).searchParams.get("email"),address);
+  assert.equal(calls[1][0],"https://track-eu.customer.io/api/v1/customers/cio_fed123");
+  assert.equal(JSON.parse(calls[1][1].body).id,undefined);
 });
 test("provider errors expose status and retry-after without logging response content",async()=>{
   const mock:typeof fetch=async()=>new Response("sensitive provider body",{status:429,headers:{"retry-after":"120"}});

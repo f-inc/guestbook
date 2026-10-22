@@ -27,15 +27,44 @@ export async function loadCioProjection(email: string, db = prisma()) {
 export async function sendCioProjection(email: string, attributes: Record<string, unknown>, fetchImpl = fetch,
   env: Record<string, string | undefined> = process.env) {
   if (cioRuntimeMode(env) !== "send") throw new Error("cio_sending_disabled");
+  const normalized = normalizeCioEmail(email);
+  if (!normalized) throw new Error("invalid_email");
+  email = normalized;
   const allowed = (env.CIO_SYNC_ALLOWED_EMAILS || "").split(",").map(normalizeCioEmail).filter(Boolean);
   if (env.CIO_SYNC_FULL_ROLLOUT !== "true" && !allowed.includes(email)) throw new Error("outside_canary");
   for (const key of Object.keys(attributes)) if (!key.startsWith("finc_luma_")) throw new Error("unowned_attribute");
-  const origin = env.CUSTOMERIO_REGION === "eu" ? "https://track-eu.customer.io" : "https://track.customer.io";
-  const response = await fetchImpl(`${origin}/api/v1/customers/${encodeURIComponent(email)}`, {
+  const eu = env.CUSTOMERIO_REGION === "eu";
+  // Resolve every write afresh: email-only and external-ID profiles coexist.
+  // Never assign an external ID, merge profiles, or move an existing email.
+  const lookup = await fetchImpl(`${eu ? "https://api-eu.customer.io" : "https://api.customer.io"}/v1/customers?${new URLSearchParams({ email })}`, {
+    method: "GET", redirect: "error", signal: AbortSignal.timeout(10_000),
+    headers: { Authorization: `Bearer ${env.CUSTOMERIO_APP_API_KEY}` },
+  });
+  requireCioResponse(lookup);
+  const data = await lookup.json();
+  if (!data || typeof data !== "object" || !("results" in data) || !Array.isArray(data.results)) throw new Error("cio_identity_response_invalid");
+  const matches = data.results;
+  if (matches.length > 1 || matches.some((p: any) => normalizeCioEmail(p?.email) !== email ||
+      typeof p?.cio_id !== "string" || !/^[a-zA-Z0-9]+$/.test(p.cio_id))) {
+    throw Object.assign(new Error("cio_identity_ambiguous"), { status: 409 });
+  }
+  const existing = matches[0];
+  if (!existing && attributes.finc_luma_identity_review === true) {
+    throw Object.assign(new Error("cio_identity_review_required"), { status: 409 });
+  }
+  if (!existing && env.CIO_SYNC_PROFILE_MODE !== "create_reviewed") throw new Error("cio_profile_creation_disabled");
+  const identifier = existing ? `cio_${existing.cio_id}` : email;
+  const origin = eu ? "https://track-eu.customer.io" : "https://track.customer.io";
+  const response = await fetchImpl(`${origin}/api/v1/customers/${encodeURIComponent(identifier)}`, {
     method: "PUT", redirect: "error", signal: AbortSignal.timeout(10_000),
     headers: { "content-type": "application/json", Authorization: `Basic ${Buffer.from(`${env.CUSTOMERIO_SITE_ID}:${env.CUSTOMERIO_TRACK_API_KEY}`).toString("base64")}` },
-    body: JSON.stringify({ email, ...attributes }),
+    // _update also prevents creation if the resolved profile is deleted in flight.
+    body: JSON.stringify(existing ? { ...attributes, _update: true } : { ...attributes, email }),
   });
+  requireCioResponse(response);
+}
+
+function requireCioResponse(response: Response) {
   // Provider bodies may contain PII or sensitive request details. Do not log them.
   if (!response.ok) throw Object.assign(new Error(`cio_http_${response.status}`), { status: response.status, retryAfter: response.headers.get("retry-after") });
 }
@@ -51,7 +80,7 @@ export async function runCioProjectionBatch({ db, fetchImpl = fetch, maxItems = 
   }
   const deadline = Date.now() + Math.min(20_000, budgetMs);
   const allowed = process.env.CIO_SYNC_FULL_ROLLOUT === "true" ? null : (process.env.CIO_SYNC_ALLOWED_EMAILS || "").split(",").map(normalizeCioEmail).filter(Boolean);
-  const counts = { mode: "send", processed: 0, sent: 0, unchanged: 0, skipped: 0, failed: 0 };
+  const counts = { mode: "send", processed: 0, sent: 0, unchanged: 0, skipped: 0, held: 0, failed: 0 };
   while (counts.processed < Math.min(20, maxItems) && Date.now() < deadline) {
     const token = randomUUID();
     const jobs = await db.$queryRawUnsafe<any[]>(`
@@ -90,11 +119,20 @@ export async function runCioProjectionBatch({ db, fetchImpl = fetch, maxItems = 
         lease_token = NULL, lease_until = NULL WHERE email = $1 AND lease_token = $2`,
         job.email, token, job.revision, projection.hasRegistrations || job.payload_hash ? projection.hash : null, sent);
     } catch (error: any) {
+      // Keep new people pending without exhausting retries while creation is off.
+      // They resume automatically after the separately reviewed rollout switch.
+      if (error.message === "cio_profile_creation_disabled") {
+        counts.held++;
+        await db.$executeRawUnsafe(`UPDATE cio_projection_queue SET last_error = 'cio_profile_creation_disabled',
+          next_attempt_at = now() + interval '15 minutes', lease_token = NULL, lease_until = NULL
+          WHERE email = $1 AND lease_token = $2`, job.email, token);
+        continue;
+      }
       counts.failed++;
       const status = Number(error.status) || 0;
       const permanent = status >= 400 && status < 500 && ![401, 403, 408, 429].includes(status);
       const retryMs = cioRetryDelay(job.attempts, error.retryAfter || null);
-      const code = /^(cio_http_\d+|projection_too_large|too_many_registrations|invalid_email|outside_canary)$/.test(error.message) ? error.message : "projection_failed";
+      const code = /^(cio_http_\d+|cio_identity_ambiguous|cio_identity_review_required|cio_identity_response_invalid|projection_too_large|too_many_registrations|invalid_email|outside_canary)$/.test(error.message) ? error.message : "projection_failed";
       await db.$executeRawUnsafe(`UPDATE cio_projection_queue SET
         attempts = CASE WHEN revision = $5 THEN $3 ELSE attempts END,
         last_error = $4, next_attempt_at = now() + ($6::double precision * interval '1 millisecond'),
@@ -155,6 +193,7 @@ export async function cioSyncHealth(db = prisma()) {
     db.$queryRawUnsafe<any[]>(`SELECT count(*)::int AS indexed,
       count(*) FILTER(WHERE revision > sent_revision)::int AS pending,
       count(*) FILTER(WHERE attempts >= 10)::int AS quarantined,
+      count(*) FILTER(WHERE revision > sent_revision AND last_error = 'cio_profile_creation_disabled')::int AS held_new_profiles,
       min(pending_since) FILTER(WHERE revision > sent_revision) AS oldest_pending_at,
       max(last_synced_at) AS last_success_at FROM cio_projection_queue`),
     db.cioSyncControl.findMany({ where: { id: { startsWith: "source:" } }, select: { id: true, data: true, updatedAt: true } }),

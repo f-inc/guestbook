@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
+import { projectCioAnswers, projectCioTags, type CioAnswerState } from "./cio-mapping";
 
-// Guestbook owns only this namespace. Never copy raw answers, names, location,
-// subscriptions, application status or arbitrary Luma traits into CIO.
+// Guestbook owns only this namespace. Reviewed answers remain source-specific;
+// canonical profiles, consent and application status are never changed.
 export const CIO_SCHEMA_VERSION = 1;
 type Row = Record<string, any>;
 export function normalizeCioEmail(value: unknown): string | null {
@@ -23,9 +24,11 @@ const unique = (values: string[]) => [...new Set(values)].sort();
 
 export function buildCioProjection({ email, guests, optOuts = [], address = null,
   inactive = false, newsletterCalendarIds = [], now = new Date(), identityConflict = false, coverage = {},
+  people = [], previousAnswers = {}, tagDefinitions = [],
 }: { email: string; guests: Row[]; optOuts?: Row[]; address?: Row | null;
   inactive?: boolean; newsletterCalendarIds?: string[]; now?: Date; identityConflict?: boolean;
-  coverage?: Record<string, string> }) {
+  coverage?: Record<string, string>; people?: Row[]; previousAnswers?: CioAnswerState;
+  tagDefinitions?: { name: string; semanticKey: string | null }[] }) {
   const normalized = normalizeCioEmail(email);
   if (!normalized) throw new Error("invalid_email");
   const byEvent = new Map<string, Row[]>();
@@ -69,7 +72,19 @@ export function buildCioProjection({ email, guests, optOuts = [], address = null
   const calendarIds = unique(optOuts.map(r => r.calendarId));
   const verificationFresh = address?.checkedAt && now.getTime() - new Date(address.checkedAt).getTime() <= 30 * 86400_000;
   const restricted = Boolean(address?.lumaBlockedReason && (!address.lumaClearedAt || new Date(address.lumaBlockedAt || 0) >= new Date(address.lumaClearedAt)));
-  const blocked = Boolean(inactive || identityConflict || restricted || (verificationFresh && address?.state === "undeliverable") || calendarIds.some(id => newsletterCalendarIds.includes(id)));
+  const tags = projectCioTags([...people, ...guests.map(g => g.person).filter(Boolean)], tagDefinitions);
+  const exclusionReasons = [
+    tags.blacklisted && "blacklist", tags.noInvite && "no_invite", inactive && "inactive",
+    identityConflict && "identity_review", restricted && "luma_restricted",
+    verificationFresh && address?.state === "undeliverable" && "undeliverable",
+    calendarIds.some(id => newsletterCalendarIds.includes(id)) && "mapped_calendar_opt_out",
+  ].filter(Boolean) as string[];
+  const blocked = exclusionReasons.length > 0;
+  // Only actual, currently indexed registrations contribute new answers. On
+  // identity conflict keep the previously delivered facts and require review.
+  const answerRows = identityConflict ? [] : records.flatMap(r => byEvent.get(r.event_id) || []);
+  const answers = projectCioAnswers(answerRows, previousAnswers, now);
+  const profileAttrs = Object.fromEntries(Object.entries(answers.state).map(([key, fact]) => [`finc_luma_profile_${key}`, fact.value]));
   const attrs = {
     finc_luma_schema_version: CIO_SCHEMA_VERSION,
     finc_luma_event_records: records,
@@ -86,10 +101,20 @@ export function buildCioProjection({ email, guests, optOuts = [], address = null
     finc_luma_calendar_opt_out_ids: calendarIds,
     finc_luma_identity_review: identityConflict,
     finc_luma_marketing_blocked: blocked,
+    finc_luma_blacklisted: tags.blacklisted,
+    finc_luma_no_invite: tags.noInvite,
+    finc_luma_guestbook_tags: tags.tags,
+    finc_luma_exclusion_reasons: exclusionReasons,
+    ...profileAttrs,
+    finc_luma_answer_provenance: answers.state,
+    finc_luma_answer_review: answers.review.length > 0 || identityConflict,
+    finc_luma_answer_review_reasons: identityConflict ? [...answers.review, "identity_review"] : answers.review,
   };
   const payload = JSON.stringify(attrs);
   if (Buffer.byteLength(payload) > 60_000) throw new Error("projection_too_large");
-  return { attrs, hash: createHash("sha256").update(payload).digest("hex"), hasRegistrations: records.length > 0 };
+  return { attrs, hash: createHash("sha256").update(payload).digest("hex"), hasRegistrations: records.length > 0,
+    hasOwnedFacts: records.length > 0 || blocked || tags.tags.length > 0,
+    answerState: answers.state, olderAnswersIgnored: answers.olderIgnored };
 }
 
 export function cioRetryDelay(attempt: number, retryAfter: string | null, now = Date.now()) {

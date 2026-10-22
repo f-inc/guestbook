@@ -20,6 +20,7 @@ model CioProjectionQueue {
   leaseToken String? @map("lease_token")
   leaseUntil DateTime? @map("lease_until") @db.Timestamptz(6)
   payloadHash String? @map("payload_hash")
+  answerState Json @default("{}") @map("answer_state")
   lastSyncedAt DateTime? @map("last_synced_at") @db.Timestamptz(6)
   lastError String? @map("last_error")
   updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)

@@ -22,6 +22,7 @@ before(async()=>{
       {encoding:"utf8",env:{...process.env,DB_URL:"postgresql://unused:unused@127.0.0.1:1/unused"}});
     pg=new PGlite();
     await pg.exec(sql);
+    await pg.exec(`INSERT INTO guest_tags(id,name,color,updated_at) VALUES('blacklist-test','☠️ Blacklist','#000000',now()),('no-invite-test','✉️ No Invite','#000000',now());`);
     await pg.exec(readFileSync("prisma/manual-migrations/20261022_cio_projection.sql","utf8"));
   } finally { rmSync(directory,{recursive:true,force:true}); }
 });
@@ -43,16 +44,50 @@ function adapter() {
     ...seedAdapter(),
     $queryRawUnsafe:async(sql,...params)=>(await pg.query(sql,params)).rows,
     $executeRawUnsafe:async(sql,...params)=>(await pg.query(sql,params)).affectedRows,
-    cioProjectionQueue:{findUnique:async({where})=>{const row=(await pg.query<any>("SELECT * FROM cio_projection_queue WHERE email=$1",[where.email])).rows[0];return row&&{revision:row.revision,leaseToken:row.lease_token};}},
+    cioProjectionQueue:{findUnique:async({where})=>{const row=(await pg.query<any>("SELECT * FROM cio_projection_queue WHERE email=$1",[where.email])).rows[0];return row&&{revision:row.revision,leaseToken:row.lease_token,answerState:row.answer_state};}},
+    lumaPerson:{findMany:async({where})=>(await pg.query<any>('SELECT person_id AS "personId", email_lower AS "emailLower", tags FROM luma_people WHERE email_lower=$1',[where.emailLower])).rows},
+    guestTag:{findMany:async()=>(await pg.query<any>(`SELECT name, semantic_key AS "semanticKey" FROM guest_tags WHERE semantic_key IN ('cio_blacklist','cio_no_invite')`)).rows},
     lumaEventGuest:{findFirst:async()=>null,findMany:async({where})=>{
       const result=await pg.query<any>(`SELECT * FROM luma_event_guests WHERE email_lower=$1`,[where.emailLower]);
       return result.rows.map(r=>({eventId:r.event_id,personId:r.person_id,emailLower:r.email_lower,lumaApprovalStatus:r.luma_approval_status,
-        registeredAt:r.registered_at,checkedInAt:r.checked_in_at,syncedAt:r.synced_at,lastSeenAt:r.last_seen_at,person:{emailLower:r.email_lower},
+        registeredAt:r.registered_at,checkedInAt:r.checked_in_at,syncedAt:r.synced_at,lastSeenAt:r.last_seen_at,raw:r.raw,registrationAnswers:r.registration_answers,person:{emailLower:r.email_lower},
         event:{title:"Test",raw:{},syncState:{lastGuestSyncAt:new Date(),lastStatus:"success",truncated:false}}}));
     }},
     lumaCalendarOptOut:{findMany:async()=>[]},emailAddress:{findUnique:async()=>null},emailInactive:{findUnique:async()=>null},
   } as any;
 }
+
+test("migration pins the existing exclusion definitions without changing display labels", async()=>{
+  const definitions=(await pg.query<any>("SELECT name, semantic_key FROM guest_tags ORDER BY id")).rows;
+  assert.deepEqual(definitions,[{name:"☠️ Blacklist",semantic_key:"cio_blacklist"},{name:"✉️ No Invite",semantic_key:"cio_no_invite"}]);
+});
+
+test("adding and removing a person tag queues urgent updates, including tag-only people", async()=>{
+  await pg.exec(`UPDATE luma_people SET tags='["☠️ Blacklist"]'`);
+  const first=await queue(); assert.ok(first); assert.equal(first.priority,1);
+  const projection=await loadCioProjection(email,adapter()); assert.equal(projection.attrs.finc_luma_blacklisted,true);
+  let sent:any;
+  await runCioProjectionBatch({db:adapter(),fetchImpl:withProfileLookup(async(_url,init)=>{sent=JSON.parse(String(init?.body));return new Response("",{status:200});})});
+  assert.equal(sent.finc_luma_blacklisted,true);assert.equal(sent.finc_luma_registration_count,0);
+  await pg.exec(`UPDATE luma_people SET tags='[]'`);
+  assert.ok((await queue()).revision>first.revision);
+  await runCioProjectionBatch({db:adapter(),fetchImpl:withProfileLookup(async(_url,init)=>{sent=JSON.parse(String(init?.body));return new Response("",{status:200});})});
+  assert.equal(sent.finc_luma_blacklisted,false);
+});
+test("answer state commits only after delivery and protects against an older source replay", async()=>{
+  await insertGuest();
+  const raw=(value,date)=>JSON.stringify({registered_at:date,registration_answers:[{label:"Company",value}]});
+  await pg.query("UPDATE luma_event_guests SET raw=$1",[raw("Current","2026-01-01T00:00:00Z")]);
+  const db=adapter();
+  await runCioProjectionBatch({db,fetchImpl:withProfileLookup(async()=>new Response("",{status:503}))});
+  assert.deepEqual((await queue()).answer_state,{});
+  await mark();await runCioProjectionBatch({db,fetchImpl:withProfileLookup(async()=>new Response("",{status:200}))});
+  assert.equal((await queue()).answer_state.company.value,"Current");
+  await pg.query("UPDATE luma_event_guests SET raw=$1",[raw("Old","2025-01-01T00:00:00Z")]);
+  const projection=await loadCioProjection(email,db);
+  assert.equal((projection.attrs as Record<string,unknown>).finc_luma_profile_company,"Current");
+  assert.deepEqual(projection.olderAnswersIgnored,["company"]);
+});
 
 test("source update and queued revision commit or roll back together",async()=>{
   await insertGuest();const first=await queue();assert.equal(String(first.revision),"1");

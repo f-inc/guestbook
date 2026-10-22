@@ -3,13 +3,17 @@ import { prisma } from "./db";
 import { buildCioProjection, cioRuntimeMode, cioRetryDelay, normalizeCioEmail, requireCioProductionIdentity } from "./cio-projection";
 
 export async function loadCioProjection(email: string, db = prisma()) {
-  const [guests, optOuts, address, inactive] = await Promise.all([
+  const [guests, optOuts, address, inactive, peopleByEmail, previous, tagDefinitions] = await Promise.all([
     db.lumaEventGuest.findMany({ where: { emailLower: email }, include: { event: { include: { syncState: true } }, person: true }, take: 1001 }),
     db.lumaCalendarOptOut.findMany({ where: { emailLower: email } }),
     db.emailAddress.findUnique({ where: { emailLower: email } }),
     db.emailInactive.findUnique({ where: { emailLower: email } }),
+    db.lumaPerson.findMany({ where: { emailLower: email }, take: 101 }),
+    db.cioProjectionQueue.findUnique({ where: { email }, select: { answerState: true } }),
+    db.guestTag.findMany({ where: { semanticKey: { in: ["cio_blacklist", "cio_no_invite"] } }, select: { name: true, semanticKey: true } }),
   ]);
   if (guests.length > 1000) throw new Error("too_many_registrations");
+  if (peopleByEmail.length > 100) throw new Error("too_many_people");
   // Do not silently create a newly marketable identity when a Luma person
   // changed email. An operator resolves these aliases using CIO's cio_id.
   const people = [...new Set(guests.map(g => g.personId))];
@@ -20,7 +24,8 @@ export async function loadCioProjection(email: string, db = prisma()) {
     where: { id: { in: [...new Set(guests.map(g => `coverage:${g.eventId}`))] } }, select: { id: true, data: true },
   }) : [];
   const coverage = Object.fromEntries(coverageRows.map(r => [r.id.slice("coverage:".length), (r.data as any).completedBefore]));
-  return buildCioProjection({ email, guests, optOuts, address, inactive: Boolean(inactive),
+  return buildCioProjection({ email, guests, optOuts, address, inactive: Boolean(inactive), people: peopleByEmail,
+    previousAnswers: (previous?.answerState || {}) as any, tagDefinitions,
     coverage, identityConflict: Boolean(conflicts), newsletterCalendarIds: (process.env.CIO_NEWSLETTER_CALENDAR_IDS || "").split(",").map(s => s.trim()).filter(Boolean) });
 }
 
@@ -49,10 +54,14 @@ export async function sendCioProjection(email: string, attributes: Record<string
     throw Object.assign(new Error("cio_identity_ambiguous"), { status: 409 });
   }
   const existing = matches[0];
+  // Restrictions still reach an existing profile. A restricted person is never
+  // newly imported, even after an operator enables reviewed profile creation.
+  if (!existing && attributes.finc_luma_marketing_blocked === true) throw new Error("cio_profile_excluded");
   if (!existing && attributes.finc_luma_identity_review === true) {
     throw Object.assign(new Error("cio_identity_review_required"), { status: 409 });
   }
   if (!existing && env.CIO_SYNC_PROFILE_MODE !== "create_reviewed") throw new Error("cio_profile_creation_disabled");
+  if (!existing && attributes.finc_luma_registration_count === 0) throw new Error("cio_profile_without_registration");
   const identifier = existing ? `cio_${existing.cio_id}` : email;
   const origin = eu ? "https://track-eu.customer.io" : "https://track.customer.io";
   const response = await fetchImpl(`${origin}/api/v1/customers/${encodeURIComponent(identifier)}`, {
@@ -105,7 +114,7 @@ export async function runCioProjectionBatch({ db, fetchImpl = fetch, maxItems = 
         await releaseCioJob(db, job.email, token); counts.skipped++; continue;
       }
       if (projection.hash === job.payload_hash) counts.unchanged++;
-      else if (!projection.hasRegistrations && !job.payload_hash) counts.skipped++;
+      else if (!projection.hasOwnedFacts && !job.payload_hash) counts.skipped++;
       else {
         await sendCioProjection(job.email, { ...projection.attrs, finc_luma_synced_at: Math.floor(Date.now() / 1000) }, fetchImpl);
         counts.sent++;
@@ -115,17 +124,17 @@ export async function runCioProjectionBatch({ db, fetchImpl = fetch, maxItems = 
       await db.$executeRawUnsafe(`UPDATE cio_projection_queue SET sent_revision = $3,
         pending_since = CASE WHEN revision = $3 THEN NULL ELSE pending_since END,
         priority = CASE WHEN revision = $3 THEN 0 ELSE priority END,
-        payload_hash = $4, last_synced_at = CASE WHEN $5::boolean THEN now() ELSE last_synced_at END, attempts = 0, last_error = NULL,
+        payload_hash = $4, answer_state = $6::jsonb, last_synced_at = CASE WHEN $5::boolean THEN now() ELSE last_synced_at END, attempts = 0, last_error = NULL,
         lease_token = NULL, lease_until = NULL WHERE email = $1 AND lease_token = $2`,
-        job.email, token, job.revision, projection.hasRegistrations || job.payload_hash ? projection.hash : null, sent);
+        job.email, token, job.revision, projection.hasOwnedFacts || job.payload_hash ? projection.hash : null, sent, JSON.stringify(projection.answerState));
     } catch (error: any) {
       // Keep new people pending without exhausting retries while creation is off.
       // They resume automatically after the separately reviewed rollout switch.
-      if (error.message === "cio_profile_creation_disabled") {
+      if (["cio_profile_creation_disabled", "cio_profile_excluded", "cio_profile_without_registration"].includes(error.message)) {
         counts.held++;
-        await db.$executeRawUnsafe(`UPDATE cio_projection_queue SET last_error = 'cio_profile_creation_disabled',
+        await db.$executeRawUnsafe(`UPDATE cio_projection_queue SET last_error = $3,
           next_attempt_at = now() + interval '15 minutes', lease_token = NULL, lease_until = NULL
-          WHERE email = $1 AND lease_token = $2`, job.email, token);
+          WHERE email = $1 AND lease_token = $2`, job.email, token, error.message);
         continue;
       }
       counts.failed++;
@@ -165,8 +174,9 @@ export async function seedCioQueue(limit = 200, db?: ReturnType<typeof prisma>) 
       const state = (row?.data || {}) as any;
       if (state.complete) return { complete: true, queued: 0 };
       const emails: { email: string }[] = await tx.$queryRawUnsafe(`
-        SELECT DISTINCT email_lower AS email FROM luma_event_guests
-        WHERE email_lower IS NOT NULL AND email_lower > $1 ORDER BY email_lower LIMIT $2`, state.cursor || "", Math.min(500, Math.max(1, limit)));
+        SELECT email FROM (
+          SELECT email_lower AS email FROM luma_event_guests UNION SELECT email_lower AS email FROM luma_people
+        ) people WHERE email IS NOT NULL AND email > $1 ORDER BY email LIMIT $2`, state.cursor || "", Math.min(500, Math.max(1, limit)));
       // Prisma cannot deserialize PostgreSQL's void return type; cast the
       // side-effecting function's result while retaining the batch transaction.
       if (emails.length) await tx.$queryRawUnsafe(`SELECT cio_mark_email(email)::text AS queued FROM unnest($1::text[]) AS email`, emails.map(r => r.email));
@@ -194,6 +204,7 @@ export async function cioSyncHealth(db = prisma()) {
       count(*) FILTER(WHERE revision > sent_revision)::int AS pending,
       count(*) FILTER(WHERE attempts >= 10)::int AS quarantined,
       count(*) FILTER(WHERE revision > sent_revision AND last_error = 'cio_profile_creation_disabled')::int AS held_new_profiles,
+      count(*) FILTER(WHERE revision > sent_revision AND last_error = 'cio_profile_excluded')::int AS held_excluded_profiles,
       min(pending_since) FILTER(WHERE revision > sent_revision) AS oldest_pending_at,
       max(last_synced_at) AS last_success_at FROM cio_projection_queue`),
     db.cioSyncControl.findMany({ where: { id: { startsWith: "source:" } }, select: { id: true, data: true, updatedAt: true } }),

@@ -1,6 +1,13 @@
 -- PREPARED ONLY. Apply only to the explicitly approved target, after a backup.
 -- Additive durable queue. No Customer.io requests, contact backfill or sends.
 BEGIN;
+-- Pin exclusion meaning to existing stable tag definitions. A later display-name
+-- change must not turn a blacklisted person into an eligible invitee. Duplicate
+-- semantic candidates fail the transaction for review rather than choosing one.
+UPDATE guest_tags SET semantic_key = CASE
+  WHEN btrim(regexp_replace(lower(name), '[^a-z0-9]+', ' ', 'g')) = 'blacklist' THEN 'cio_blacklist'
+  ELSE 'cio_no_invite' END
+WHERE semantic_key IS NULL AND btrim(regexp_replace(lower(name), '[^a-z0-9]+', ' ', 'g')) IN ('blacklist', 'no invite');
 CREATE TABLE cio_projection_queue (
   email text PRIMARY KEY,
   revision bigint NOT NULL DEFAULT 1,
@@ -12,6 +19,7 @@ CREATE TABLE cio_projection_queue (
   lease_token text,
   lease_until timestamptz,
   payload_hash text,
+  answer_state jsonb NOT NULL DEFAULT '{}',
   last_synced_at timestamptz,
   last_error text,
   updated_at timestamptz NOT NULL DEFAULT now()
@@ -57,15 +65,16 @@ BEGIN
       (new_row->>'last_seen_at')::timestamptz >= coverage_cutoff
     ) THEN RETURN NEW; END IF;
   END IF;
-  -- Profile descriptions and classifier tags are not owned by this adapter.
+  -- Current tag membership is owned; profile descriptions remain unowned.
   IF TG_OP = 'UPDATE' AND TG_TABLE_NAME = 'luma_people' AND
-    old_row->>'email_lower' IS NOT DISTINCT FROM new_row->>'email_lower' THEN RETURN NEW; END IF;
+    old_row->>'email_lower' IS NOT DISTINCT FROM new_row->>'email_lower' AND
+    old_row->'tags' IS NOT DISTINCT FROM new_row->'tags' THEN RETURN NEW; END IF;
   IF old_row IS NOT NULL THEN PERFORM cio_mark_email(coalesce(old_row->>'email_lower', old_row->>'emailLower', old_row->>'email'), TG_TABLE_NAME <> 'luma_event_guests'); END IF;
   IF new_row IS NOT NULL THEN PERFORM cio_mark_email(coalesce(new_row->>'email_lower', new_row->>'emailLower', new_row->>'email'), TG_TABLE_NAME <> 'luma_event_guests'); END IF;
   IF TG_TABLE_NAME = 'luma_people' THEN
     FOR email_key IN SELECT DISTINCT email_lower FROM luma_event_guests
       WHERE person_id = coalesce(new_row->>'person_id', old_row->>'person_id') LOOP
-      PERFORM cio_mark_email(email_key);
+      PERFORM cio_mark_email(email_key, true);
     END LOOP;
   END IF;
   RETURN coalesce(NEW, OLD);

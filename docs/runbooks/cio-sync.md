@@ -19,8 +19,9 @@ new shadow audiences use current source state, so cancelling an approval or
 undoing a check-in removes that current membership. This also avoids replaying
 old registration automations or duplicating prior imported events.
 
-It never sends messages or writes subscription/consent, application, portfolio,
-location or self-reported profile fields. However, creating a profile or updating
+It never sends messages or writes canonical subscription/consent, application,
+portfolio, location or self-reported profile fields. Reviewed event answers and
+selected Guestbook tags have separate `finc_luma_` attributes. Creating a profile or updating
 attributes CAN trigger existing Customer.io automations. Audit those consumers
 before turning on delivery. Registration does not establish newsletter consent.
 
@@ -98,6 +99,9 @@ a recency window before adding event-specific or recent-attendee segments.
 | Repeat attendees | `finc_luma_checkin_count >= 2` |
 | Recent attendees | `finc_luma_last_checked_in_at` within the desired window |
 | Source exclusion | `finc_luma_marketing_blocked = true` OR `finc_luma_identity_review = true` |
+| Blacklist | `finc_luma_blacklisted = true` |
+| No Invite | `finc_luma_no_invite = true` |
+| Answer review | `finc_luma_answer_review = true` |
 
 An invite to the next edition combines a verified prior-event audience and NOT
 active for the next event. Use negative membership only after that target event's
@@ -112,8 +116,64 @@ never incremented. Dates are Unix seconds, as required by Customer.io's
 Invites are not registrations; approvals are not attendance;
 no-show labels are not inferred. Categories use the existing event field and need
 an agreed taxonomy. Attending a robotics talk does not establish profession or
-current location. Raw registration answers, private notes and interests are not
-copied into CIO; those need an independently reviewed field-mapping contract.
+current location. Private notes, arbitrary answers, inferred interests and automatic
+attendance classifiers are not copied. See the explicit field contract below.
+
+## Mapping, exclusions and answer conflicts
+
+Open `/cio` for read-only Mapping, Exclusions, Preview and Health tabs. Sign in
+through the existing Guestbook page first. Nothing is automatically scanned;
+preview reads one exact address on demand and never writes to CIO. The tabs do
+not edit mappings or campaign exclusions. Review mapping changes in code.
+
+`app/api/luma/cio-mapping.ts` defines exact question-label matches for company,
+job title, role, city, country, project, project URL and LinkedIn URL. Each writes
+only `finc_luma_profile_<field>`. It preserves `company`, `company_name`, names,
+location variants, roles, existing `finc_profile_*`, CRM fields, applications and
+all native consent. URLs are validated; structured company objects, arrays and
+unmapped questions require a separately reviewed mapping. Matching labels ignores
+case, whitespace and trailing question/colon punctuation, not arbitrary wording.
+
+For each field, retain the newest valid nonblank source answer, with event ID,
+question ID, Unix-second timestamp and timestamp basis in
+`finc_luma_answer_provenance`. Use an answer `updated_at`, `answered_at` or
+`submitted_at` when present. Otherwise the raw Luma `registered_at` is explicitly
+marked as a registration-time fallback, not proof of a later answer edit. Never
+use guest `updated_at`, the event date, cache sync time or import time. Unknown,
+invalid or future clocks are held for review. Equal-time disagreements keep the
+last delivered answer (or omit the field if none); older and blank answers do
+not clear it. `finc_luma_answer_review_reasons` explains review flags. New evidence
+from conflicting identities is withheld. Canonical source precedence is simple:
+existing CIO profile sources remain authoritative; this adapter never promotes
+Luma answers into their fields, even when Luma has a newer timestamp.
+
+The queue persists `answer_state` only after a successful delivery/unchanged
+projection. Do not truncate the queue or erase this state during recovery: it
+prevents an older backfill or disappeared row from regressing a delivered answer.
+Deleting or correcting a previously delivered answer needs an explicit reviewed
+correction; a blank submission is not an implicit deletion.
+
+Selected tags become values in `finc_luma_guestbook_tags`: blacklist, no_invite,
+team, partner, referred, community, guest_pass, all_portfolio, sf_portfolio,
+artifact_i, blueprint_i, blueprint_ii, canopy_i, off_season_i and off_season_ii.
+These are source labels only; they do not change canonical portfolio/program
+membership or establish consent. Emoji decorations are ignored. The initial SQL
+pins existing Blacklist/No Invite definitions using `cio_blacklist` and
+`cio_no_invite` semantic keys, so later display-name changes preserve exclusions.
+Review these definitions before migration; duplicate normalized candidates fail
+the transaction for review. If an exclusion tag is introduced after migration,
+pin its semantic key before renaming it. Other tag renames need a mapping update.
+
+Blacklist or No Invite sets its dedicated boolean plus
+`finc_luma_marketing_blocked` and an entry in `finc_luma_exclusion_reasons`.
+Never create a new profile with any active source restriction, even in
+`create_reviewed` mode. Existing profiles still receive restriction updates,
+including tag-only people without registrations. A new profile without a
+registration is never created. Source changes requeue held work, and removing
+a tag can clear only Guestbook-owned flags, never native unsubscribe/consent.
+Tag changes have urgent queue priority; seeding includes indexed people as well
+as event registrations. **Connect Source exclusions to relevant campaign
+exclusions before rollout: creating a segment alone does not suppress sends.**
 
 ## Coverage and monitoring
 
@@ -205,8 +265,8 @@ coverage and segment latency still require the rollout checks above.
 
 The prepared SQL is an initial, unapplied migration. If an earlier draft was
 manually applied elsewhere, do not rerun it; prepare and review a targeted upgrade
-for that exact schema. The two new columns in this revision are queue `priority`
-and `pending_since`; function definitions changed too.
+for that exact schema. The draft adds queue `priority`, `pending_since` and
+`answer_state`; functions and exclusion-tag semantic-key setup changed too.
 
 | Work | Status / owner |
 | --- | --- |

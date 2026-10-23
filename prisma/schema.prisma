@@ -7,6 +7,35 @@ datasource db {
   url      = env("DB_URL")
 }
 
+// SQL migration also installs triggers and a partial pending-work index.
+// Apply 20261022_cio_projection.sql; do not use db push for this feature.
+model CioProjectionQueue {
+  email String @id
+  revision BigInt @default(1)
+  sentRevision BigInt @default(0) @map("sent_revision")
+  attempts Int @default(0)
+  priority Int @default(0)
+  nextAttemptAt DateTime @default(now()) @map("next_attempt_at") @db.Timestamptz(6)
+  pendingSince DateTime? @default(now()) @map("pending_since") @db.Timestamptz(6)
+  leaseToken String? @map("lease_token")
+  leaseUntil DateTime? @map("lease_until") @db.Timestamptz(6)
+  payloadHash String? @map("payload_hash")
+  answerState Json @default("{}") @map("answer_state")
+  lastSyncedAt DateTime? @map("last_synced_at") @db.Timestamptz(6)
+  lastError String? @map("last_error")
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+  @@map("cio_projection_queue")
+}
+
+model CioSyncControl {
+  id String @id
+  data Json @default("{}")
+  owner String?
+  leaseUntil DateTime? @map("lease_until") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+  @@map("cio_sync_control")
+}
+
 model LumaEvent {
   eventId     String    @id @map("event_id")
   title       String

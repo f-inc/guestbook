@@ -4033,6 +4033,7 @@ export default function Home() {
         </button>
         <div className="topbar-actions">
           <a className="button" href="/requests"><FileText size={17} aria-hidden="true" />Requests</a>
+          <a className="button" href="/cio">CIO sync</a>
           <button className="button" type="button" onClick={openTagSettings}>
             <Tag size={17} aria-hidden="true" />
             Tags

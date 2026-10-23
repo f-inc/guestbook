@@ -51,6 +51,30 @@ test("tags tolerate emoji decorations and exclude subjective automatic labels", 
   const result = projectCioTags([{ tags: ["☠️ Blacklist", "✉️ No Invite", "🤝 Partner", "💀 Superflaker", "Interesting"] }]);
   assert.deepEqual(result, { tags: ["blacklist", "no_invite", "partner"], blacklisted: true, noInvite: true });
 });
+test("the observed optional LinkedIn question accepts full URLs and narrow profile paths", () => {
+  for (const [value, expected] of [
+    ["https://www.linkedin.com/in/example-person", "https://www.linkedin.com/in/example-person"],
+    [" /in/example-person-123/ ", "https://www.linkedin.com/in/example-person-123/"],
+  ]) {
+    const row = guest(value, "2026-01-01T00:00:00Z", { label: "(Optional) What is your LinkedIn profile?" });
+    const result = projectCioAnswers([row], {}, now);
+    assert.equal(result.state.linkedin_url.value, expected);
+    assert.equal(result.state.linkedin_url.answered_at, Date.parse("2026-01-01T00:00:00Z") / 1000);
+    assert.equal(result.state.linkedin_url.time_basis, "registration");
+    assert.deepEqual(result.review, []);
+  }
+});
+test("LinkedIn path expansion rejects ambiguous input and does not expand project URLs", () => {
+  for (const value of ["//evil.test/in/person", "/in/person?redirect=https://evil.test", "/in/../person", "/company/example", "/in/person\\other", "https://linkedin.com.evil.test/in/person", "https://user:pass@linkedin.com/in/person"]) {
+    const row = guest(value, "2026-01-01T00:00:00Z", { label: "(Optional) What is your LinkedIn profile?" });
+    const result = projectCioAnswers([row], {}, now);
+    assert.deepEqual(result.state, {});
+    assert.deepEqual(result.review, ["linkedin_url:invalid_value"]);
+  }
+  const project = projectCioAnswers([guest("/in/example-person", "2026-01-01T00:00:00Z", { label: "Project URL" })], {}, now);
+  assert.deepEqual(project.state, {});
+  assert.deepEqual(project.review, ["project_url:invalid_value"]);
+});
 test("renaming a pinned exclusion tag preserves its exclusion meaning", () => {
   const result = projectCioTags([{ tags: ["Do not contact"] }], [{ name: "Do not contact", semanticKey: "cio_blacklist" }]);
   assert.equal(result.blacklisted, true); assert.deepEqual(result.tags, ["blacklist"]);

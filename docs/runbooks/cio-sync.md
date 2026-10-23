@@ -4,6 +4,25 @@ Prepared, disabled by default. No production migration, backfill, schedule,
 profile write or Customer.io backfill has been performed by this code change.
 Shadow segments can be prepared separately before deployment.
 
+## Connector pilot completed on October 22, 2026
+
+A separate manual connector test verified five exact-email existing profiles
+from one completed event. Each received nine `finc_luma_pilot_*` snapshot fields,
+with no pre-existing attributes, identities, consent or prior segment memberships
+changed. The isolated pilot segment contained exactly five profiles and had no
+messaging consumers; no new deliveries or drafts were observed during verification.
+The seven production shadow segments remained empty. A prior synthetic-profile
+test verified segment entry/exit, duplicate updates and check-in removal, then
+removed all of its temporary fields and verified restoration.
+
+These tests do not exercise this worker, webhooks, queue, source timestamps or
+full event history. Keep pilot snapshots separate from `finc_luma_schema_version`
+and the production projection. Next, run the deployed read-only preview for the
+same five exact emails, review each full indexed projection and coverage, then
+allowlist only those addresses for the worker canary. Keep source/backfill/full
+rollout off initially. The private pilot audit contains their identities and the
+rollback instructions; do not commit contact snapshots or credentials here.
+
 ## What this implements
 
 Existing signed Luma webhooks and a bounded API scanner update Guestbook. Database
@@ -133,6 +152,10 @@ location variants, roles, existing `finc_profile_*`, CRM fields, applications an
 all native consent. URLs are validated; structured company objects, arrays and
 unmapped questions require a separately reviewed mapping. Matching labels ignores
 case, whitespace and trailing question/colon punctuation, not arbitrary wording.
+The observed `(Optional) What is your LinkedIn profile?` label is explicitly
+mapped. A narrow `/in/<ASCII profile slug>` answer is expanded to a full LinkedIn
+URL only for LinkedIn questions. Other relative URLs, credentials and ambiguous
+paths are held for review; source-time rules still apply.
 
 For each field, retain the newest valid nonblank source answer, with event ID,
 question ID, Unix-second timestamp and timestamp basis in

@@ -8,7 +8,7 @@ export const CIO_ANSWER_MAPPINGS = [
   { key: "country", labels: ["Country"], kind: "text" },
   { key: "project", labels: ["What are you currently working on?", "What are you working on?"], kind: "text" },
   { key: "project_url", labels: ["Project URL", "Company website"], kind: "url" },
-  { key: "linkedin_url", labels: ["LinkedIn", "LinkedIn URL", "LinkedIn profile"], kind: "linkedin" },
+  { key: "linkedin_url", labels: ["LinkedIn", "LinkedIn URL", "LinkedIn profile", "(Optional) What is your LinkedIn profile?"], kind: "linkedin" },
 ] as const;
 
 export const CIO_TAG_MAPPINGS = [
@@ -58,6 +58,16 @@ function validValue(value: string, kind: string) {
   } catch { return false; }
 }
 
+function normalizeAnswerValue(value: string, kind: string): string | null {
+  // Guestbook can display a LinkedIn answer as an unambiguous /in/<slug>
+  // path. Only expand that narrow form for a mapped LinkedIn question; do not
+  // guess hosts for other relative URLs or accept redirects/credentials.
+  if (kind === "linkedin" && /^\/in\/[a-z0-9][a-z0-9_-]*\/?$/i.test(value)) {
+    return `https://www.linkedin.com${value}`;
+  }
+  return validValue(value, kind) ? value : null;
+}
+
 export function projectCioAnswers(guests: Record<string, any>[], previous: CioAnswerState = {}, now = new Date()) {
   const state: CioAnswerState = {};
   const review = new Set<string>();
@@ -75,12 +85,13 @@ export function projectCioAnswers(guests: Record<string, any>[], previous: CioAn
       for (const answer of answers) {
         const label = answer?.label ?? answer?.question_label ?? answer?.question_text ?? answer?.question?.label ?? answer?.question?.title;
         if (typeof label !== "string" || !mapping.labels.some(l => normalizeCioQuestion(l) === normalizeCioQuestion(label))) continue;
-        const value = textValue(answer);
-        if (!value) {
+        const rawValue = textValue(answer);
+        if (!rawValue) {
           if (answer?.value != null && answer.value !== "") review.add(`${mapping.key}:unsupported_or_blank`);
           continue;
         }
-        if (!validValue(value, mapping.kind)) { review.add(`${mapping.key}:invalid_value`); continue; }
+        const value = normalizeAnswerValue(rawValue, mapping.kind);
+        if (!value) { review.add(`${mapping.key}:invalid_value`); continue; }
         // Never use a guest updated_at (approval/check-in can change it), event
         // date, cache synced_at, or import time as an answer edit timestamp.
         const explicit = answer.updated_at ?? answer.answered_at ?? answer.submitted_at;

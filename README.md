@@ -332,7 +332,11 @@ escaping HTML. Old `specialRequests` stay labeled **Equipment & special requests
 they are never interpreted as an event description. Both keys live in Campus’s
 existing answers JSONB, and unknown answers remain visible.
 
-Set the server-only `CAMPUS_API_URL=https://os-v2-production.up.railway.app`. Verified from the local Guestbook environment: Railway returned HTTP 200 for guest confirmations, while `https://api.f.inc` returned HTTP 403 with a Cloudflare browser challenge. The proxy retains its configurable origin and uncached reads. Restart a running production server after changing environment configuration.
+Use the server-only `CAMPUS_API_URL=https://api.f.inc`, the current Campus API hostname. An earlier workaround used `https://os-v2-production.up.railway.app` to avoid local Cloudflare challenges; that retained Railway service returned HTTP 500 during the 2026-10-23 investigation. Check Guestbook's production environment for an obsolete Railway override and redeploy after updating it. Verify an authenticated form-submissions read from the deployed Guestbook runtime before considering the integration restored: a browser request without a key returning JSON 401 confirms routing, but does not validate the integration key or database access. Local command-line requests may still encounter a Cloudflare challenge.
+
+Requests handles non-JSON gateway and challenge responses with a readable error. During the same investigation, the browser received a Cloudflare HTML 502 page from Guestbook's submissions endpoint. A readable error prevents the JSON parsing exception; restoring the upstream API connection is still required to load requests.
+
+The current Campus Vercel firewall challenges server calls with HTTP 429 and `x-vercel-mitigated: challenge`. Configure server-only `API_FIREWALL_BYPASS_KEY` to match Campus's existing trusted-server rule. The submissions proxy sends it as `x-finc-internal` alongside the scoped Campus bearer key; neither credential is sent to the browser. A bounded authenticated read with both headers returned HTTP 200 during verification. Keep this header limited to the configured Campus origin and redeploy after changing its environment value.
 
 The former `/form-submissions` URL redirects to `/requests`. Verified that the Campus event request form posts to `/api/event-requests` and persists `form_key=event-request`; the live integration returned two matching requests during verification.
 

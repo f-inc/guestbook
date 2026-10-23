@@ -1971,10 +1971,12 @@ export default function Home() {
     if (!requestedEventIds.length) return false;
     setSyncingEventIds((current) => [...new Set([...current, ...requestedEventIds])]);
     try {
+      let synced = true;
       for (const eventId of requestedEventIds) {
-        await loadEventGuests(eventId, { force: true });
+        const result = await loadEventGuests(eventId, { force: true });
+        if (result !== true) synced = false;
       }
-      return true;
+      return synced;
     } catch (error: any) {
       setApiState({ status: "error", message: error.message });
       return false;
@@ -4017,7 +4019,14 @@ export default function Home() {
   }
 
   return (
-    <InvitationTrackingProvider targets={visibleGuests.filter(({guest}) => guest.status === "invited").map(({person, sourceEvent}) => ({personId: person.id, eventId: sourceEvent?.id || selectedEvent?.id})).filter(t => t.eventId)} request={apiFetch} eventIds={selectedEvents.filter(e => e.source === "luma").map(e => e.id)} active={!searchOpen && ["overview", "invite", "analytics"].includes(activeEventTab)} revision={trackingRevision}>
+    <InvitationTrackingProvider targets={visibleGuests.filter(({guest}) => guest.status === "invited").map(({person, sourceEvent}) => ({personId: person.id, eventId: sourceEvent?.id || selectedEvent?.id})).filter(t => t.eventId)} request={apiFetch} eventIds={selectedEvents.filter(e => e.source === "luma").map(e => e.id)} active={!searchOpen && ["overview", "invite", "analytics"].includes(activeEventTab)} revision={trackingRevision}
+      onRefreshEvents={async (eventIds) => {
+        if (!await performSelectedEventSync(eventIds)) {
+          throw new Error("Unable to sync all selected events. Invitation responses and check-ins may be out of date.");
+        }
+        for (const eventId of eventIds) await loadEventAnalytics(eventId);
+      }}
+    >
     <div className="app-shell">
       <header className="topbar">
         <a href="/" className="brand-lockup flex min-w-0 items-center gap-2" aria-label="Guestbook home" style={{ color: "inherit", textDecoration: "none" }}>

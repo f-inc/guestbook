@@ -12,6 +12,7 @@ export function InvitationTrackingProvider({
   active,
   request,
   revision,
+  onRefreshEvents,
 }: {
   children: any;
   targets?: { personId: string; eventId: string }[];
@@ -19,6 +20,7 @@ export function InvitationTrackingProvider({
   active: boolean;
   request: any;
   revision?: number;
+  onRefreshEvents?: (eventIds: string[]) => Promise<void>;
 }) {
   const [data, setData] = useState<any>({
     rows: [],
@@ -88,7 +90,18 @@ export function InvitationTrackingProvider({
     if (lock.current || !eventIds.length) return;
     lock.current = true;
     setBusy(true);
+    setError("");
+    let eventRefreshError = "";
     try {
+      // Only the explicit refresh button syncs RSVP and attendance data.
+      // Background polling, email details, and reconnects stay tracking-only.
+      if (manual && !detailTargets && !sessionToken && onRefreshEvents) {
+        try {
+          await onRefreshEvents([...eventIds]);
+        } catch (e: any) {
+          eventRefreshError = e.message || "Unable to sync invitation responses and check-ins.";
+        }
+      }
       const r = await request("/api/invitation-tracking", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -112,10 +125,10 @@ export function InvitationTrackingProvider({
         throw new Error(d.error || "Unable to refresh tracking.");
       }
       setDisconnected(false);
-      setError("");
+      setError(eventRefreshError);
       await load();
     } catch (e: any) {
-      setError(e.message);
+      setError([eventRefreshError, e.message].filter(Boolean).join(" "));
       await load().catch(() => {});
     } finally {
       lock.current = false;
@@ -260,7 +273,7 @@ export function TrackingControls({ compact = false }: { compact?: boolean } = {}
         onClick={() => t.refresh(true)}
       >
         <RefreshCw size={14} />
-        {t.busy ? "Checking…" : "Refresh invitations"}
+        {t.busy ? "Refreshing…" : "Refresh invitations"}
       </button>
       {t.refreshWarning && !t.error ? (
         <p role="status">{t.refreshWarning}</p>
@@ -310,6 +323,15 @@ export function InvitationOutcomes({ stages, onFilter, cohort = "all" }) {
             <button type="button" className="analytics-funnel-filter invitation-stage-bar-row" onClick={stage.action} aria-label={`View ${stage.label.toLowerCase()}: ${rate}% of invitations`}>
               <span className="invitation-stage-track" aria-hidden="true"><i style={{ width: `${Math.min(100, rate)}%` }} /></span><em>{rate}%</em>
             </button>
+            {stage.id === "accepted" && stage.segments?.length ? (
+              <div className="invitation-stage-breakdown" role="group" aria-label="Accepted invitation outcomes">
+                {stage.segments.map((segment) => (
+                  <button type="button" className="analytics-funnel-filter" key={segment.id} onClick={() => onFilter(segment.filter)} aria-label={`View ${segment.value.toLocaleString()} invited guests: ${segment.label.toLowerCase()}`}>
+                    <strong>{segment.value.toLocaleString()}</strong><small>{segment.label}</small>
+                  </button>
+                ))}
+              </div>
+            ) : null}
           </li>;
         })}
       </ol>

@@ -3,23 +3,25 @@ import { test } from "node:test";
 import { GET } from "./route";
 
 test("Campus submissions require Guestbook auth and keep the Campus key server-side", async (t) => {
-  const previous = { key: process.env.CAMPUS_API_KEY, url: process.env.CAMPUS_API_URL, guest: process.env.GUESTBOOK_KEY };
+  const previous = { key: process.env.CAMPUS_API_KEY, url: process.env.CAMPUS_API_URL, guest: process.env.GUESTBOOK_KEY, firewall: process.env.API_FIREWALL_BYPASS_KEY };
   const originalFetch = globalThis.fetch;
   t.after(() => {
     globalThis.fetch = originalFetch;
-    for (const [name, value] of [["CAMPUS_API_KEY", previous.key], ["CAMPUS_API_URL", previous.url], ["GUESTBOOK_KEY", previous.guest]]) {
+    for (const [name, value] of [["CAMPUS_API_KEY", previous.key], ["CAMPUS_API_URL", previous.url], ["GUESTBOOK_KEY", previous.guest], ["API_FIREWALL_BYPASS_KEY", previous.firewall]]) {
       if (value === undefined) delete process.env[name!]; else process.env[name!] = value;
     }
   });
   process.env.GUESTBOOK_KEY = "guest-test";
   process.env.CAMPUS_API_KEY = "campus-secret";
   process.env.CAMPUS_API_URL = "https://campus.test";
+  process.env.API_FIREWALL_BYPASS_KEY = "server-only-firewall-secret";
   let calls = 0;
   let providerStatus = 200;
   globalThis.fetch = async (input, init) => {
     calls++;
     assert.equal(String(input), "https://campus.test/api/integrations/form-submissions?formKey=guest-confirmation&limit=20");
     assert.equal(new Headers(init?.headers).get("Authorization"), "Bearer campus-secret");
+    assert.equal(new Headers(init?.headers).get("x-finc-internal"), "server-only-firewall-secret");
     assert.equal(init?.redirect, "error");
     assert.equal(init?.cache, "no-store");
     return Response.json(providerStatus === 200 ? { data: [], pagination: { nextOffset: null } } : { secret: "do not expose" }, { status: providerStatus });
@@ -59,6 +61,10 @@ test("Campus proxy rejects invalid queries, invalid origins, and challenge pages
   const challenge = await GET(request("limit=1"));
   assert.equal(challenge.status, 502);
   assert.ok(!(await challenge.text()).includes("private challenge content"));
+  globalThis.fetch = async () => new Response("private Vercel challenge", { status: 429, headers: { "content-type": "text/html", "x-vercel-mitigated": "challenge" } });
+  const vercelChallenge = await GET(request("limit=1"));
+  assert.equal(vercelChallenge.status, 502);
+  assert.deepEqual(await vercelChallenge.json(), { error: "Campus is blocking server requests with a browser challenge. Configure API access at the Campus edge." });
   process.env.CAMPUS_API_URL = "https://campus.test/path";
   assert.equal((await GET(request("limit=1"))).status, 503);
   process.env.CAMPUS_API_URL = "https://campus.test";

@@ -20,6 +20,13 @@ const client = createLumaClient({
 });
 
 async function audit(requestId: string, details: object) {
+  if (process.env.VERCEL === "1") {
+    console.log(JSON.stringify({
+      timestamp: new Date().toISOString(), requestId,
+      event: "invitation tracking", details,
+    }));
+    return;
+  }
   await mkdir(".debug", { recursive: true });
   await appendFile(
     ".debug/luma-api.log",

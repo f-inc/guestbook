@@ -148,6 +148,16 @@ export async function runTrackingBatch(
     services.client ||
     createLumaClient({
       logger: async (requestId, event, details) => {
+        if (process.env.VERCEL === "1") {
+          console.log(JSON.stringify({
+            timestamp: new Date().toISOString(), requestId, event,
+            details: {
+              operation: "invitation tracking", path: details.path,
+              status: details.status, durationMs: details.durationMs,
+            },
+          }));
+          return;
+        }
         await mkdir(".debug", { recursive: true });
         await appendFile(
           ".debug/luma-api.log",

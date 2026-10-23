@@ -36,13 +36,16 @@ export async function GET(request: Request) {
         target.searchParams.set("limit", String(limit - matches.length));
       }
       const response = await fetch(target, {
-        headers: { Authorization: `Bearer ${key}` },
+        headers: {
+          Authorization: `Bearer ${key}`,
+          ...(process.env.API_FIREWALL_BYPASS_KEY ? { "x-finc-internal": process.env.API_FIREWALL_BYPASS_KEY } : {}),
+        },
         cache: "no-store",
         redirect: "error",
         signal,
       });
       if (!response.ok) {
-        if (response.status === 403 && response.headers.get("content-type")?.includes("text/html")) {
+        if (response.headers.get("x-vercel-mitigated") === "challenge" || response.headers.get("cf-mitigated") === "challenge" || (response.status === 403 && response.headers.get("content-type")?.includes("text/html"))) {
           return Response.json({ error: "Campus is blocking server requests with a browser challenge. Configure API access at the Campus edge." }, { status: 502, headers: { "Cache-Control": "no-store" } });
         }
         const message = response.status === 403

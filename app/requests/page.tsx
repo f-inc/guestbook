@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { FileText, Lock, RefreshCw } from "lucide-react";
 import { submissionQuery, type Submission, type SubmissionsResponse } from "./answers";
+import { readRequestsResponse } from "./response";
 
 import { CompanyIcon } from "./company-icon";
 import { EventRequestDetail, requestTitle, requestAnswers, answerText, eventDate } from "./event-request-ui";
@@ -43,11 +44,11 @@ export default function RequestsPage() {
     void (async () => {
       try {
         const response = await fetch(`/api/campus/form-submissions?${submissionQuery(query.search, query.offset)}`, { headers: key ? { "x-guestbook-key": key } : {}, cache: "no-store", signal: controller.signal });
-        const body = await response.json() as SubmissionsResponse & { error?: string };
-        if (!response.ok) {
-          if (response.status === 401) { setKey(null); setAuthError("Your session expired. Enter your Guestbook key."); }
-          throw new Error(body.error || "Unable to load requests.");
+        if (response.status === 401 && !controller.signal.aborted) {
+          setKey(null); setAuthError("Your session expired. Enter your Guestbook key.");
+          return;
         }
+        const body = await readRequestsResponse(response);
         if (!Array.isArray(body.data) || !body.pagination || !(body.pagination.nextOffset === null || (Number.isInteger(body.pagination.nextOffset) && body.pagination.nextOffset > query.offset))) throw new Error("Campus returned an invalid response.");
         if (!controller.signal.aborted) { setResult(body); setSelected(body.data[0] || null); }
       } catch (cause) { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "Unable to load requests."); }

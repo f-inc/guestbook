@@ -20,7 +20,12 @@ full event history. Keep pilot snapshots separate from `finc_luma_schema_version
 and the production projection. Next, run the deployed read-only preview for the
 same five exact emails, review each full indexed projection and coverage, then
 allowlist only those addresses for the worker canary. Keep source/backfill/full
-rollout off initially. The private pilot audit contains their identities and the
+rollout off initially. The migration does not enqueue existing history. After
+explicit approval for these five queue writes, the database operator can call
+the migration's `SELECT cio_mark_email($1, true)` once per previewed address,
+using bound parameters and exactly the same five-email allowlist. This queues
+only those projections without changing any source registration or running the
+global seed. The private pilot audit contains their identities and the
 rollback instructions; do not commit contact snapshots or credentials here.
 
 ## What this implements

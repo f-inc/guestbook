@@ -311,6 +311,13 @@ Verify `api.f.inc` from the actual Guestbook runtime before changing edge rules.
 
 Open `/requests` from the Guestbook header. Guestbook authentication is required. The page always filters to `event-request` and supports case-insensitive partial search across all submitted values, including nested custom answers. Search returns up to 25 matches per page, scanning at most 20 upstream pages per batch; “Next” resumes scanning when more records remain. Select a request to see its event details, organizer, and additional answers. The three initial example submissions are marked “Sample” by explicit request ID. No submissions are imported into the database or persisted in browser storage.
 
+Each selection has a shareable URL such as `/requests?request=<submission-id>`.
+Search (`q`) and page offset (`offset`) also stay in the URL. Opening a link,
+refreshing, and browser Back/Forward restore the selected request. If new
+submissions shift the request off its original page, the detail view searches
+for its exact ID using the same bounded search; “Continue looking” resumes an
+unfinished lookup. A missing request shows an error instead of a different event.
+
 Campus form versions 6–8 identify portfolio/in-network hosting requests. These show
 “In-network event request” and “Event budget” for food, equipment, and other costs
 the host is covering; “None” is a valid answer. Versions 1–5 retain “Space budget”.

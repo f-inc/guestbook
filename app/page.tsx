@@ -4041,6 +4041,7 @@ export default function Home() {
           <kbd aria-label="Command K"><span aria-hidden="true">⌘</span><span>K</span></kbd>
         </button>
         <div className="topbar-actions">
+          <a className="button" href="/admin">API access</a>
           <a className="button" href="/requests"><FileText size={17} aria-hidden="true" />Requests</a>
           <button className="button" type="button" onClick={openTagSettings}>
             <Tag size={17} aria-hidden="true" />

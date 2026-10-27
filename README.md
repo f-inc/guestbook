@@ -348,3 +348,11 @@ The current Campus Vercel firewall challenges server calls with HTTP 429 and `x-
 The former `/form-submissions` URL redirects to `/requests`. Verified that the Campus event request form posts to `/api/event-requests` and persists `form_key=event-request`; the live integration returned two matching requests during verification.
 
 Requests display company and event names together. Company icons use a protected, uncached server route: Google’s domain favicon service first, comparing against its generic placeholder, then the company LinkedIn page image when available. Redirects and image hosts are bounded to the provider hosts. If both sources fail or LinkedIn blocks access, company initials appear.
+
+## External integrations
+
+Use `/admin` to create read-only, permission-scoped integration API keys for
+email platforms and other server software. The versioned endpoints are
+`GET /api/v1/events` and `GET /api/v1/events/{eventId}/guests`.
+See [the integration API guide](docs/integration-api.md) for permissions,
+filters, pagination, examples, and the required additive migration.

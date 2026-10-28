@@ -1,0 +1,13 @@
+.git
+.vercel
+.next
+node_modules
+.debug
+.env*
+*.tsbuildinfo
+**/.env*
+**/.dev.vars*
+**/.wrangler
+**/.local
+**/node_modules
+**/wrangler.local.jsonc

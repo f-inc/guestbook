@@ -32,7 +32,7 @@ export default function Admin() {
     setKeys(result.data); setAdminKey(key);
   }
   useEffect(() => {
-    const saved = localStorage.getItem("guestbook.key") || localStorage.getItem("guestbook.session-key");
+    const saved = localStorage.getItem("guestbook.key") || localStorage.getItem("guestbook.sessionKey");
     if (saved) { setDraft(saved); load(saved).catch(e => setError(e.message)); }
   }, []);
   async function unlock(event: FormEvent) {
@@ -90,7 +90,7 @@ export default function Admin() {
           <small>Created {new Date(key.createdAt).toLocaleDateString()}{key.expiresAt ? ` · Expires ${new Date(key.expiresAt).toLocaleString()}` : " · No expiration"}</small>
         </div>{!key.revokedAt && <button disabled={busy} onClick={() => revoke(key.id)}>Revoke</button>}
       </article>)}</div>}</section>
-      <section><h2>Use the API</h2><p>Server API base URL:</p><pre>https://guestbook-production-e5fe.up.railway.app/api/v1</pre><p>Use this service address for server requests to avoid the browser challenge on the custom domain.</p><p>Send your key in the Authorization header. Follow pagination.nextCursor until it is null to retrieve every result.</p>
+      <section><h2>Use the API</h2><p>Server API base URL:</p><pre>https://guestbook.f.inc/api/v1</pre><p>Use your Guestbook domain for all API requests.</p><p>Send your key in the Authorization header. Follow pagination.nextCursor until it is null to retrieve every result.</p>
         <pre>{`GET /api/v1/events\nGET /api/v1/events/{eventId}/guests\nGET /api/v1/events/{eventId}/guests?checked_in=true\nGET /api/v1/events/{eventId}/guests?status=waitlisted\n\nAuthorization: Bearer YOUR_API_KEY`}</pre>
         <p>Every guest request fetches all Luma guest pages before applying filters. Responses include live status, Luma approval status, local operator decision, and registration/check-in timestamps. Email addresses require the email permission.</p>
       </section>

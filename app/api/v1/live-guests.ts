@@ -50,10 +50,12 @@ async function log(requestId: string, event: string, details: Record<string, any
   const safe: Record<string, unknown> = {};
   for (const key of ["path", "status", "page", "pages", "entries", "pageEntries", "totalEntries", "truncated", "durationMs", "hasMore", "hasCursor", "credentialType"])
     if (["string", "number", "boolean"].includes(typeof details[key])) safe[key] = details[key];
+  const entry = JSON.stringify({ timestamp: new Date().toISOString(), requestId, event: `integration ${event}`, details: safe });
+  console.info("[luma-api]", entry);
   const filename = process.env.GUESTBOOK_DEBUG_LOG_PATH || path.join(process.cwd(), ".debug", "luma-api.log");
   try {
     await mkdir(path.dirname(filename), { recursive: true });
-    await appendFile(filename, JSON.stringify({ timestamp: new Date().toISOString(), requestId, event: `integration ${event}`, details: safe }) + "\n");
+    await appendFile(filename, entry + "\n");
   } catch { /* Debug logging must not prevent the read. */ }
 }
 

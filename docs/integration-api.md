@@ -1,12 +1,16 @@
 # Guestbook integration API (v1)
 
-Server-to-server base URL: `https://guestbook-production-e5fe.up.railway.app/api/v1`.
+Base URL: `https://guestbook.f.inc/api/v1`.
 
-Use `https://guestbook.f.inc/admin` for key management. The custom domain currently
-presents Cloudflare browser challenges to command-line/server requests. The
-Railway service address reaches the same application and enforces the same API
-keys and permissions, without requiring a browser challenge. Until a dedicated
-Cloudflare API rule is configured, use the Railway address for integrations.
+Guestbook runs on the existing Founders, Inc. Vercel project. Use
+`https://guestbook.f.inc/admin` for API key management; the saved Guestbook login
+is reused when you open `/admin` on the same domain. Browser storage is scoped
+to the domain, so a login saved on another host is not shared automatically.
+
+If a server request receives an HTML browser challenge instead of JSON, the
+custom domain’s Cloudflare rule must allow the integration API routes through
+while the Guestbook API continues to enforce Bearer authentication. Do not treat
+an HTML challenge or a failed request as an empty guest list.
 
 ## Setup and administration
 
@@ -42,10 +46,10 @@ All responses use `Cache-Control: private, no-store`. Use this API server to
 server; do not embed integration secrets in public JavaScript.
 
 ```sh
-curl 'https://guestbook-production-e5fe.up.railway.app/api/v1/events?limit=100' \
+curl 'https://guestbook.f.inc/api/v1/events?limit=100' \
   -H "Authorization: Bearer $GUESTBOOK_API_KEY"
 
-curl 'https://guestbook-production-e5fe.up.railway.app/api/v1/events/evt-example/guests?checked_in=true' \
+curl 'https://guestbook.f.inc/api/v1/events/evt-example/guests?checked_in=true' \
   -H "Authorization: Bearer $GUESTBOOK_API_KEY"
 ```
 
@@ -132,6 +136,14 @@ access, 404 for an unknown event, and 500/503 for unavailable database setup.
 Errors return `{ error: "..." }` without database details.
 
 ## Deployment
+
+The canonical production host is the existing `f-inc/guestbook` Vercel project.
+Link the normal checkout with `vercel link --project guestbook --scope f-inc`,
+then deploy with `vercel deploy --prod --scope f-inc`. The build generates the
+matching Prisma client. `.vercelignore` excludes local credentials, logs, worker
+state, and build output from uploads. Live Luma diagnostics also go to the
+Vercel runtime logs, since the application directory is read-only there.
+
 
 The migration `prisma/manual-migrations/20261027_add_integration_api_keys.sql`
 creates only `integration_api_keys`. Tests do not apply migrations. Verify the target database, take a suitable schema backup, review the

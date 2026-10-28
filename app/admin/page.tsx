@@ -7,7 +7,7 @@ const serif = Instrument_Serif({ weight: "400", subsets: ["latin"] });
 type Key = { id: string; name: string; prefix: string; scopes: string[]; eventIds: string[]; createdAt: string; expiresAt: string | null; revokedAt: string | null };
 const permissions = [
   ["events:read", "Read events", "List event details and sync freshness."],
-  ["guests:read", "Read guest statuses", "Read names, registration, approval, and attendance."],
+  ["guests:read", "Read guest statuses", "Read names, registration, approval, attendance, and person event history."],
   ["guests:email", "Read email addresses", "Include email addresses for your email platform."],
 ];
 export default function Admin() {
@@ -91,8 +91,8 @@ export default function Admin() {
         </div>{!key.revokedAt && <button disabled={busy} onClick={() => revoke(key.id)}>Revoke</button>}
       </article>)}</div>}</section>
       <section><h2>Use the API</h2><p>Server API base URL:</p><pre>https://guestbook.f.inc/api/v1</pre><p>Use your Guestbook domain for all API requests.</p><p>Send your key in the Authorization header. Follow pagination.nextCursor until it is null to retrieve every result.</p>
-        <pre>{`GET /api/v1/events\nGET /api/v1/events/{eventId}/guests\nGET /api/v1/events/{eventId}/guests?checked_in=true\nGET /api/v1/events/{eventId}/guests?status=waitlisted\n\nAuthorization: Bearer YOUR_API_KEY`}</pre>
-        <p>Every guest request fetches all Luma guest pages before applying filters. Responses include live status, Luma approval status, local operator decision, and registration/check-in timestamps. Email addresses require the email permission.</p>
+        <pre>{`GET /api/v1/events\nGET /api/v1/events/{eventId}/guests\nGET /api/v1/events/{eventId}/guests?checked_in=true\nGET /api/v1/events/{eventId}/guests?status=waitlisted\nGET /api/v1/people/{personId}/events?limit=10\n\nAuthorization: Bearer YOUR_API_KEY`}</pre>
+        <p>Each event guest request fetches all Luma guest pages before applying filters. Responses include live status, Luma approval status, local operator decision, and registration/check-in timestamps. Email addresses require the email permission. Person history requires event and guest-read permissions and reads directly from Guestbook’s database, with 10 events per page by default and no Luma refresh.</p>
       </section>
     </>}
   </main>;

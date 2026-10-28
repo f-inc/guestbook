@@ -353,6 +353,7 @@ Requests display company and event names together. Company icons use a protected
 
 Use `/admin` to create read-only, permission-scoped integration API keys for
 email platforms and other server software. The versioned endpoints are
-`GET /api/v1/events` and `GET /api/v1/events/{eventId}/guests`.
+`GET /api/v1/events`, `GET /api/v1/events/{eventId}/guests`, and
+`GET /api/v1/people/{personId}/events` for a single person’s event history.
 See [the integration API guide](docs/integration-api.md) for permissions,
 filters, pagination, examples, and the required additive migration.

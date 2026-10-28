@@ -30,12 +30,16 @@ export async function authorize(request: Request, scope: Scope, db?: ReturnType<
 export function checkEventAccess(key: ApiKey, eventId: string) {
   if (key.eventIds.length && !key.eventIds.includes(eventId)) fail("This API key cannot access this event.", 403);
 }
-export function pagination(params: URLSearchParams, allowed: string[] = []) {
+export function pagination(
+  params: URLSearchParams,
+  allowed: string[] = [],
+  { defaultLimit = 100, maxLimit = 500 }: { defaultLimit?: number; maxLimit?: number } = {},
+) {
   for (const name of params.keys()) {
     if (!["limit", "cursor", ...allowed].includes(name) || params.getAll(name).length !== 1) fail(`Invalid query parameter: ${name}.`);
   }
-  const limitText = params.get("limit") ?? "100";
-  if (!/^\d+$/.test(limitText) || +limitText < 1 || +limitText > 500) fail("limit must be an integer from 1 to 500.");
+  const limitText = params.get("limit") ?? String(defaultLimit);
+  if (!/^\d+$/.test(limitText) || +limitText < 1 || +limitText > maxLimit) fail(`limit must be an integer from 1 to ${maxLimit}.`);
   const cursor = params.get("cursor");
   if (cursor !== null && (!cursor.length || cursor.length > 256)) fail("Invalid cursor.");
   return { limit: +limitText, cursor };

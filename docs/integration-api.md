@@ -30,7 +30,7 @@ Permissions:
 | Permission | Access |
 | --- | --- |
 | `events:read` | List events and sync metadata |
-| `guests:read` | Read event guest IDs, names, statuses, and timestamps |
+| `guests:read` | Read guest identities, statuses, timestamps, and person event history (history also requires `events:read`) |
 | `guests:email` | Also return email addresses; requires `guests:read` |
 
 Optional event IDs restrict both event listings and guest access. An empty list
@@ -119,10 +119,58 @@ as empty lists. Errors include a `requestId` for `.debug/luma-api.log`.
 Registration is not email consent; the email platform must continue applying
 its own suppression and unsubscribe rules.
 
+## GET /people/{personId}/events
+
+Fetch one person's event history. Use the `personId` returned by the event guest
+endpoint, URL-encoding it in the path. Both `events:read` and `guests:read` are
+required; `guests:email` controls email fields as usual. Existing keys with these
+permissions work without being replaced. Email addresses and names are not
+accepted as person IDs.
+
+```sh
+curl 'https://guestbook.f.inc/api/v1/people/usr-example/events?limit=10' \
+  -H "Authorization: Bearer $GUESTBOOK_API_KEY"
+```
+
+Person history reads directly from Guestbook's database. It makes no Luma
+requests, scans no calendars or contacts, and writes no data. Only requests for
+a specific event's guest list perform a live Luma refresh.
+
+Each history record contains the event's ID, title, date, start/end time,
+location, URL, and catalog-active flag under `event`, plus the person's guest
+ID, name, stored status, approval status, operator decision, registration/check-in
+timestamps, and `syncedAt`. Check-in timestamps take precedence as `checked_in`;
+no-show or other status changes are not inferred from the current time.
+`source: "luma-index"` and `coverage: "indexed-person-events"` make the data
+source explicit. `loadedAt` is when the database response was read, not when
+Luma was last refreshed; use each record's `syncedAt` for index freshness.
+
+The indexed memberships must belong to the requested person and to the key's
+allowed event IDs. No other person's guest record is returned. Email addresses
+are selected and returned only with `guests:email`. Internal email-based person
+IDs and email display-name fallbacks are not exposed to keys without that
+permission. Guest-only IDs (`guest:{lumaGuestId}`) resolve to the indexed person
+within the key's event access before their other memberships are queried.
+Where multiple indexed rows match the same person/event, the most recently
+synced row is selected, with person ID as a stable tie-breaker.
+
+Pages default to 10 events and accept `limit` from 1 to 500. Follow
+`pagination.nextCursor` until null, preserving `personId` and `limit`. Results
+are ordered by event ID. Normal person lookups use the existing `personId` and
+`lumaUserIdLower` indexes; the database loads only the selected event details
+and matching memberships. Unknown people and people with no accessible indexed
+memberships return an empty page without revealing their existence elsewhere.
+
+The endpoint cannot discover unindexed registrations or see Luma changes that
+have not reached Guestbook's index. A removed registration can remain in history
+until the existing indexing pipeline reconciles it. This API never initiates
+that reconciliation or waits for Luma.
+
 ## Pagination and errors
 
-Both endpoints return `{ data: [...], pagination: { hasMore, nextCursor } }`.
-`limit` defaults to 100 and accepts integers 1–500. Pass `nextCursor` back as
+All list endpoints return `{ data: [...], pagination: { hasMore, nextCursor } }`.
+For event and guest lists, `limit` defaults to 100 and accepts integers 1–500;
+person history defaults to 10 and accepts integers 1–500. Pass `nextCursor` back as
 `cursor`, preserving the filters, until it is null. Events sort by event ID;
 guests sort by stable Luma user ID (or `guest:{lumaGuestId}` when no user ID
 exists) within an event. Guest IDs never fall back to email addresses. URL-encode cursors and event IDs.

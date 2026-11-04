@@ -14,3 +14,14 @@
 - The log is redacted by design. Do not add logs for `LUMA_API_KEY`, authorization headers, raw invite recipient lists, or full contact datasets.
 - Guest loading, trace scans, and DB sync should stay bounded and explicit: no contacts/list calls and no automatic full-calendar guest scans outside the `/api/luma/sync` job limits.
 - The Luma activity index is Prisma-backed. Check `prisma/schema.prisma` before changing indexed event/person/guest activity fields.
+
+## Local development ports
+
+- The development server for **guestbook** uses **http://localhost:3030**.
+- Run `npm run dev` in the normal checkout; its development script sets port **3030** explicitly. Do not use localhost:3000 or silently increment ports.
+- Reuse an existing server for this checkout. If the assigned port is occupied by an unrelated process, inspect ownership rather than stopping another project's server.
+- Port changes must update the development script, README, environment examples, and local integration/callback URLs together. Keep real credentials in ignored local environment files; never commit them or change production URLs for local development.
+
+On Haseab's BB machine, the shared registry is `~/.bb/dev-ports.json` and
+`~/.bb/bin/project-dev guestbook` uses the same assignment. These personal
+files are optional; collaborators can use the repository commands above.

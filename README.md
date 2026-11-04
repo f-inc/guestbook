@@ -63,7 +63,7 @@ npx prisma db execute --file prisma/manual-migrations/20260903_preserve_accepted
 npm run dev
 ```
 
-Open `http://localhost:3000`.
+Open `http://localhost:3030`.
 
 ## Data Refresh
 
@@ -72,7 +72,7 @@ Guestbook refreshes the lightweight Luma event catalog on app load and when the 
 The former hourly full-sync Worker is archived. The `/api/luma/sync` endpoint remains available as a deliberate recovery or backfill command:
 
 ```bash
-curl -X POST http://localhost:3000/api/luma/sync \
+curl -X POST http://localhost:3030/api/luma/sync \
   -H "x-guestbook-key: $GUESTBOOK_KEY" \
   -H "Authorization: Bearer $GUESTBOOK_SYNC_SECRET"
 ```
@@ -88,7 +88,7 @@ The managed archetypes are `🚀 Superpower User`, `⚡ Power User`, `🎪 Festi
 Preview a full classification without writing assignments:
 
 ```bash
-curl -X POST http://localhost:3000/api/tags/auto \
+curl -X POST http://localhost:3030/api/tags/auto \
   -H "x-guestbook-key: $GUESTBOOK_KEY" \
   -H "Content-Type: application/json" \
   --data '{"scope":"all","dryRun":true}'
@@ -359,3 +359,10 @@ email platforms and other server software. The versioned endpoints are
 `GET /api/v1/people/{personId}/events` for a single person’s event history.
 See [the integration API guide](docs/integration-api.md) for permissions,
 filters, pagination, examples, and the required additive migration.
+
+## Local development ports
+
+- The development server for **guestbook** uses **http://localhost:3030**.
+- Run `npm run dev` in the normal checkout; its development script sets port **3030** explicitly. Do not use localhost:3000 or silently increment ports.
+- Reuse an existing server for this checkout. If the assigned port is occupied by an unrelated process, inspect ownership rather than stopping another project's server.
+- Port changes must update the development script, README, environment examples, and local integration/callback URLs together. Keep real credentials in ignored local environment files; never commit them or change production URLs for local development.

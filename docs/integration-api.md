@@ -1,5 +1,7 @@
 # Guestbook integration API (v1)
 
+Public reference: [guestbook.f.inc/api-docs](https://guestbook.f.inc/api-docs). The public page is generated from this guide; edit this file when the API contract changes. API key management remains at `/admin`.
+
 Base URL: `https://guestbook.f.inc/api/v1`.
 
 Guestbook runs on the existing Founders, Inc. Vercel project. Use
@@ -55,6 +57,11 @@ curl 'https://guestbook.f.inc/api/v1/events/evt-example/guests?checked_in=true' 
 
 ## GET /events
 
+```sh
+curl 'https://guestbook.f.inc/api/v1/events?limit=100' \
+  -H "Authorization: Bearer $GUESTBOOK_API_KEY"
+```
+
 Requires `events:read`. Includes every indexed event allowed by the key,
 including inactive events (`catalogActive: false`). Returns explicit fields only:
 `eventId`, `title`, `date`, `startsAt`, `endsAt`, `visibility`, `location`,
@@ -71,6 +78,13 @@ first, then person email, otherwise null). Without that permission the email
 field is omitted entirely. Phone numbers, private notes, raw payloads, profile
 answers, and social links are never exposed.
 
+### Filter the guest list
+
+```sh
+curl 'https://guestbook.f.inc/api/v1/events/evt-example/guests?checked_in=true' \
+  -H "Authorization: Bearer $GUESTBOOK_API_KEY"
+```
+
 Optional filters combine with AND:
 
 | Parameter | Meaning |
@@ -80,6 +94,8 @@ Optional filters combine with AND:
 | `operator_decision` | Exact stored Guestbook operator decision |
 | `checked_in` | `true` if a live check-in timestamp exists; `false` for all others |
 | `registered` | `true` if `registeredAt` exists; `false` if it is null |
+
+### Understand guest statuses
 
 Live approval statuses map to Guestbook status names (`approved` → `going`,
 `pending_approval` → `registered`, `waitlist` → `waitlisted`), with ticket
@@ -95,6 +111,8 @@ A decline alone does not prove whether a guest declined or an operator denied
 them; inspect `lumaApprovalStatus` and `operatorDecision` as well. Statuses such
 as no-show are not inferred at request time.
 
+### Response and freshness
+
 Guest responses include `source: "luma-live"`, `fetchedAt`, `complete: true`,
 `totalGuests` (the number retrieved from Luma before filtering), `requestId`,
 and `event: { eventId }`. `complete` means the entire upstream list was read
@@ -105,6 +123,8 @@ The guest endpoint never serves a cached guest snapshot or silently falls back
 to the database. Every request, including each continuation page, makes a fresh
 Luma read. The event-list endpoint continues to read the indexed event catalog;
 its `syncedAt`/`syncState` describe that index, not the live guest result.
+
+### Limits and upstream failures
 
 Reads are bounded to one event, 10,000 guests, 200 upstream pages, 45 seconds,
 and three simultaneous live scans per server process. These limits protect
@@ -136,6 +156,8 @@ Person history reads directly from Guestbook's database. It makes no Luma
 requests, scans no calendars or contacts, and writes no data. Only requests for
 a specific event's guest list perform a live Luma refresh.
 
+### What the response includes
+
 Each history record contains the event's ID, title, date, start/end time,
 location, URL, and catalog-active flag under `event`, plus the person's guest
 ID, name, stored status, approval status, operator decision, registration/check-in
@@ -145,6 +167,8 @@ no-show or other status changes are not inferred from the current time.
 source explicit. `loadedAt` is when the database response was read, not when
 Luma was last refreshed; use each record's `syncedAt` for index freshness.
 
+### Identity and access
+
 The indexed memberships must belong to the requested person and to the key's
 allowed event IDs. No other person's guest record is returned. Email addresses
 are selected and returned only with `guests:email`. Internal email-based person
@@ -153,6 +177,8 @@ permission. Guest-only IDs (`guest:{lumaGuestId}`) resolve to the indexed person
 within the key's event access before their other memberships are queried.
 Where multiple indexed rows match the same person/event, the most recently
 synced row is selected, with person ID as a stable tie-breaker.
+
+### Pagination and coverage
 
 Pages default to 10 events and accept `limit` from 1 to 500. Follow
 `pagination.nextCursor` until null, preserving `personId` and `limit`. Results
@@ -178,10 +204,22 @@ Pagination is not a transactional snapshot: each guest page re-reads Luma, so ne
 export may require another pass. The email platform should deduplicate by
 `personId` within the event and by email before sending.
 
-Unknown, repeated, and malformed query parameters return 400. Other responses:
-401 for invalid/expired/revoked credentials, 403 for missing permission or event
-access, 404 for an unknown event, and 500/503 for unavailable database setup.
-Errors return `{ error: "..." }` without database details.
+### Error responses
+
+Errors return `{ error: "..." }` without database details. Never treat a failed request as an empty list.
+
+| HTTP status | Meaning |
+| --- | --- |
+| `400` | Unknown, repeated, or malformed query parameters, or an invalid ID |
+| `401` | Missing, invalid, expired, or revoked credentials |
+| `403` | Missing permission or event access |
+| `404` | Unknown event |
+| `500` / `503` | Unavailable database setup |
+| `502` | Upstream Luma failure on a live guest read |
+| `503` | Missing Luma credentials, rate limit, or concurrency limit |
+| `504` | Live Luma request timed out |
+
+Retry `503` and `504` with backoff. If a server request receives an HTML browser challenge instead of JSON, the custom domain’s Cloudflare rule must allow integration API routes through; Bearer authentication is still required.
 
 ## Deployment
 

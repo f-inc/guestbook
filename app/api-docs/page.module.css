@@ -1,0 +1,71 @@
+.page { background: #fff; color: #000; min-height: 100dvh; padding: 24px max(24px, calc((100vw - 1240px) / 2)); font-size: 16px; line-height: 1.5; letter-spacing: -.02em; -webkit-font-smoothing: antialiased; }
+.page a { text-underline-offset: 4px; }
+.page a:focus-visible, .page button:focus-visible, .page summary:focus-visible { outline: 2px solid #333; outline-offset: 5px; }
+.skip { position: fixed; top: -100px; background: #fff; padding: 15px 20px; z-index: 10; }
+.skip:focus { top: 10px; }
+.header { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.wordmark { font-weight: 500; letter-spacing: -.04em; text-decoration: none; }
+.wordmark span { font-weight: 400; color: rgb(0 0 0 / .4); }
+.button { padding: 15px 20px; border-radius: 100px; background: #f1f1f1; font-weight: 500; letter-spacing: -.04em; text-decoration: none; white-space: nowrap; }
+.button:hover, .card:hover { background: #e7e7e7; }
+.hero { display: grid; grid-template-columns: 1fr 1fr; align-items: center; gap: 75px; padding: 100px 0 50px; }
+.eyebrow { font-size: 12px; font-weight: 500; letter-spacing: -.02em; }
+.eyebrow span { display: inline-block; margin-left: 15px; color: rgb(0 0 0 / .4); }
+.hero h1 { font-size: clamp(48px, 6vw, 76px); line-height: 1; letter-spacing: 0; font-weight: 400; -webkit-text-stroke: .05em currentColor; margin: 24px 0; }
+.lead { font-size: 20px; line-height: 1.4; max-width: 440px; }
+.description { margin-top: 20px; max-width: 440px; }
+.quickstart { background: #f1f1f1; border-radius: 15px; padding: 24px; min-width: 0; }
+.quickstart h2 { font-size: 24px; font-weight: 500; margin: 20px 0 10px; line-height: 1.2; }
+.quickstart .codeBlock { background: #fff; margin: 24px 0 15px; }
+.caption { font-size: 14px; color: rgb(0 0 0 / .4); letter-spacing: -.04em; }
+.base { display: flex; flex-wrap: wrap; gap: 15px 24px; align-items: center; padding-bottom: 24px; }
+.base span { font-size: 12px; font-weight: 500; }
+.page code, .page pre { font-family: var(--docs-mono), monospace; letter-spacing: 0; }
+.base code { font-size: 14px; overflow-wrap: anywhere; }
+.overview { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; }
+.card { background: #f1f1f1; border-radius: 15px; padding: 24px; text-decoration: none; transition: background 140ms; }
+.cardTop { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+.badge { display: inline-block; background: rgb(0 255 217 / .1); border-radius: 100px; padding: 4px 10px; font-size: 12px; font-weight: 500; letter-spacing: -.04em; }
+.card h2 { font-size: 20px; font-weight: 500; line-height: 1.2; margin-bottom: 10px; }
+.card .caption { display: block; margin-top: 24px; }
+.layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 75px; padding-top: 75px; }
+.sidebar { align-self: start; position: sticky; top: 24px; }
+.sidebar nav { display: grid; gap: 5px; }
+.sidebar .eyebrow { margin-bottom: 15px; }
+.sidebar nav a { padding: 8px 10px; border-radius: 8px; text-decoration: none; }
+.sidebar nav a:hover { background: #f1f1f1; }
+.sidebarNote { margin: 24px 10px 0; font-size: 14px; }
+.reference { min-width: 0; }
+.chapter { scroll-margin-top: 24px; margin-bottom: 75px; }
+.chapter h2 { font-size: clamp(34px, 4vw, 48px); line-height: 1; font-weight: 400; letter-spacing: 0; -webkit-text-stroke: .05em currentColor; margin-bottom: 24px; }
+.endpoint { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 15px 20px; background: #f1f1f1; border-radius: 15px; margin-bottom: 24px; }
+.endpoint code { font-size: 14px; overflow-wrap: anywhere; }
+.source { font-size: 12px; margin-left: auto; color: rgb(0 0 0 / .4); }
+.prose > p, .prose > ul, .prose > ol { margin: 20px 0; max-width: 550px; line-height: 1.7; }
+.prose > :first-child { margin-top: 0; }
+.prose code { background: #f1f1f1; border-radius: 4px; padding: 2px 4px; font-size: .8em; overflow-wrap: anywhere; }
+.prose strong { font-weight: 500; }
+.codeBlock { background: #f1f1f1; border-radius: 15px; margin: 24px 0; min-width: 0; overflow: hidden; }
+.codeTools { display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 10px 15px 0; font-size: 12px; }
+.codeTools button { background: #fff; color: #000; border: 0; border-radius: 100px; padding: 5px 15px; font-weight: 500; }
+.quickstart .codeTools button { background: #f1f1f1; }
+.codeTools button:hover { background: #e7e7e7; }
+.codeBlock pre { padding: 15px 20px 24px; overflow-x: auto; font-size: 12px; line-height: 1.8; margin: 0; }
+.codeBlock pre code { background: none; padding: 0; font-size: inherit; }
+.tableScroll { overflow-x: auto; margin: 24px 0; background: #f1f1f1; border-radius: 15px; padding: 10px 20px; }
+.tableScroll table { width: 100%; text-align: left; font-size: 14px; border-collapse: collapse; }
+.tableScroll th { font-weight: 500; }
+.tableScroll td, .tableScroll th { vertical-align: top; padding: 15px 10px; }
+.tableScroll td:first-child { min-width: 150px; }
+.prose ul, .prose ol { padding-left: 24px; list-style: revert; }
+.prose li { margin: 8px 0; }
+.chapter details { background: #f1f1f1; padding: 24px; border-radius: 15px; }
+.chapter summary { font-weight: 500; }
+.chapter details[open] summary { margin-bottom: 24px; }
+.footer { display: flex; gap: 24px; justify-content: space-between; align-items: center; padding: 24px 0; font-size: 14px; }
+.footer span { color: rgb(0 0 0 / .4); }
+@media (max-width: 1000px) { .hero { gap: 24px; } .layout { grid-template-columns: 180px minmax(0, 1fr); gap: 24px; } }
+@media (max-width: 720px) { .page { padding: 20px; } .header { font-size: 14px; } .button { padding: 10px 15px; } .wordmark span { display: none; } .hero { grid-template-columns: 1fr; padding-top: 50px; gap: 50px; } .overview { grid-template-columns: 1fr; } .card { display: grid; grid-template-columns: 1fr; } .cardTop { margin-bottom: 15px; } .card .caption { margin-top: 15px; } .layout { grid-template-columns: 1fr; gap: 50px; padding-top: 50px; } .sidebar { position: static; } .sidebar nav { display: flex; flex-wrap: wrap; gap: 5px; } .sidebar .eyebrow { width: 100%; } .sidebar nav a { background: #f1f1f1; border-radius: 100px; padding: 8px 15px; font-size: 14px; } .sidebarNote { display: none; } .chapter { margin-bottom: 50px; } .source { margin-left: 0; } .footer { flex-wrap: wrap; } }
+@media (prefers-reduced-motion: reduce) { .card { transition: none; } }
+
+.prose h3 { font-size: 20px; line-height: 1.2; font-weight: 500; margin: 50px 0 20px; }

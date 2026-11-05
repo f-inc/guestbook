@@ -110,7 +110,7 @@ const guestActionIcons = {
 };
 
 const guestStatusMessagePlaceholders = {
-  declined: "sorry, couldn't accept your registration to open campus for today!\n\nI had to prioritize the 10 registrations with registration answers that seemed more aligned to what we were looking for!",
+  declined: "sorry, couldn't accept your registration to open campus for today!\n\nI had to prioritize the 10 registrations with registration answers that looked more aligned to what we were looking for!",
   going: "you're in! please come at 2pm sharp\n\nLocation instructions here: https://f.inc/2b",
 };
 

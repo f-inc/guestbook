@@ -116,6 +116,32 @@ Run the test suite with:
 npm test
 ```
 
+### People search indexes
+
+Command K returns each search page, including profiles, comments and activity
+counts, in one database query. Recent query/filter pages are cached in the browser
+for up to one minute (20 pages maximum); guest edits and key changes clear them.
+
+The additive migration
+`prisma/manual-migrations/20261105_add_people_search_document_v2.sql` creates a
+trigram index matching the current name/email/title/bio expression, plus a comment
+body index. The legacy profile index can still include `crm_notes`, which prevents
+the current query from using it. Prepare and review the migration before applying
+it, and obtain explicit approval for a production or unverified database.
+
+Apply with an autocommit PostgreSQL client, outside a transaction: both statements
+use `CREATE INDEX CONCURRENTLY` so ordinary writes can continue. Existing trigram
+indexes already require `pg_trgm`. Check `pg_index.indisvalid` for both new indexes
+after completion; an interrupted build can leave an invalid index that
+`IF NOT EXISTS` will skip. Keep the legacy index and column. Recovery consists of
+dropping only the two new indexes with `DROP INDEX CONCURRENTLY`; no guest records
+are changed by this migration.
+
+The database search regression test runs only when
+`PEOPLE_SEARCH_TEST_DATABASE_URL` names an isolated PostgreSQL cluster under
+`/private/tmp/guestbook-search-test-*`. It verifies the server's data directory
+before creating fixtures and never falls back to `DB_URL`.
+
 ## Invitation tracking
 
 Invitation outcomes are cached in Postgres. The selected events use Luma’s private

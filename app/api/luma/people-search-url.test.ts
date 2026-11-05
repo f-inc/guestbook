@@ -24,6 +24,7 @@ test("restores the people modal with search, tag rules, and comments", () => {
       includedTags: ["💎 Referred", "Reliable"],
       excludedTags: ["Skip"],
       tagMode: "all" as const,
+      tagScope: "current" as const,
       comments: "without" as const,
     },
   };
@@ -51,5 +52,5 @@ test("defaults and bounds malformed shared filters", () => {
   const state = parsePeopleSearchUrl(`?people=no&people_tag=A&people_tag=A&people_tag=&people_comments=bad&people_tag_mode=bad&people_search=${"a".repeat(200)}`);
   assert.equal(state.open, false);
   assert.equal(state.query.length, 120);
-  assert.deepEqual(state.filters, { includedTags: ["A"], excludedTags: [], tagMode: "any", comments: "any" });
+  assert.deepEqual(state.filters, { includedTags: ["A"], excludedTags: [], tagMode: "any", tagScope: "current", comments: "any" });
 });

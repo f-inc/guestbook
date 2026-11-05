@@ -20,6 +20,7 @@ export async function GET(request: Request) {
       includedTags,
       excludedTags,
       tagMode,
+      tagScope,
       comments,
       hasFilters,
     } = parsePeopleSearchQuery(new URL(request.url).searchParams);
@@ -34,6 +35,7 @@ export async function GET(request: Request) {
           includedTags,
           excludedTags,
           tagMode,
+          tagScope,
           comments,
         })));
   } catch (error) {

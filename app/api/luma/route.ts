@@ -293,6 +293,9 @@ export async function GET(request: Request) {
       const guestQuery = parseGuestListQuery(url.searchParams);
       const prioritizePage = url.searchParams.get("guest_mode") === "page";
       const requiresIndexedPage = guestQueryRequiresIndex(guestQuery);
+      if (guestQuery.tagScope === "ever" && !hasLumaDb()) {
+        return Response.json({ error: "Historical manual tag filters require the Luma index.", requestId }, { status: 503 });
+      }
       if (guestQuery.latestTagId && !hasLumaDb()) {
         return Response.json({ error: "Latest-tag attendee filters require the Luma index.", requestId }, { status: 503 });
       }
@@ -369,6 +372,9 @@ export async function GET(request: Request) {
           await debugLog(requestId, "event guests index empty", { eventId });
         } catch (error) {
           await debugLog(requestId, "event guests index skipped", { eventId, status: error.status || 500, message: error.message }, "error");
+          if (guestQuery.tagScope === "ever") {
+            return Response.json({ error: "Unable to load historical manual tag matches.", requestId }, { status: error.status || 500 });
+          }
           if (guestQuery.latestTagId) {
             return Response.json({ error: "Unable to load the latest-tag attendee group.", requestId }, { status: error.status || 500 });
           }
@@ -1404,6 +1410,9 @@ async function loadIndexedGuestPayload(
     includeSummary?: boolean;
   } = {},
 ) {
+  if (guestQuery.tagScope === "ever") {
+    return loadIndexedGuestPage(eventId, guestQuery, diagnosticReporter, knownEventBoundary);
+  }
   const snapshotLimit = safeInt("LUMA_INDEX_GUEST_CACHE_MAX_ENTRIES", 1000, 25, 5000);
   const snapshotResult = await listIndexedEventGuests(eventId, {
     filter: "all",

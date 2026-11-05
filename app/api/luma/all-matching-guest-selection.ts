@@ -9,6 +9,7 @@ type AllMatchingGuestQueryInput = {
   guestSearch?: unknown;
   guestTags?: unknown;
   guestTagMode?: unknown;
+  guestTagScope?: unknown;
   guestExcludedTags?: unknown;
   guestLatestTagId?: unknown;
   guestLatestTagLabel?: unknown;
@@ -50,6 +51,9 @@ export function parseAllMatchingGuestQuery(input: AllMatchingGuestQueryInput = {
   }
   if (input.guestTagMode !== undefined && !["any", "all"].includes(String(input.guestTagMode))) {
     throw badRequest("Guest tag mode must be any or all.");
+  }
+  if (input.guestTagScope !== undefined && !["current", "ever"].includes(String(input.guestTagScope))) {
+    throw badRequest("Guest tag scope must be current or ever.");
   }
   if (input.guestExcludedTags !== undefined && !Array.isArray(input.guestExcludedTags)) {
     throw badRequest("Excluded guest tags must be an array.");
@@ -109,6 +113,7 @@ export function parseAllMatchingGuestQuery(input: AllMatchingGuestQueryInput = {
     if (status !== "all") params.append("guest_status_not", status);
   }
   for (const tag of Array.isArray(input.guestTags) ? input.guestTags : []) params.append("guest_tag", tag);
+  if (input.guestTagScope === "ever") params.set("guest_tag_scope", "ever");
   if (input.guestTagMode === "all") params.set("guest_tag_mode", "all");
   for (const tag of Array.isArray(input.guestExcludedTags) ? input.guestExcludedTags : []) params.append("guest_tag_not", tag);
   if (typeof input.guestLatestTagId === "string" && input.guestLatestTagId) {

@@ -21,6 +21,7 @@ import {
   type GuestFilter,
   type GuestListQuery,
 } from "./guest-query";
+import { historicalManualTagFiltersSql } from "./historical-tags";
 import { MAX_PERSON_TAGS, normalizePersonTags } from "./person-tags";
 import { DEFAULT_TAG_COLOR, normalizeTagColor, normalizeTagName } from "./tag-catalog";
 import { buildRegistrationQuestionAnalytics, REFERRED_PERSON_TAG } from "../../event-analytics";
@@ -554,6 +555,7 @@ type IndexedPeopleSearchOptions = {
   includedTags?: string[];
   excludedTags?: string[];
   tagMode?: "any" | "all";
+  tagScope?: "current" | "ever";
   comments?: "any" | "with" | "without";
 };
 
@@ -563,6 +565,7 @@ export async function searchIndexedPeople(search: string, {
   includedTags = [],
   excludedTags = [],
   tagMode = "any",
+  tagScope = "current",
   comments = "any",
 }: IndexedPeopleSearchOptions = {}) {
   const query = search.trim().slice(0, 120);
@@ -586,25 +589,33 @@ export async function searchIndexedPeople(search: string, {
   const personCandidateLimit = (resultOffset + resultLimit) * 10;
   const guestCandidateLimit = (resultOffset + resultLimit) * 20;
   const personFilterConditions: Prisma.Sql[] = [activePersonSql(Prisma.sql`person.person_id`)];
-  if (normalizedIncludedTags.length) {
-    personFilterConditions.push(tagMode === "all"
-      ? Prisma.sql`(
-          SELECT COUNT(DISTINCT matched_tag.value)
-          FROM JSONB_ARRAY_ELEMENTS_TEXT(person.tags) AS matched_tag(value)
-          WHERE matched_tag.value IN (${Prisma.join(normalizedIncludedTags)})
-        ) = ${normalizedIncludedTags.length}`
-      : Prisma.sql`EXISTS (
-          SELECT 1
-          FROM JSONB_ARRAY_ELEMENTS_TEXT(person.tags) AS matched_tag(value)
-          WHERE matched_tag.value IN (${Prisma.join(normalizedIncludedTags)})
-        )`);
-  }
-  if (normalizedExcludedTags.length) {
-    personFilterConditions.push(Prisma.sql`NOT EXISTS (
-      SELECT 1
-      FROM JSONB_ARRAY_ELEMENTS_TEXT(person.tags) AS excluded_tag(value)
-      WHERE excluded_tag.value IN (${Prisma.join(normalizedExcludedTags)})
-    )`);
+  if (tagScope === "ever") {
+    if (normalizedIncludedTags.length || normalizedExcludedTags.length) {
+      personFilterConditions.push(historicalManualTagFiltersSql(
+        Prisma.sql`person.person_id`, normalizedIncludedTags, normalizedExcludedTags, tagMode,
+      ));
+    }
+  } else {
+    if (normalizedIncludedTags.length) {
+      personFilterConditions.push(tagMode === "all"
+        ? Prisma.sql`(
+            SELECT COUNT(DISTINCT matched_tag.value)
+            FROM JSONB_ARRAY_ELEMENTS_TEXT(person.tags) AS matched_tag(value)
+            WHERE matched_tag.value IN (${Prisma.join(normalizedIncludedTags)})
+          ) = ${normalizedIncludedTags.length}`
+        : Prisma.sql`EXISTS (
+            SELECT 1
+            FROM JSONB_ARRAY_ELEMENTS_TEXT(person.tags) AS matched_tag(value)
+            WHERE matched_tag.value IN (${Prisma.join(normalizedIncludedTags)})
+          )`);
+    }
+    if (normalizedExcludedTags.length) {
+      personFilterConditions.push(Prisma.sql`NOT EXISTS (
+        SELECT 1
+        FROM JSONB_ARRAY_ELEMENTS_TEXT(person.tags) AS excluded_tag(value)
+        WHERE excluded_tag.value IN (${Prisma.join(normalizedExcludedTags)})
+      )`);
+    }
   }
   if (normalizedComments === "with") {
     personFilterConditions.push(Prisma.sql`EXISTS (
@@ -1902,6 +1913,7 @@ export async function listIndexedEventGuests(
       search: query.search,
       tags: query.tags,
       tagMode: query.tagMode || "any",
+      tagScope: query.tagScope || "current",
       excludedTags: query.excludedTags || [],
       sortBy: query.sortBy || "status_date",
       sortDirection: query.sortDirection || "desc",
@@ -2126,6 +2138,7 @@ export async function listIndexedMultiEventGuests(
       search: query.search,
       tags: query.tags,
       tagMode: query.tagMode || "any",
+      tagScope: query.tagScope || "current",
       excludedTags: query.excludedTags || [],
       sortBy: query.sortBy || "status_date",
       sortDirection: query.sortDirection || "desc",
@@ -2216,21 +2229,29 @@ function indexedMultiEventGuestPageWhereSql(query: GuestListQuery) {
     )`);
   }
 
-  if (query.tags.length) {
-    const tagPredicates = query.tags.map((tag) => Prisma.sql`tag_person.tags @> CAST(${JSON.stringify([tag])} AS jsonb)`);
-    predicates.push(Prisma.sql`EXISTS (
-      SELECT 1 FROM luma_people AS tag_person
-      WHERE tag_person.person_id = guest.person_id
-        AND (${Prisma.join(tagPredicates, query.tagMode === "all" ? " AND " : " OR ")})
-    )`);
-  }
-  if (query.excludedTags?.length) {
-    const excludedTagPredicates = query.excludedTags.map((tag) => Prisma.sql`excluded_tag_person.tags @> CAST(${JSON.stringify([tag])} AS jsonb)`);
-    predicates.push(Prisma.sql`NOT EXISTS (
-      SELECT 1 FROM luma_people AS excluded_tag_person
-      WHERE excluded_tag_person.person_id = guest.person_id
-        AND (${Prisma.join(excludedTagPredicates, " OR ")})
-    )`);
+  if (query.tagScope === "ever") {
+    if (query.tags.length || query.excludedTags?.length) {
+      predicates.push(historicalManualTagFiltersSql(
+        Prisma.sql`guest.person_id`, query.tags, query.excludedTags, query.tagMode,
+      ));
+    }
+  } else {
+    if (query.tags.length) {
+      const tagPredicates = query.tags.map((tag) => Prisma.sql`tag_person.tags @> CAST(${JSON.stringify([tag])} AS jsonb)`);
+      predicates.push(Prisma.sql`EXISTS (
+        SELECT 1 FROM luma_people AS tag_person
+        WHERE tag_person.person_id = guest.person_id
+          AND (${Prisma.join(tagPredicates, query.tagMode === "all" ? " AND " : " OR ")})
+      )`);
+    }
+    if (query.excludedTags?.length) {
+      const excludedTagPredicates = query.excludedTags.map((tag) => Prisma.sql`excluded_tag_person.tags @> CAST(${JSON.stringify([tag])} AS jsonb)`);
+      predicates.push(Prisma.sql`NOT EXISTS (
+        SELECT 1 FROM luma_people AS excluded_tag_person
+        WHERE excluded_tag_person.person_id = guest.person_id
+          AND (${Prisma.join(excludedTagPredicates, " OR ")})
+      )`);
+    }
   }
   if (query.latestTagId) predicates.push(indexedLatestProfileTagPredicateSql(query.latestTagId));
 
@@ -2301,31 +2322,39 @@ function indexedGuestPageWhereSql(
     `);
   }
 
-  if (query.tags.length) {
-    const tagPredicates = query.tags.map((tag) => Prisma.sql`
-      tag_person.tags @> CAST(${JSON.stringify([tag])} AS jsonb)
-    `);
-    predicates.push(Prisma.sql`
-      EXISTS (
-        SELECT 1
-        FROM luma_people AS tag_person
-        WHERE tag_person.person_id = guest.person_id
-          AND (${Prisma.join(tagPredicates, query.tagMode === "all" ? " AND " : " OR ")})
-      )
-    `);
-  }
-  if (query.excludedTags?.length) {
-    const excludedTagPredicates = query.excludedTags.map((tag) => Prisma.sql`
-      excluded_tag_person.tags @> CAST(${JSON.stringify([tag])} AS jsonb)
-    `);
-    predicates.push(Prisma.sql`
-      NOT EXISTS (
-        SELECT 1
-        FROM luma_people AS excluded_tag_person
-        WHERE excluded_tag_person.person_id = guest.person_id
-          AND (${Prisma.join(excludedTagPredicates, " OR ")})
-      )
-    `);
+  if (query.tagScope === "ever") {
+    if (query.tags.length || query.excludedTags?.length) {
+      predicates.push(historicalManualTagFiltersSql(
+        Prisma.sql`guest.person_id`, query.tags, query.excludedTags, query.tagMode,
+      ));
+    }
+  } else {
+    if (query.tags.length) {
+      const tagPredicates = query.tags.map((tag) => Prisma.sql`
+        tag_person.tags @> CAST(${JSON.stringify([tag])} AS jsonb)
+      `);
+      predicates.push(Prisma.sql`
+        EXISTS (
+          SELECT 1
+          FROM luma_people AS tag_person
+          WHERE tag_person.person_id = guest.person_id
+            AND (${Prisma.join(tagPredicates, query.tagMode === "all" ? " AND " : " OR ")})
+        )
+      `);
+    }
+    if (query.excludedTags?.length) {
+      const excludedTagPredicates = query.excludedTags.map((tag) => Prisma.sql`
+        excluded_tag_person.tags @> CAST(${JSON.stringify([tag])} AS jsonb)
+      `);
+      predicates.push(Prisma.sql`
+        NOT EXISTS (
+          SELECT 1
+          FROM luma_people AS excluded_tag_person
+          WHERE excluded_tag_person.person_id = guest.person_id
+            AND (${Prisma.join(excludedTagPredicates, " OR ")})
+        )
+      `);
+    }
   }
   if (query.latestTagId) predicates.push(indexedLatestProfileTagPredicateSql(query.latestTagId));
 

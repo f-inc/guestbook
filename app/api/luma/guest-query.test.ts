@@ -20,6 +20,7 @@ test("parses bounded server-side guest query parameters", () => {
     search: "Ada",
     tags: ["Founder"],
     tagMode: "any",
+    tagScope: "current",
     excludedTags: [],
     sortBy: "status_date",
     sortDirection: "desc",

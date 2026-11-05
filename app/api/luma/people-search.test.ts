@@ -12,6 +12,7 @@ test("people search trims its query and accepts a bounded result limit", () => {
     includedTags: [],
     excludedTags: [],
     tagMode: "any",
+    tagScope: "current",
     comments: "any",
     hasFilters: false,
   });
@@ -33,6 +34,7 @@ test("name-only people search supports a larger bounded directory page", () => {
       includedTags: [],
       excludedTags: [],
       tagMode: "any",
+      tagScope: "current",
       comments: "any",
       hasFilters: false,
     },

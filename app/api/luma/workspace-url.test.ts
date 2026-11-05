@@ -81,6 +81,7 @@ test("parses workspace navigation state from the URL", () => {
     guestSearch: "ada",
     guestTags: ["VIP", "Builder"],
     guestTagMode: "any",
+    guestTagScope: "current",
     guestExcludedTags: [],
     guestPage: 3,
     profileId: "person-2",

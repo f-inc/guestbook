@@ -228,6 +228,7 @@ const initialState = {
     guestSearch: "",
     guestTags: [],
     guestTagMode: "any",
+    guestTagScope: "current",
     guestExcludedTags: [],
     guestLatestTagId: "",
     guestLatestTagLabel: "",
@@ -438,6 +439,7 @@ export default function Home() {
         guestSearch: urlState.guestSearch,
         guestTags: urlState.guestTags,
         guestTagMode: urlState.guestTagMode || "any",
+        guestTagScope: urlState.guestTagScope || "current",
         guestExcludedTags: urlState.guestExcludedTags || [],
         guestLatestTagId: urlState.guestLatestTagId || "",
         guestLatestTagLabel: urlState.guestLatestTagLabel || "",
@@ -796,6 +798,7 @@ export default function Home() {
         universalPeopleFilters.includedTags.forEach((tag) => params.append("tag", tag));
         universalPeopleFilters.excludedTags.forEach((tag) => params.append("exclude_tag", tag));
         params.set("tag_mode", universalPeopleFilters.tagMode);
+        params.set("tag_scope", universalPeopleFilters.tagScope);
         params.set("comments", universalPeopleFilters.comments);
         const response = await apiFetch(`/api/search/people?${params.toString()}`, {
           cache: "no-store",
@@ -849,6 +852,7 @@ export default function Home() {
       universalPeopleFilters.includedTags.forEach((tag) => params.append("tag", tag));
       universalPeopleFilters.excludedTags.forEach((tag) => params.append("exclude_tag", tag));
       params.set("tag_mode", universalPeopleFilters.tagMode);
+      params.set("tag_scope", universalPeopleFilters.tagScope);
       params.set("comments", universalPeopleFilters.comments);
       const response = await apiFetch(`/api/search/people?${params.toString()}`, { cache: "no-store" });
       const data: any = await response.json();
@@ -1067,7 +1071,7 @@ export default function Home() {
     () => workspaceEventGuests(state, selectedEvents, guestSortField, guestDateSortDirection, peopleById, personHistoryById),
     [state.events, state.people, state.filters, selectedEventIdsKey, guestSortField, guestDateSortDirection, peopleById, personHistoryById],
   );
-  const guestTagFilterKey = `${state.filters.guestTagMode}:${state.filters.guestTags.join("\u0000")}:${state.filters.guestExcludedTags.join("\u0000")}`;
+  const guestTagFilterKey = `${state.filters.guestTagScope}:${state.filters.guestTagMode}:${state.filters.guestTags.join("\u0000")}:${state.filters.guestExcludedTags.join("\u0000")}`;
   const guestLatestTagFilterKey = `${state.filters.guestLatestTagId}:${state.filters.guestLatestTagLabel}`;
   const guestStatusFilterKey = `${state.filters.guestStatusMode}:${state.filters.guestStatuses.join("\u0000")}:${state.filters.guestExcludedStatuses.join("\u0000")}`;
   const guestAnswerFilterKey = state.filters.guestAnswerGroups.length
@@ -1174,6 +1178,7 @@ export default function Home() {
       guestSearch: state.filters.guestSearch.trim(),
       guestTags: state.filters.guestTags,
       guestTagMode: state.filters.guestTagMode === "all" ? "all" : "any",
+      guestTagScope: state.filters.guestTagScope as "current" | "ever",
       guestExcludedTags: state.filters.guestExcludedTags,
       guestLatestTagId: state.filters.guestLatestTagId,
       guestLatestTagLabel: state.filters.guestLatestTagLabel,
@@ -1507,6 +1512,7 @@ export default function Home() {
       draft.filters.guestSearch = "";
       draft.filters.guestTags = [];
       draft.filters.guestTagMode = "any";
+      draft.filters.guestTagScope = "current";
       draft.filters.guestExcludedTags = [];
       draft.filters.guestLatestTagId = "";
       draft.filters.guestLatestTagLabel = "";
@@ -1544,6 +1550,7 @@ export default function Home() {
       draft.filters.guestSearch = "";
       draft.filters.guestTags = [];
       draft.filters.guestTagMode = "any";
+      draft.filters.guestTagScope = "current";
       draft.filters.guestExcludedTags = [];
       draft.filters.guestLatestTagId = String(tag.id);
       draft.filters.guestLatestTagLabel = String(tag.label || "Untagged");
@@ -1589,6 +1596,7 @@ export default function Home() {
         draft.filters.guestSearch = "";
         draft.filters.guestTags = [];
         draft.filters.guestTagMode = "any";
+        draft.filters.guestTagScope = "current";
         draft.filters.guestExcludedTags = [];
         draft.filters.guestLatestTagId = "";
         draft.filters.guestLatestTagLabel = "";
@@ -1651,7 +1659,7 @@ export default function Home() {
       setGuestStatusRules(value === "all" ? [] : [value], [], "any");
       return;
     }
-    if (["guestStatuses", "guestStatusMode", "guestExcludedStatuses", "guestSearch", "guestTags", "guestTagMode", "guestExcludedTags", "guestLatestTagId", "guestLatestTagLabel", "guestAnswerQuestion", "guestAnswer", "guestAnswerKey"].includes(key)) {
+    if (["guestStatuses", "guestStatusMode", "guestExcludedStatuses", "guestSearch", "guestTags", "guestTagMode", "guestTagScope", "guestExcludedTags", "guestLatestTagId", "guestLatestTagLabel", "guestAnswerQuestion", "guestAnswer", "guestAnswerKey"].includes(key)) {
       setGuestPageTarget(1);
       setAllMatchingGuestsSelected(false);
       setSelectedGuestIds(new Set());
@@ -1708,6 +1716,7 @@ export default function Home() {
       draft.filters.guestExcludedStatuses = [];
       draft.filters.guestTags = [];
       draft.filters.guestTagMode = "any";
+      draft.filters.guestTagScope = "current";
       draft.filters.guestExcludedTags = [];
       draft.filters.guestLatestTagId = "";
       draft.filters.guestLatestTagLabel = "";
@@ -1765,6 +1774,7 @@ export default function Home() {
       search = debouncedGuestSearch,
       tags = state.filters.guestTags,
       tagMode = state.filters.guestTagMode === "all" ? "all" : "any",
+      tagScope = state.filters.guestTagScope === "ever" ? "ever" : "current",
       excludedTags = state.filters.guestExcludedTags,
       latestTagId = state.filters.guestLatestTagId,
       latestTagLabel = state.filters.guestLatestTagLabel,
@@ -1778,7 +1788,7 @@ export default function Home() {
       priority = false,
       background = false,
       silent = false,
-    }: { force?: boolean; append?: boolean; status?: string; statuses?: string[]; statusMode?: "any" | "all"; excludedStatuses?: string[]; search?: string; tags?: string[]; tagMode?: "any" | "all"; excludedTags?: string[]; latestTagId?: string; latestTagLabel?: string; hasNotes?: boolean; attendedGreaterThan?: string; answerQuestion?: string; answer?: string; answerKey?: string; answerGroups?: WorkspaceGuestAnswerGroup[]; cursor?: string; priority?: boolean; background?: boolean; silent?: boolean } = {},
+    }: { force?: boolean; append?: boolean; status?: string; statuses?: string[]; statusMode?: "any" | "all"; excludedStatuses?: string[]; search?: string; tags?: string[]; tagMode?: "any" | "all"; tagScope?: "current" | "ever"; excludedTags?: string[]; latestTagId?: string; latestTagLabel?: string; hasNotes?: boolean; attendedGreaterThan?: string; answerQuestion?: string; answer?: string; answerKey?: string; answerGroups?: WorkspaceGuestAnswerGroup[]; cursor?: string; priority?: boolean; background?: boolean; silent?: boolean } = {},
   ) => {
     const event = getEvent(state, eventId);
     if (!event) {
@@ -1814,6 +1824,7 @@ export default function Home() {
     if (event.date) params.set("event_date", String(event.date).slice(0, 10));
     tags.forEach((tag) => params.append("guest_tag", tag));
     if (tagMode === "all") params.set("guest_tag_mode", "all");
+    if (tagScope === "ever") params.set("guest_tag_scope", "ever");
     excludedTags.forEach((tag) => params.append("guest_tag_not", tag));
     if (latestTagId) {
       params.set("guest_latest_tag_id", latestTagId);
@@ -2007,6 +2018,7 @@ export default function Home() {
       search = debouncedGuestSearch,
       tags = state.filters.guestTags,
       tagMode = state.filters.guestTagMode === "all" ? "all" : "any",
+      tagScope = state.filters.guestTagScope === "ever" ? "ever" : "current",
       excludedTags = state.filters.guestExcludedTags,
       latestTagId = state.filters.guestLatestTagId,
       latestTagLabel = state.filters.guestLatestTagLabel,
@@ -2017,7 +2029,7 @@ export default function Home() {
       answerKey = state.filters.guestAnswerKey,
       answerGroups = state.filters.guestAnswerGroups,
       cursor = "",
-    }: { append?: boolean; status?: string; statuses?: string[]; statusMode?: "any" | "all"; excludedStatuses?: string[]; search?: string; tags?: string[]; tagMode?: "any" | "all"; excludedTags?: string[]; latestTagId?: string; latestTagLabel?: string; hasNotes?: boolean; attendedGreaterThan?: string; answerQuestion?: string; answer?: string; answerKey?: string; answerGroups?: WorkspaceGuestAnswerGroup[]; cursor?: string } = {},
+    }: { append?: boolean; status?: string; statuses?: string[]; statusMode?: "any" | "all"; excludedStatuses?: string[]; search?: string; tags?: string[]; tagMode?: "any" | "all"; tagScope?: "current" | "ever"; excludedTags?: string[]; latestTagId?: string; latestTagLabel?: string; hasNotes?: boolean; attendedGreaterThan?: string; answerQuestion?: string; answer?: string; answerKey?: string; answerGroups?: WorkspaceGuestAnswerGroup[]; cursor?: string } = {},
   ) => {
     const eventIds = selectedWorkspaceEvents(state)
       .filter((event) => event.source === "luma")
@@ -2025,7 +2037,7 @@ export default function Home() {
     if (eventIds.length < 2) return;
 
     const includedStatuses = statuses.length ? statuses : status !== "all" ? [status] : [];
-    const queryKey = `${[...eventIds].sort().join("\u0000")}:${statusMode}:${includedStatuses.join("\u0000")}:${excludedStatuses.join("\u0000")}:${search}:${tagMode}:${tags.join("\u0000")}:${excludedTags.join("\u0000")}:${latestTagId}:${latestTagLabel}:${hasNotes ? 1 : 0}:${attendedGreaterThan}:${answerQuestion}:${answerKey}:${answer}:${answerGroups.map(guestAnswerGroupKey).join("\u0001")}:${guestSortField}:${guestDateSortDirection}`;
+    const queryKey = `${[...eventIds].sort().join("\u0000")}:${statusMode}:${includedStatuses.join("\u0000")}:${excludedStatuses.join("\u0000")}:${search}:${tagScope}:${tagMode}:${tags.join("\u0000")}:${excludedTags.join("\u0000")}:${latestTagId}:${latestTagLabel}:${hasNotes ? 1 : 0}:${attendedGreaterThan}:${answerQuestion}:${answerKey}:${answer}:${answerGroups.map(guestAnswerGroupKey).join("\u0001")}:${guestSortField}:${guestDateSortDirection}`;
     if (append && (multiEventGuestState.loading || !cursor || (multiEventGuestAbortRef.current && !multiEventGuestAbortRef.current.signal.aborted))) return;
     multiEventGuestAbortRef.current?.abort();
     const controller = new AbortController();
@@ -2052,6 +2064,7 @@ export default function Home() {
     answerGroups.forEach((group) => params.append("guest_answer_group", JSON.stringify(group)));
     tags.forEach((tag) => params.append("guest_tag", tag));
     if (tagMode === "all") params.set("guest_tag_mode", "all");
+    if (tagScope === "ever") params.set("guest_tag_scope", "ever");
     excludedTags.forEach((tag) => params.append("guest_tag_not", tag));
     if (latestTagId) {
       params.set("guest_latest_tag_id", latestTagId);
@@ -2444,6 +2457,7 @@ export default function Home() {
       draft.filters.guestSearch = "";
       draft.filters.guestTags = [];
       draft.filters.guestTagMode = "any";
+      draft.filters.guestTagScope = "current";
       draft.filters.guestExcludedTags = [];
       draft.filters.guestLatestTagId = "";
       draft.filters.guestLatestTagLabel = "";
@@ -3089,6 +3103,7 @@ export default function Home() {
     guestSearch: debouncedGuestSearch,
     guestTags: [...state.filters.guestTags],
     guestTagMode: state.filters.guestTagMode,
+    guestTagScope: state.filters.guestTagScope,
     guestExcludedTags: [...state.filters.guestExcludedTags],
     guestLatestTagId: state.filters.guestLatestTagId,
     guestLatestTagLabel: state.filters.guestLatestTagLabel,
@@ -3184,6 +3199,7 @@ export default function Home() {
             guestSearch: selection?.guestSearch,
             guestTags: selection?.guestTags,
             guestTagMode: selection?.guestTagMode,
+            guestTagScope: selection?.guestTagScope,
             guestExcludedTags: selection?.guestExcludedTags,
             guestLatestTagId: selection?.guestLatestTagId,
             guestLatestTagLabel: selection?.guestLatestTagLabel,
@@ -3326,6 +3342,7 @@ export default function Home() {
           guestSearch: selection?.guestSearch,
           guestTags: selection?.guestTags,
           guestTagMode: selection?.guestTagMode,
+          guestTagScope: selection?.guestTagScope,
           guestExcludedTags: selection?.guestExcludedTags,
           guestLatestTagId: selection?.guestLatestTagId,
           guestLatestTagLabel: selection?.guestLatestTagLabel,
@@ -4442,6 +4459,8 @@ export default function Home() {
                       included={state.filters.guestTags}
                       excluded={state.filters.guestExcludedTags}
                       mode={state.filters.guestTagMode}
+                      scope={state.filters.guestTagScope}
+                      onScopeChange={(scope) => setFilter("guestTagScope", scope)}
                       onIncludedChange={(tags) => setFilter("guestTags", tags)}
                       onExcludedChange={(tags) => setFilter("guestExcludedTags", tags)}
                       onModeChange={(mode) => setFilter("guestTagMode", mode)}
@@ -6444,6 +6463,8 @@ function TagFilter({
   included,
   excluded,
   mode,
+  scope,
+  onScopeChange,
   onIncludedChange,
   onExcludedChange,
   onModeChange,
@@ -6453,7 +6474,8 @@ function TagFilter({
   const optionListId = useId();
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
-  const tags = definitions.map((tag) => tag.name);
+  const historical = scope === "ever";
+  const tags = definitions.filter((tag) => !historical || !tag.managed).map((tag) => tag.name);
   const includedTags = Array.isArray(included) ? included : [];
   const excludedTags = Array.isArray(excluded) ? excluded : [];
   const includedSet = new Set(includedTags);
@@ -6469,9 +6491,9 @@ function TagFilter({
     })
     .map(({ tag }) => tag);
   const primaryLabel = includedTags.length
-    ? tagDisplayName(includedTags[0])
+    ? `${historical ? "Ever: " : ""}${tagDisplayName(includedTags[0])}`
     : excludedTags.length
-      ? `Not ${tagDisplayName(excludedTags[0])}`
+      ? `${historical ? "Never" : "Not"} ${tagDisplayName(excludedTags[0])}`
       : "All tags";
   const remainingCount = Math.max(0, activeCount - 1);
   const setTagState = (tag, nextState: "include" | "exclude" | "off") => {
@@ -6483,11 +6505,21 @@ function TagFilter({
       : excludedTags.filter((item) => item !== tag));
   };
   const toggleIncludedTag = (tag) => setTagState(tag, includedSet.has(tag) ? "off" : "include");
+  const setScope = (nextScope: "current" | "ever") => {
+    if (nextScope === "ever") {
+      const automatic = new Set(definitions.filter((tag) => tag.managed).map((tag) => tag.name.toLocaleLowerCase()));
+      onIncludedChange(includedTags.filter((tag) => !automatic.has(tag.toLocaleLowerCase())));
+      onExcludedChange(excludedTags.filter((tag) => !automatic.has(tag.toLocaleLowerCase())));
+    }
+    onScopeChange(nextScope);
+  };
   const clear = () => {
     onIncludedChange([]);
     onExcludedChange([]);
+    onScopeChange("current");
   };
   const title = [
+    historical ? "Manual tag history" : "Current tags",
     includedTags.length ? `Include (${mode === "all" ? "all" : "any"}): ${includedTags.map(tagDisplayName).join(", ")}` : "",
     excludedTags.length ? `Exclude: ${excludedTags.map(tagDisplayName).join(", ")}` : "",
   ].filter(Boolean).join(". ") || "All tags";
@@ -6527,11 +6559,16 @@ function TagFilter({
         </summary>
         <div className="tag-filter-popover">
           <div className="filter-popover-header">
+            <div className="tag-filter-history" role="group" aria-label="Tag assignment history">
+              <button type="button" aria-pressed={!historical} onClick={() => setScope("current")}>Currently has</button>
+              <button type="button" aria-pressed={historical} onClick={() => setScope("ever")}>Has ever had</button>
+            </div>
+            {historical ? <p className="tag-filter-history-hint">Manual tags, including tags later removed. Exclude means never had.</p> : null}
             <div className="tag-filter-head">
               <span>
                 {activeCount ? <button type="button" onClick={clear}>Clear</button> : null}
               </span>
-              <div className="tag-filter-mode" aria-label="How many included tags people must have">
+              <div className="tag-filter-mode" aria-label={`How many included tags people must ${historical ? "have ever had" : "have"}`}>
                 <button className={mode !== "all" ? "active" : ""} type="button" aria-pressed={mode !== "all"} onClick={() => onModeChange("any")}>At least one</button>
                 <button className={mode === "all" ? "active" : ""} type="button" aria-pressed={mode === "all"} onClick={() => onModeChange("all")}>Every one</button>
               </div>
@@ -6591,7 +6628,7 @@ function TagFilter({
                   className={`tag-filter-choice exclude ${excludedSet.has(tag) ? "active" : ""}`}
                   type="button"
                   aria-pressed={excludedSet.has(tag)}
-                  title={`Exclude ${tagDisplayName(tag)}`}
+                  title={`${historical ? "Exclude anyone who has ever had" : "Exclude"} ${tagDisplayName(tag)}`}
                   onClick={(event) => {
                     event.stopPropagation();
                     setTagState(tag, excludedSet.has(tag) ? "off" : "exclude");
@@ -6924,6 +6961,7 @@ function UniversalPeopleFilters({ definitions, filters, onChange }) {
             includedTags: [],
             excludedTags: [],
             tagMode: "any",
+            tagScope: "current",
             comments: "any",
           })}
         >
@@ -6936,6 +6974,8 @@ function UniversalPeopleFilters({ definitions, filters, onChange }) {
         included={filters.includedTags}
         excluded={filters.excludedTags}
         mode={filters.tagMode}
+        scope={filters.tagScope}
+        onScopeChange={(tagScope) => onChange((current) => ({ ...current, tagScope }))}
         onIncludedChange={(includedTags) => onChange((current) => ({ ...current, includedTags }))}
         onExcludedChange={(excludedTags) => onChange((current) => ({ ...current, excludedTags }))}
         onModeChange={(tagMode) => onChange((current) => ({ ...current, tagMode }))}
@@ -10570,6 +10610,7 @@ function normalizeState(value) {
   next.filters.guestExcludedTags = sortedTags(unique(Array.isArray(next.filters.guestExcludedTags) ? next.filters.guestExcludedTags : []))
     .filter((tag) => !next.filters.guestTags.includes(tag));
   next.filters.guestTagMode = next.filters.guestTagMode === "all" ? "all" : "any";
+  next.filters.guestTagScope = next.filters.guestTagScope === "ever" ? "ever" : "current";
   next.filters.guestLatestTagId = typeof next.filters.guestLatestTagId === "string" ? next.filters.guestLatestTagId.slice(0, 200) : "";
   next.filters.guestLatestTagLabel = next.filters.guestLatestTagId && typeof next.filters.guestLatestTagLabel === "string"
     ? next.filters.guestLatestTagLabel.slice(0, 80)
@@ -10674,6 +10715,7 @@ function emptyPeopleSearchFilters() {
     includedTags: [] as string[],
     excludedTags: [] as string[],
     tagMode: "any" as "any" | "all",
+    tagScope: "current" as "current" | "ever",
     comments: "any" as "any" | "with" | "without",
   };
 }
@@ -10681,6 +10723,7 @@ function emptyPeopleSearchFilters() {
 function peopleSearchFiltersKey(filters) {
   return [
     filters.tagMode,
+    filters.tagScope,
     filters.includedTags.join("\u0000"),
     filters.excludedTags.join("\u0000"),
     filters.comments,

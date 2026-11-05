@@ -79,6 +79,12 @@ curl -X POST http://localhost:3030/api/luma/sync \
 
 The recovery job is intentionally capped by defaults in `.env.local.example`. Raise those limits only when you explicitly want a larger backfill.
 
+### Historical Manual Tag Filters
+
+In Command K search filters or an event's Tags filter, choose **Has ever had** to match any recorded manual tag assignment, including tags later removed. **Currently has** remains the default. History mode supports **At least one**, **Every one**, and exclusions; excluding a tag means the person has never had it in the recorded history. Automatic tags are available only in current mode.
+
+Event filters still limit results to guests of the selected event(s), while checking their manual tag history across all events. The mode is preserved in shared URLs, pagination, and all-matching bulk selections. This uses the existing `manual_tag_mutations` history and requires no migration.
+
 ### Automatic Tags
 
 Every completed `/api/luma/sync` recovery run classifies people from the local PostgreSQL activity index. It does not make additional Luma requests. `Sync event` reevaluates affected people and automatically falls back to a full run when the latest public-event window changes.

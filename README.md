@@ -121,6 +121,9 @@ npm test
 Command K returns each search page, including profiles, comments and activity
 counts, in one database query. Recent query/filter pages are cached in the browser
 for up to one minute (20 pages maximum); guest edits and key changes clear them.
+Inactive-person eligibility is evaluated once for matching candidate IDs across
+profile, guest, invitation and verification addresses. A person remains visible
+when any known address is active, including people with no known email address.
 
 The additive migration
 `prisma/manual-migrations/20261105_add_people_search_document_v2.sql` creates a

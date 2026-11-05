@@ -351,6 +351,8 @@ Requests display company and event names together. Company icons use a protected
 
 ## External integrations
 
+Read the public [API documentation](https://guestbook.f.inc/api-docs) at `/api-docs` (no login required). It is generated from `docs/integration-api.md`.
+
 Use `/admin` to create read-only, permission-scoped integration API keys for
 email platforms and other server software. The versioned endpoints are
 `GET /api/v1/events`, `GET /api/v1/events/{eventId}/guests`, and

@@ -58,7 +58,7 @@ export default function Admin() {
     try { await call(adminKey, "DELETE", undefined, id); await load(adminKey); } catch (e: any) { setError(e.message); } finally { setBusy(false); }
   }
   return <main className={`${styles.page} ${sans.className}`}>
-    <nav><a href="/">Guestbook</a><span>Admin / API access</span></nav>
+    <nav><a href="/">Guestbook</a><a href="/api-docs">API documentation ↗</a></nav>
     <h1 className={serif.className}>Connect your software.</h1>
     <p className={styles.intro}>Create a separate API key for each integration. Choose what it can read and revoke access whenever you need.</p>
     {error && <p role="alert" className={styles.notice}>{error}</p>}
@@ -90,10 +90,6 @@ export default function Admin() {
           <small>Created {new Date(key.createdAt).toLocaleDateString()}{key.expiresAt ? ` · Expires ${new Date(key.expiresAt).toLocaleString()}` : " · No expiration"}</small>
         </div>{!key.revokedAt && <button disabled={busy} onClick={() => revoke(key.id)}>Revoke</button>}
       </article>)}</div>}</section>
-      <section><h2>Use the API</h2><p>Server API base URL:</p><pre>https://guestbook.f.inc/api/v1</pre><p>Use your Guestbook domain for all API requests.</p><p>Send your key in the Authorization header. Follow pagination.nextCursor until it is null to retrieve every result.</p>
-        <pre>{`GET /api/v1/events\nGET /api/v1/events/{eventId}/guests\nGET /api/v1/events/{eventId}/guests?checked_in=true\nGET /api/v1/events/{eventId}/guests?status=waitlisted\nGET /api/v1/people/{personId}/events?limit=10\n\nAuthorization: Bearer YOUR_API_KEY`}</pre>
-        <p>Each event guest request fetches all Luma guest pages before applying filters. Responses include live status, Luma approval status, local operator decision, and registration/check-in timestamps. Email addresses require the email permission. Person history requires event and guest-read permissions and reads directly from Guestbook’s database, with 10 events per page by default and no Luma refresh.</p>
-      </section>
     </>}
   </main>;
 }

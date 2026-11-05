@@ -3855,7 +3855,7 @@
   }
 
   .profile-panel {
-    @apply fixed bottom-4 right-4 top-20 z-50 min-h-0 w-[min(470px,calc(100vw-32px))] overflow-y-auto overscroll-contain border-t-4 border-t-brand p-4;
+    @apply fixed bottom-4 right-4 top-20 z-50 min-h-0 w-[min(720px,calc(100vw-32px))] overflow-y-auto overscroll-contain border-t-4 border-t-brand p-0;
     animation: drawer-in var(--motion-slow) var(--motion-ease) both;
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.10), 0 1px 0 rgba(0, 0, 0, 0.05), 0 0 0 1px rgba(255, 255, 255, 0.15);
     contain: layout paint;
@@ -3866,12 +3866,12 @@
   }
 
   .profile-close {
-    @apply size-8;
+    @apply absolute right-3 top-3 size-8;
   }
 
   .profile-head {
-    @apply grid min-w-0 items-start gap-3 border-b border-border pb-4;
-    grid-template-columns: 56px minmax(0, 1fr) auto;
+    @apply grid min-w-0 items-center gap-3 pr-9;
+    grid-template-columns: 56px minmax(0, 1fr) minmax(0, 1.25fr);
   }
 
   .profile-identity {
@@ -3891,40 +3891,28 @@
     white-space: normal;
   }
 
-  .profile-head-actions {
-    @apply flex items-center justify-end gap-2;
-  }
-
-  .profile-head-actions .status-pill {
-    @apply px-3 py-1.5 text-xs;
-  }
-
   .profile-panel .avatar-large {
     @apply size-14 bg-brand-soft text-brand ring-4 ring-brand-soft/60;
   }
 
   .profile-tags {
-    @apply mt-4 flex flex-wrap items-center gap-1.5;
+    @apply flex flex-wrap items-center gap-1.5;
   }
 
   .profile-tags .tag-chip {
     @apply max-w-none px-2.5 py-1 text-[11px];
   }
 
-  .profile-bio {
-    @apply mt-4 border-l-2 border-brand/35 pl-3 text-sm leading-relaxed text-muted;
-  }
-
   .profile-social-links {
-    @apply mt-3 flex items-center gap-2;
+    @apply flex items-center gap-1.5;
   }
 
   .profile-social-link {
-    @apply inline-grid size-9 place-items-center rounded-full border border-border bg-surface no-underline shadow-sm transition hover:-translate-y-0.5 hover:border-border-strong hover:bg-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/20 focus-visible:ring-offset-2;
+    @apply inline-grid size-7 place-items-center rounded-md border border-border bg-surface no-underline transition hover:border-border-strong hover:bg-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/20 focus-visible:ring-offset-2;
   }
 
   .profile-social-link img {
-    @apply size-[17px];
+    @apply size-3.5;
   }
 
   .profile-social-x {
@@ -3936,12 +3924,12 @@
   }
 
   .profile-context {
-    @apply mt-4 grid gap-3 border-y border-border py-4;
-    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    @apply grid gap-x-5 gap-y-2;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .profile-guest-actions {
-    @apply mt-3 flex flex-wrap items-center gap-2;
+    @apply flex flex-wrap items-center gap-2;
   }
 
   .profile-guest-actions .guest-action {
@@ -3953,27 +3941,15 @@
   }
 
   .profile-fact {
-    @apply grid min-w-0 gap-1 border-l-2 px-3 py-1;
-  }
-
-  .profile-fact-registration {
-    @apply border-info bg-info-soft/50;
-  }
-
-  .profile-fact-referrer {
-    @apply overflow-hidden border-warning bg-warning-soft/60;
-  }
-
-  .profile-fact-default {
-    @apply border-brand bg-brand-soft/50;
+    @apply grid min-w-0 content-start gap-1;
   }
 
   .profile-fact > span {
-    @apply text-[10px] font-bold uppercase tracking-[0.08em] text-muted;
+    @apply text-[11px] font-medium text-muted;
   }
 
   .profile-fact strong {
-    @apply min-w-0 break-words text-sm leading-snug;
+    @apply min-w-0 break-words text-xs font-semibold leading-snug;
   }
 
   .profile-fact .referrer-value {
@@ -4020,6 +3996,136 @@
 
   .profile-note-card time {
     @apply mt-3 block border-t border-border pt-2 text-[10px] text-muted;
+  }
+
+  .profile-overview {
+    @apply relative p-5;
+  }
+
+  .profile-header-meta {
+    @apply flex min-w-0 flex-wrap items-center justify-end gap-3;
+  }
+
+  .profile-header-meta .profile-tags {
+    @apply min-w-0 justify-end;
+  }
+
+  .profile-registration-card {
+    @apply mt-4 grid min-w-0 items-center gap-x-5 gap-y-3 border-t border-border pt-4;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .profile-registration-controls {
+    @apply flex flex-col items-end gap-2;
+  }
+
+  .profile-review-content {
+    @apply border-t border-border p-5;
+  }
+
+  .profile-review-grid {
+    @apply mt-5 grid items-start gap-5 border-t border-border pt-5;
+    grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  }
+
+  .profile-review-section {
+    @apply min-w-0;
+  }
+
+  .profile-review-grid > .profile-disclosure {
+    @apply m-0 border-0 p-0;
+  }
+
+  .profile-review-grid > .profile-disclosure > summary {
+    @apply m-0 flex min-h-10 items-center justify-start gap-2 pb-3 pt-0;
+  }
+
+  .profile-review-grid > .profile-disclosure > summary h3 {
+    @apply min-w-0 flex-1;
+  }
+
+  .profile-section-heading,
+  .profile-section-heading > div {
+    @apply flex flex-wrap items-center gap-2;
+  }
+
+  .profile-section-heading {
+    @apply mb-3 min-h-8 justify-between gap-3;
+  }
+
+  .profile-section-heading h3 {
+    @apply text-sm font-bold;
+  }
+
+  .profile-section-heading span {
+    @apply text-xs text-muted;
+  }
+
+  .profile-comments .button {
+    @apply min-h-8 gap-1.5 px-2.5 text-xs;
+  }
+
+  .profile-comment-list {
+    @apply grid gap-3;
+  }
+
+  .profile-note-card > header {
+    @apply mb-3 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs;
+  }
+
+  .profile-note-card > header time {
+    @apply m-0 border-0 p-0 text-[11px] font-medium;
+  }
+
+  .profile-note-card .markdown-preview.guest-comment-body {
+    @apply min-h-0 max-h-none overflow-visible rounded-none border-0 bg-transparent p-0 text-sm leading-relaxed shadow-none;
+  }
+
+  .profile-panel .answer-card-event {
+    @apply grid gap-2;
+  }
+
+  .profile-panel .answer-card-event span {
+    @apply justify-self-start;
+  }
+
+  .profile-current-label {
+    @apply mb-1 block text-[10px] font-semibold uppercase tracking-wide text-brand;
+  }
+
+  .profile-panel .answer-row dd {
+    overflow-wrap: anywhere;
+  }
+
+  .profile-history .trace-toolbar {
+    @apply mb-4 max-w-[380px];
+  }
+
+  .profile-history .trace-timeline {
+    @apply grid-cols-1;
+  }
+
+  .profile-history .timeline-body {
+    @apply min-w-0;
+    overflow-wrap: anywhere;
+  }
+
+  .profile-empty,
+  .profile-loading,
+  .profile-load-error {
+    @apply py-3 text-xs leading-relaxed text-muted;
+  }
+
+  .profile-loading {
+    @apply flex items-center gap-2;
+  }
+
+  .profile-load-error {
+    @apply text-danger;
+  }
+
+  .profile-load-error button {
+    @apply mt-2 underline;
   }
 
   .answer-list {
@@ -5713,7 +5819,7 @@
   }
 
   .profile-panel {
-    @apply fixed bottom-4 right-4 top-20 z-50 h-auto w-[min(460px,calc(100vw-32px))] max-h-none;
+    @apply h-auto max-h-none;
     margin-left: 0;
   }
 
@@ -6337,4 +6443,17 @@
   .requests-shell .submissions-grid { grid-template-columns: 1fr; }
   .requests-shell .submissions-results,
   .requests-shell .submissions-detail { overflow: visible; }
+}
+
+@media (max-width: 720px) {
+  .profile-panel { top: 12px; right: 12px; bottom: 12px; width: calc(100vw - 24px); }
+  .profile-overview { padding: 16px; }
+  .profile-review-grid { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  .profile-review-content { padding: 20px 16px; }
+  .profile-overview .profile-head { grid-template-columns: 56px minmax(0, 1fr); padding-right: 28px; }
+  .profile-header-meta { grid-column: 1 / -1; justify-content: flex-start; margin-right: -28px; }
+  .profile-header-meta .profile-tags { justify-content: flex-start; }
+  .profile-registration-card { grid-template-columns: minmax(0, 1fr); }
+  .profile-registration-card .profile-context { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .profile-registration-controls { flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: space-between; }
 }

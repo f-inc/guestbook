@@ -1,4 +1,4 @@
-import { activePersonSql, emailRemovalEnabled } from "./email-inactivity";
+import { activePersonSql, emailRemovalEnabled, inactivePeopleAmongCandidatesSql } from "./email-inactivity";
 import { guestIndexIsReady } from "./guest-index-readiness";
 import { Prisma, PrismaClient } from "@prisma/client";
 import { randomUUID } from "node:crypto";
@@ -583,7 +583,7 @@ export async function searchIndexedPeople(search: string, {
   const resultLimit = pageSize + 1;
   const personCandidateLimit = (resultOffset + resultLimit) * 10;
   const guestCandidateLimit = (resultOffset + resultLimit) * 20;
-  const personFilterConditions: Prisma.Sql[] = [activePersonSql(Prisma.sql`person.person_id`)];
+  const personFilterConditions: Prisma.Sql[] = [];
   if (tagScope === "ever") {
     if (normalizedIncludedTags.length || normalizedExcludedTags.length) {
       personFilterConditions.push(historicalManualTagFiltersSql(
@@ -628,6 +628,14 @@ export async function searchIndexedPeople(search: string, {
   const personFilterSql = personFilterConditions.length
     ? Prisma.sql`AND ${Prisma.join(personFilterConditions, " AND ")}`
     : Prisma.empty;
+  const activeCandidateSql = emailRemovalEnabled()
+    ? Prisma.sql`NOT EXISTS (SELECT 1 FROM inactive_candidates AS inactive WHERE inactive.person_id = person.person_id)`
+    : Prisma.sql`TRUE`;
+  const inactiveCandidatesCte = emailRemovalEnabled()
+    ? Prisma.sql`inactive_candidates AS MATERIALIZED (
+        ${inactivePeopleAmongCandidatesSql(Prisma.sql`candidate_person_ids`)}
+      ),`
+    : Prisma.empty;
   // Omit phone scans from text queries entirely, including generic prepared plans.
   const personMatchSql = !query ? Prisma.sql`TRUE` : Prisma.sql`(
     LOWER(
@@ -655,7 +663,7 @@ export async function searchIndexedPeople(search: string, {
     eventsAttended: number;
     eventsRegistered: number;
   }>>(Prisma.sql`
-    WITH person_candidates AS MATERIALIZED (
+    WITH profile_matches AS MATERIALIZED (
         SELECT
           person.person_id,
           CASE
@@ -668,10 +676,8 @@ export async function searchIndexedPeople(search: string, {
         FROM luma_people AS person
         WHERE ${personMatchSql}
         ${personFilterSql}
-        ORDER BY rank, person.last_seen_at DESC, person.name ASC
-        LIMIT ${personCandidateLimit}
     ),
-    comment_candidates AS MATERIALIZED (
+    comment_matches AS MATERIALIZED (
         SELECT person.person_id, 4 AS rank
         FROM guest_comments AS comment
         JOIN luma_people AS person ON person.person_id = comment.person_id
@@ -679,16 +685,11 @@ export async function searchIndexedPeople(search: string, {
           AND LOWER(comment.body) LIKE LOWER(${containsQuery}) ESCAPE '\\'
           ${personFilterSql}
         GROUP BY person.person_id
-        ORDER BY person.last_seen_at DESC, person.name ASC
-        LIMIT ${personCandidateLimit}
     ),
     guest_candidates AS MATERIALIZED (
         SELECT guest.person_id, 5 AS rank
         FROM luma_event_guests AS guest
         WHERE ${guestMatchSql}
-          -- Every profile candidate ranks ahead of guest-only text matches.
-          -- Skip that search when profiles already fill the page and lookahead.
-          AND (SELECT COUNT(*) FROM person_candidates) < ${resultOffset + resultLimit}
         LIMIT ${guestCandidateLimit}
     ),
     tag_candidates AS MATERIALIZED (
@@ -699,6 +700,32 @@ export async function searchIndexedPeople(search: string, {
         WHERE ${Boolean(query)}
           AND LOWER(definition.name) LIKE LOWER(${containsQuery}) ESCAPE '\\'
         LIMIT ${personCandidateLimit}
+    ),
+    candidate_person_ids AS MATERIALIZED (
+      SELECT person_id FROM profile_matches
+      UNION
+      SELECT person_id FROM comment_matches
+      UNION
+      SELECT person_id FROM guest_candidates
+      UNION
+      SELECT person_id FROM tag_candidates
+    ),
+    ${inactiveCandidatesCte}
+    person_candidates AS MATERIALIZED (
+      SELECT matched.person_id, matched.rank
+      FROM profile_matches AS matched
+      JOIN luma_people AS person ON person.person_id = matched.person_id
+      WHERE ${activeCandidateSql}
+      ORDER BY matched.rank, person.last_seen_at DESC, person.name ASC
+      LIMIT ${personCandidateLimit}
+    ),
+    comment_candidates AS MATERIALIZED (
+      SELECT matched.person_id, matched.rank
+      FROM comment_matches AS matched
+      JOIN luma_people AS person ON person.person_id = matched.person_id
+      WHERE ${activeCandidateSql}
+      ORDER BY person.last_seen_at DESC, person.name ASC
+      LIMIT ${personCandidateLimit}
     ),
     candidate_matches AS MATERIALIZED (
       SELECT candidate.person_id, MIN(candidate.rank)::integer AS rank
@@ -723,7 +750,7 @@ export async function searchIndexedPeople(search: string, {
       SELECT candidate.person_id, candidate.rank
       FROM candidate_matches AS candidate
       JOIN luma_people AS person ON person.person_id = candidate.person_id
-      WHERE TRUE
+      WHERE ${activeCandidateSql}
       ${personFilterSql}
       ORDER BY candidate.rank, person.last_seen_at DESC, person.name ASC
       LIMIT ${resultLimit}

@@ -109,6 +109,11 @@ const guestActionIcons = {
   Reinvite: MailPlus,
 };
 
+const guestStatusMessagePlaceholders = {
+  declined: "sorry, couldn't accept your registration to open campus for today!\n\nI had to prioritize the 10 registrations with registration answers that seemed more aligned to what we were looking for!",
+  going: "you're in! please come at 2pm sharp\n\nLocation instructions here: https://f.inc/2b",
+};
+
 const sourceStatusDefaults = ["going", "checked_in"];
 const acceptedStatuses = ["going", "checked_in", "no_show"];
 const registeredStatuses = ["registered", "waitlisted", ...acceptedStatuses];
@@ -5768,7 +5773,7 @@ function GuestStatusDialog({ draft, event, guest, person, onChange, onClose, onS
             maxLength={MAX_GUEST_STATUS_MESSAGE_LENGTH}
             value={draft.message}
             disabled={!draft.sendEmail || draft.submitting}
-            placeholder={bulk ? "Add a note for the selected guests" : "Add a personal note"}
+            placeholder={guestStatusMessagePlaceholders[draft.status] || (bulk ? "Add a note for the selected guests" : "Add a personal note")}
             onChange={(event) => onChange((current) => ({ ...current, message: event.target.value }))}
           />
         </label>

@@ -73,6 +73,7 @@ import {
 } from "./event-switch-diagnostics";
 import { aggregateEventFeedback } from "./api/luma/event-feedback";
 import { buildPeopleSearchUrlSearch, parsePeopleSearchUrl } from "./people-search-url";
+import { PeopleSearchCache } from "./people-search-cache";
 import { buildWorkspaceUrlSearch, guestsPageUrlSearch, isEventDirectoryPath, parseWorkspaceUrl, workspaceHistoryStateWithScroll, workspacePathname, workspaceScrollTopFromHistoryState, type EventDirectoryMetricFilter, type EventDirectorySortKey, type WorkspaceGuestAnswerGroup, type WorkspaceUrlState } from "./workspace-url";
 
 const statusLabels = {
@@ -176,6 +177,7 @@ const GUESTBOOK_KEY_HEADER = "x-guestbook-key";
 const GUESTBOOK_KEY_COOKIE = "guestbook_key";
 const LEGACY_SESSION_KEY_COOKIE = "guestbook_session_key";
 const UNIVERSAL_PEOPLE_SEARCH_DEBOUNCE_MS = 180;
+const UNIVERSAL_DIRECTORY_SEARCH_DEBOUNCE_MS = 75;
 const UNIVERSAL_SEARCH_CACHE_TTL_MS = 60_000;
 const INVITE_METADATA_CLIENT_CACHE_MS = 120_000;
 const TAG_COLOR_PALETTE = ["#0f766e", "#2563eb", "#7c3aed", "#db2777", "#dc2626", "#d97706", "#65a30d", "#475569"];
@@ -316,6 +318,7 @@ export default function Home() {
   const [universalQuery, setUniversalQuery] = useState("");
   const [universalPeopleFilters, setUniversalPeopleFilters] = useState(() => emptyPeopleSearchFilters());
   const [universalPeopleSearch, setUniversalPeopleSearch] = useState({ query: "", status: "idle", results: [], error: "", hasMore: false, nextOffset: 0 });
+  const universalPeopleSearchCacheRef = useRef(new PeopleSearchCache<typeof universalPeopleSearch>());
   const universalPeopleLoadMoreInFlightRef = useRef(false);
   const universalPeopleFiltersKey = peopleSearchFiltersKey(universalPeopleFilters);
   const hasUniversalPeopleFilters = peopleSearchFiltersActive(universalPeopleFilters);
@@ -756,6 +759,10 @@ export default function Home() {
 
   const [emailRemovalRevision, setEmailRemovalRevision] = useState(0);
   useEffect(() => {
+    universalPeopleSearchCacheRef.current.clear();
+    universalSearchClosedAtRef.current = 0;
+  }, [guestbookKey, emailRemovalRevision]);
+  useEffect(() => {
     const refresh = () => { universalSearchClosedAtRef.current = 0; setEmailRemovalRevision(v => v + 1); };
     window.addEventListener("guestbook:email-removal", refresh);
     return () => window.removeEventListener("guestbook:email-removal", refresh);
@@ -789,7 +796,15 @@ export default function Home() {
       return;
     }
 
+    const cached = universalPeopleSearchCacheRef.current.get(requestKey);
+    if (cached) {
+      setUniversalPeopleSearch(cached);
+      setUniversalSearchExpanded(true);
+      return;
+    }
+
     const controller = new AbortController();
+    const cacheRevision = universalPeopleSearchCacheRef.current.revision;
     setUniversalPeopleSearch({ query: requestKey, status: "loading", results: [], error: "", hasMore: false, nextOffset: 0 });
     const timeout = window.setTimeout(async () => {
       setUniversalSearchExpanded(true);
@@ -809,20 +824,24 @@ export default function Home() {
         if (!controller.signal.aborted) {
           const results = Array.isArray(data.people) ? data.people : [];
           mergeIndexedPeople(results);
-          setUniversalPeopleSearch({
+          const result = {
             query: requestKey,
             status: "ready",
             results,
             error: "",
             hasMore: Boolean(data.hasMore),
             nextOffset: Number(data.nextOffset) || results.length,
-          });
+          };
+          if (cacheRevision === universalPeopleSearchCacheRef.current.revision) {
+            universalPeopleSearchCacheRef.current.set(requestKey, result);
+          }
+          setUniversalPeopleSearch(result);
         }
       } catch (error) {
         if (controller.signal.aborted) return;
         setUniversalPeopleSearch({ query: requestKey, status: "error", results: [], error: error.message || "Unable to search people.", hasMore: false, nextOffset: 0 });
       }
-    }, UNIVERSAL_PEOPLE_SEARCH_DEBOUNCE_MS);
+    }, query ? UNIVERSAL_DIRECTORY_SEARCH_DEBOUNCE_MS : 0);
 
     return () => {
       window.clearTimeout(timeout);
@@ -2551,6 +2570,8 @@ export default function Home() {
       });
       const data: any = await response.json();
       if (!response.ok) throw new Error(data.error || "Unable to add guest comment.");
+      universalPeopleSearchCacheRef.current.clear();
+      universalSearchClosedAtRef.current = 0;
       setState((current) => ({
         ...current,
         people: current.people.map((person) => person.id === personId ? {
@@ -2587,6 +2608,8 @@ export default function Home() {
       });
       const data: any = await response.json();
       if (!response.ok) throw new Error(data.error || "Unable to edit guest comment.");
+      universalPeopleSearchCacheRef.current.clear();
+      universalSearchClosedAtRef.current = 0;
       setState((current) => ({
         ...current,
         people: current.people.map((person) => person.id === personId ? {
@@ -2625,6 +2648,8 @@ export default function Home() {
       });
       const data: any = await response.json();
       if (!response.ok) throw new Error(data.error || "Unable to delete guest comment.");
+      universalPeopleSearchCacheRef.current.clear();
+      universalSearchClosedAtRef.current = 0;
       setState((current) => ({
         ...current,
         people: current.people.map((person) => person.id === personId ? {
@@ -2661,6 +2686,8 @@ export default function Home() {
       });
       const data: any = await response.json();
       if (!response.ok) throw new Error(data.error || "Unable to update the phone number.");
+      universalPeopleSearchCacheRef.current.clear();
+      universalSearchClosedAtRef.current = 0;
       const savedPhoneNumber = data.phoneNumber || "";
       setState((current) => ({
         ...current,
@@ -2715,6 +2742,8 @@ export default function Home() {
       });
       const data: any = await response.json();
       if (!response.ok) throw new Error(data.error || "Unable to update guest tags.");
+      universalPeopleSearchCacheRef.current.clear();
+      universalSearchClosedAtRef.current = 0;
       const savedTags = Array.isArray(data.tags) ? data.tags : optimisticTags;
       setState((current) => normalizeState({
         ...current,
@@ -2818,6 +2847,8 @@ export default function Home() {
         });
         const data: any = await response.json();
         if (!response.ok) throw new Error(data.error || "Unable to update tag settings.");
+        universalPeopleSearchCacheRef.current.clear();
+        universalSearchClosedAtRef.current = 0;
         saved.push(data.tag);
       }
       const superTagResponse = await apiFetch("/api/supertags", {
@@ -2841,6 +2872,8 @@ export default function Home() {
 
   const applyBulkTaggedPeople = (people) => {
     if (!Array.isArray(people) || !people.length) return;
+    universalPeopleSearchCacheRef.current.clear();
+    universalSearchClosedAtRef.current = 0;
     const updates = new Map(people.map((person) => [person.personId, person]));
     setState((current) => normalizeState({
       ...current,

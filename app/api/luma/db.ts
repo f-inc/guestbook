@@ -573,11 +573,6 @@ export async function searchIndexedPeople(search: string, {
   const normalizedIncludedTags = [...new Set(includedTags.map((tag) => tag.trim()).filter(Boolean))].slice(0, 20);
   const normalizedExcludedTags = [...new Set(excludedTags.map((tag) => tag.trim()).filter(Boolean))].slice(0, 20);
   const normalizedComments = comments === "with" || comments === "without" ? comments : "any";
-  const hasFilters = normalizedIncludedTags.length > 0
-    || normalizedExcludedTags.length > 0
-    || normalizedComments !== "any";
-
-
   const db = prisma();
   const escapedQuery = query.replace(/[\\%_]/g, "\\$&");
   const containsQuery = `%${escapedQuery}%`;
@@ -633,7 +628,27 @@ export async function searchIndexedPeople(search: string, {
   const personFilterSql = personFilterConditions.length
     ? Prisma.sql`AND ${Prisma.join(personFilterConditions, " AND ")}`
     : Prisma.empty;
-  const matches = await db.$queryRaw<Array<{
+  // Omit phone scans from text queries entirely, including generic prepared plans.
+  const personMatchSql = !query ? Prisma.sql`TRUE` : Prisma.sql`(
+    LOWER(
+      COALESCE(person.name, '') || ' ' ||
+      COALESCE(person.email, '') || ' ' ||
+      COALESCE(person.title, '') || ' ' ||
+      COALESCE(person.bio, '')
+    ) LIKE LOWER(${containsQuery}) ESCAPE '\\'
+    ${phoneDigits ? Prisma.sql`OR REGEXP_REPLACE(COALESCE(person.phone_number, ''), '[^0-9]', '', 'g') LIKE ${containsPhoneDigits}` : Prisma.empty}
+  )`;
+  const guestMatchSql = !query ? Prisma.sql`FALSE` : Prisma.sql`(
+    LOWER(
+      COALESCE(guest.email, '') || ' ' ||
+      COALESCE(guest.profile_description, '') || ' ' ||
+      COALESCE(guest.search_text, '')
+    ) LIKE LOWER(${containsQuery}) ESCAPE '\\'
+    ${phoneDigits ? Prisma.sql`OR REGEXP_REPLACE(COALESCE(guest.phone_number, ''), '[^0-9]', '', 'g') LIKE ${containsPhoneDigits}` : Prisma.empty}
+  )`;
+  // Separate comments from the profile predicate so PostgreSQL can use each
+  // trigram index. A correlated OR here forces a scan of the people directory.
+  const matches = await db.$queryRaw<Array<AnyRecord & {
     personId: string;
     eventId: string | null;
     phoneNumber: string | null;
@@ -651,46 +666,29 @@ export async function searchIndexedPeople(search: string, {
             ELSE 4
           END AS rank
         FROM luma_people AS person
-        WHERE (
-          ${!query}
-          OR (
-            LOWER(
-              COALESCE(person.name, '') || ' ' ||
-              COALESCE(person.email, '') || ' ' ||
-              COALESCE(person.title, '') || ' ' ||
-              COALESCE(person.bio, '')
-            ) LIKE LOWER(${containsQuery}) ESCAPE '\\'
-            OR (
-              ${Boolean(phoneDigits)}
-              AND REGEXP_REPLACE(COALESCE(person.phone_number, ''), '[^0-9]', '', 'g') LIKE ${containsPhoneDigits}
-            )
-            OR EXISTS (
-              SELECT 1
-              FROM guest_comments AS comment
-              WHERE comment.person_id = person.person_id
-                AND LOWER(comment.body) LIKE LOWER(${containsQuery}) ESCAPE '\\'
-            )
-          )
-        )
+        WHERE ${personMatchSql}
         ${personFilterSql}
         ORDER BY rank, person.last_seen_at DESC, person.name ASC
+        LIMIT ${personCandidateLimit}
+    ),
+    comment_candidates AS MATERIALIZED (
+        SELECT person.person_id, 4 AS rank
+        FROM guest_comments AS comment
+        JOIN luma_people AS person ON person.person_id = comment.person_id
+        WHERE ${Boolean(query)}
+          AND LOWER(comment.body) LIKE LOWER(${containsQuery}) ESCAPE '\\'
+          ${personFilterSql}
+        GROUP BY person.person_id
+        ORDER BY person.last_seen_at DESC, person.name ASC
         LIMIT ${personCandidateLimit}
     ),
     guest_candidates AS MATERIALIZED (
         SELECT guest.person_id, 5 AS rank
         FROM luma_event_guests AS guest
-        WHERE ${Boolean(query)}
-          AND (
-            LOWER(
-              COALESCE(guest.email, '') || ' ' ||
-              COALESCE(guest.profile_description, '') || ' ' ||
-              COALESCE(guest.search_text, '')
-            ) LIKE LOWER(${containsQuery}) ESCAPE '\\'
-            OR (
-              ${Boolean(phoneDigits)}
-              AND REGEXP_REPLACE(COALESCE(guest.phone_number, ''), '[^0-9]', '', 'g') LIKE ${containsPhoneDigits}
-            )
-          )
+        WHERE ${guestMatchSql}
+          -- Every profile candidate ranks ahead of guest-only text matches.
+          -- Skip that search when profiles already fill the page and lookahead.
+          AND (SELECT COUNT(*) FROM person_candidates) < ${resultOffset + resultLimit}
         LIMIT ${guestCandidateLimit}
     ),
     tag_candidates AS MATERIALIZED (
@@ -706,6 +704,10 @@ export async function searchIndexedPeople(search: string, {
       SELECT candidate.person_id, MIN(candidate.rank)::integer AS rank
       FROM (
         SELECT * FROM person_candidates
+
+        UNION ALL
+
+        SELECT * FROM comment_candidates
 
         UNION ALL
 
@@ -729,6 +731,22 @@ export async function searchIndexedPeople(search: string, {
     )
     SELECT
       person.person_id AS "personId",
+      person.luma_user_id AS "lumaUserId",
+      person.name,
+      person.email,
+      person.title,
+      person.bio,
+      person.avatar_url AS "avatarUrl",
+      person.profile_url AS "profileUrl",
+      person.social_links AS "socialLinks",
+      person.referrer,
+      person.groups,
+      person.tags,
+      person.manual_tags AS "manualTags",
+      person.automatic_tags AS "automaticTags",
+      latest_comment.body AS "crmNotes",
+      latest_comment.created_at AS "crmNotesUpdatedAt",
+      COALESCE(latest_comment.total, 0)::integer AS "crmNoteCount",
       latest_event.event_id AS "eventId",
       COALESCE(NULLIF(BTRIM(person.phone_number), ''), latest_phone.phone_number) AS "phoneNumber",
       COALESCE(activity.events_attended, 0)::integer AS "eventsAttended",
@@ -748,10 +766,18 @@ export async function searchIndexedPeople(search: string, {
       FROM luma_event_guests AS guest
       LEFT JOIN luma_events AS event ON event.event_id = guest.event_id
       WHERE guest.person_id = person.person_id
+        AND NULLIF(BTRIM(person.phone_number), '') IS NULL
         AND NULLIF(BTRIM(guest.phone_number), '') IS NOT NULL
       ORDER BY event.starts_at DESC NULLS LAST, event.date DESC NULLS LAST, guest.last_seen_at DESC
       LIMIT 1
     ) AS latest_phone ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT comment.body, comment.created_at, COUNT(*) OVER () AS total
+      FROM guest_comments AS comment
+      WHERE comment.person_id = person.person_id
+      ORDER BY comment.created_at DESC, comment.id DESC
+      LIMIT 1
+    ) AS latest_comment ON TRUE
     LEFT JOIN LATERAL (
       SELECT
         COUNT(DISTINCT guest.event_id)
@@ -769,27 +795,17 @@ export async function searchIndexedPeople(search: string, {
 
   const hasMore = matches.length > pageSize;
   const pageMatches = matches.slice(0, pageSize);
-  if (!pageMatches.length) return { people: [], hasMore: false, nextOffset: resultOffset };
-  const people = await db.lumaPerson.findMany({
-    where: { personId: { in: pageMatches.map((match) => match.personId) } },
-    select: INDEXED_PERSON_SELECT,
-  });
-  const peopleById = new Map(people.map((person) => [person.personId, person]));
-
   return {
-    people: pageMatches.flatMap((match) => {
-      const person = peopleById.get(match.personId);
-      return person ? [{
-        person: {
-          ...indexedPersonToApiPerson(person, { phoneNumber: match.phoneNumber }),
-          eventCounts: {
-            attended: Number(match.eventsAttended) || 0,
-            registered: Number(match.eventsRegistered) || 0,
-          },
+    people: pageMatches.map((match) => ({
+      person: {
+        ...indexedPersonToApiPerson(match),
+        eventCounts: {
+          attended: Number(match.eventsAttended) || 0,
+          registered: Number(match.eventsRegistered) || 0,
         },
-        eventId: match.eventId || "",
-      }] : [];
-    }),
+      },
+      eventId: match.eventId || "",
+    })),
     hasMore,
     nextOffset: resultOffset + pageMatches.length,
   };

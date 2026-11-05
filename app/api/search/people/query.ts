@@ -9,6 +9,7 @@ export function parsePeopleSearchQuery(searchParams: URLSearchParams) {
   const includedTags = normalizedList(searchParams.getAll("tag"));
   const excludedTags = normalizedList(searchParams.getAll("exclude_tag"));
   const tagMode: "all" | "any" = searchParams.get("tag_mode") === "all" ? "all" : "any";
+  const tagScope: "current" | "ever" = searchParams.get("tag_scope") === "ever" ? "ever" : "current";
   const requestedComments = searchParams.get("comments");
   const comments: "any" | "with" | "without" = requestedComments === "with" || requestedComments === "without"
     ? requestedComments
@@ -21,6 +22,7 @@ export function parsePeopleSearchQuery(searchParams: URLSearchParams) {
     includedTags,
     excludedTags,
     tagMode,
+    tagScope,
     comments,
     hasFilters: includedTags.length > 0 || excludedTags.length > 0 || comments !== "any",
   };

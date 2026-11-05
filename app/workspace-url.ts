@@ -80,6 +80,7 @@ export type WorkspaceUrlState = {
   guestSearch: string;
   guestTags: string[];
   guestTagMode?: "any" | "all";
+  guestTagScope?: "current" | "ever";
   guestExcludedTags?: string[];
   guestLatestTagId?: string;
   guestLatestTagLabel?: string;
@@ -142,6 +143,7 @@ const WORKSPACE_PARAMS = [
   "guest_search",
   "guest_tag",
   "guest_tag_mode",
+  "guest_tag_scope",
   "guest_tag_not",
   "guest_latest_tag_id",
   "guest_latest_tag_label",
@@ -202,6 +204,7 @@ export function parseWorkspaceUrl(search: string): WorkspaceUrlState {
     guestSearch: boundedText(params.get("guest_search"), 120),
     guestTags: unique(params.getAll("guest_tag").map((tag) => boundedText(tag, 40)).filter(Boolean)).slice(0, 20),
     guestTagMode: params.get("guest_tag_mode") === "all" ? "all" : "any",
+    guestTagScope: params.get("guest_tag_scope") === "ever" ? "ever" : "current",
     guestExcludedTags: unique(params.getAll("guest_tag_not").map((tag) => boundedText(tag, 40)).filter(Boolean)).slice(0, 20),
     ...(guestLatestTagId ? { guestLatestTagId, guestLatestTagLabel } : {}),
     ...(guestHasNotes ? { guestHasNotes: true } : {}),
@@ -260,6 +263,7 @@ export function buildWorkspaceUrlSearch(currentSearch: string, state: WorkspaceU
     .forEach((status) => params.append("guest_status_not", status));
   if (state.guestSearch) params.set("guest_search", state.guestSearch);
   unique(state.guestTags).forEach((tag) => params.append("guest_tag", tag));
+  if (state.guestTagScope === "ever") params.set("guest_tag_scope", "ever");
   if (state.guestTagMode === "all") params.set("guest_tag_mode", "all");
   unique(state.guestExcludedTags || []).forEach((tag) => params.append("guest_tag_not", tag));
   if (state.guestLatestTagId) {

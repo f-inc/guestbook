@@ -5,11 +5,12 @@ export type PeopleSearchUrlState = {
     includedTags: string[];
     excludedTags: string[];
     tagMode: "any" | "all";
+    tagScope: "current" | "ever";
     comments: "any" | "with" | "without";
   };
 };
 
-const PEOPLE_PARAMS = ["people", "people_search", "people_tag", "people_tag_not", "people_tag_mode", "people_comments"];
+const PEOPLE_PARAMS = ["people", "people_search", "people_tag", "people_tag_not", "people_tag_mode", "people_tag_scope", "people_comments"];
 
 export function parsePeopleSearchUrl(search: string): PeopleSearchUrlState {
   const params = new URLSearchParams(search);
@@ -22,6 +23,7 @@ export function parsePeopleSearchUrl(search: string): PeopleSearchUrlState {
       includedTags: tags("people_tag"),
       excludedTags: tags("people_tag_not"),
       tagMode: params.get("people_tag_mode") === "all" ? "all" : "any",
+      tagScope: params.get("people_tag_scope") === "ever" ? "ever" : "current",
       comments: comments === "with" || comments === "without" ? comments : "any",
     },
   };
@@ -35,6 +37,7 @@ export function buildPeopleSearchUrlSearch(search: string, state: PeopleSearchUr
     if (state.query) params.set("people_search", state.query);
     state.filters.includedTags.forEach((tag) => params.append("people_tag", tag));
     state.filters.excludedTags.forEach((tag) => params.append("people_tag_not", tag));
+    if (state.filters.tagScope === "ever") params.set("people_tag_scope", "ever");
     if (state.filters.tagMode === "all") params.set("people_tag_mode", "all");
     if (state.filters.comments !== "any") params.set("people_comments", state.filters.comments);
   }

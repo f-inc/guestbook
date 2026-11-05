@@ -68,6 +68,7 @@ export type GuestListQuery = {
   search: string;
   tags: string[];
   tagMode?: "any" | "all";
+  tagScope?: "current" | "ever";
   excludedTags?: string[];
   latestTagId?: string;
   latestTagLabel?: string;
@@ -112,6 +113,7 @@ export function parseGuestListQuery(params: URLSearchParams): GuestListQuery {
     search: (params.get("guest_search") || "").trim().slice(0, 120),
     tags: parseTagFilters(params.getAll("guest_tag")),
     tagMode: params.get("guest_tag_mode") === "all" ? "all" : "any",
+    tagScope: params.get("guest_tag_scope") === "ever" ? "ever" : "current",
     excludedTags: parseTagFilters(params.getAll("guest_tag_not")),
     ...(latestTagId ? { latestTagId, latestTagLabel } : {}),
     sortBy: ["events_attended", "events_registered"].includes(params.get("guest_sort_by") || "")
@@ -142,7 +144,8 @@ export function guestQueryRequiresIndex(query: GuestListQuery): boolean {
     || query.attendedGreaterThan != null
     || Boolean(query.answerQuestion)
     || Boolean(query.answerGroups?.length)
-    || Boolean(query.latestTagId);
+    || Boolean(query.latestTagId)
+    || query.tagScope === "ever";
 }
 
 export function parseGuestAnswerGroups(values: string[]): GuestAnswerGroup[] {
@@ -175,7 +178,7 @@ export function eventGuestWhere(
   const filters = [
     guestStatusRulesWhere(eventId, query, boundary),
     guestSearchWhere(query.search),
-    guestTagsWhere(query.tags, query.tagMode, query.excludedTags),
+    guestTagsWhere(query.tags, query.tagMode, query.excludedTags, query.tagScope),
     query.hasNotes ? { person: { is: { comments: { some: {} } } } } : null,
   ].filter(Boolean);
   return {
@@ -301,6 +304,9 @@ export function priorEventWhere(boundary?: EventChronologyBoundary | null): Reco
 }
 
 export function filterGuestPayload(payload: any, query: GuestListQuery) {
+  if (query.tagScope === "ever") {
+    throw Object.assign(new Error("Historical manual tag filters require the Luma index."), { status: 503 });
+  }
   const {
     stats: cachedStats,
     analyticsQuestions: cachedAnalyticsQuestions,
@@ -354,6 +360,7 @@ export function filterGuestPayload(payload: any, query: GuestListQuery) {
       search: query.search,
       tags: query.tags,
       tagMode: query.tagMode || "any",
+      tagScope: query.tagScope || "current",
       excludedTags: query.excludedTags || [],
       sortBy: query.sortBy || "status_date",
       sortDirection: query.sortDirection || "desc",
@@ -443,9 +450,21 @@ function guestTagsWhere(
   tags: string[],
   tagMode: "any" | "all" = "any",
   excludedTags: string[] = [],
+  tagScope: "current" | "ever" = "current",
 ): Record<string, any> | null {
   const tagPredicate = (tag: string) => ({
-    person: { is: { tags: { array_contains: [tag] } } },
+    person: {
+      is: tagScope === "ever"
+        ? {
+            manualTagMutations: {
+              some: {
+                removed: false,
+                tag: { managed: false, name: { equals: tag, mode: "insensitive" } },
+              },
+            },
+          }
+        : { tags: { array_contains: [tag] } },
+    },
   });
   const predicates: Record<string, any>[] = [];
   if (tags.length) {

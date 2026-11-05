@@ -4814,6 +4814,8 @@ export default function Home() {
             state={state}
             person={selectedPerson}
             trace={selectedTrace}
+            request={apiFetch}
+            onOpenComments={() => openGuestNote(selectedPerson)}
             lumaCheckInGuestKey={lumaCheckInGuestKey}
             reinvitingGuestKey={reinvitingGuestKey}
             onGuestAction={requestGuestStatusChange}
@@ -9169,13 +9171,15 @@ function GroupChecklist({ title, groups, selected, onChange }) {
   );
 }
 
-function ProfilePanel({ state, person, trace, lumaCheckInGuestKey, reinvitingGuestKey, onGuestAction, onTraceActivity, onSelectEvent, onAvatarClick, onClose }) {
+function ProfilePanel({ state, person, trace, request, onOpenComments, lumaCheckInGuestKey, reinvitingGuestKey, onGuestAction, onTraceActivity, onSelectEvent, onAvatarClick, onClose }) {
+  const panelRef = useRef<HTMLElement>(null);
   const [activityFilters, setActivityFilters] = useState(() => activityFilterOptions.map((option) => option.status));
   const [collapsedAnswerEvents, setCollapsedAnswerEvents] = useState<Set<string>>(() => new Set());
   const activityMenuRef = useRef<HTMLDetailsElement>(null);
 
   useEffect(() => {
     setCollapsedAnswerEvents(new Set());
+    panelRef.current?.scrollTo({ top: 0 });
   }, [person?.id]);
 
   useEffect(() => {
@@ -9195,11 +9199,11 @@ function ProfilePanel({ state, person, trace, lumaCheckInGuestKey, reinvitingGue
   );
   if (!person || !profile) return null;
 
-  const { history, bio, socialLinks, currentRecord, answerGroups } = profile;
+  const { history, socialLinks, currentRecord, answerGroups } = profile;
   const currentStatus = currentRecord?.guest.status;
   const loadedActivityRecords = activityRecordsFromHistory(history.records);
   const traceRan = ["loading", "ready", "error"].includes(trace?.status);
-  const traceRecords = traceRan ? trace?.records || [] : loadedActivityRecords;
+  const traceRecords = [...new Map([...loadedActivityRecords, ...(trace?.records || [])].map((record) => [record.eventId, record])).values()];
   const answerGroupsLoading = person.source === "luma" && ["idle", "loading"].includes(trace?.status);
   const filteredTraceRecords = traceRecords.filter((record) => activityFilters.includes(activityRecordStatus(record)));
   const activityFilterLabel = activityFilters.length === activityFilterOptions.length
@@ -9216,60 +9220,47 @@ function ProfilePanel({ state, person, trace, lumaCheckInGuestKey, reinvitingGue
   };
 
   return (
-    <aside className="profile-panel panel">
+    <aside ref={panelRef} className="profile-panel panel" aria-label={`Guest profile for ${person.name}`}>
       <div className="profile-panel-motion" key={person.id}>
-        <div className="profile-head">
-          <Avatar person={person} large onPreview={onAvatarClick} />
-          <div className="profile-identity">
-            <h2>{person.name}</h2>
-            <CopyableEmail email={person.email} />
+        <header className="profile-overview">
+          <div className="profile-head">
+            <Avatar person={person} large onPreview={onAvatarClick} />
+            <div className="profile-identity">
+              <h2>{person.name}</h2>
+              <CopyableEmail email={person.email} />
+            </div>
+            <div className="profile-header-meta">
+              <ProfileTags person={person} definitions={state.tagDefinitions} />
+              <SocialIconLinks links={socialLinks} />
+            </div>
           </div>
-          <div className="profile-head-actions">
-            {currentStatus ? <StatusPill status={currentStatus} /> : null}
-            <button className="profile-close icon-button" type="button" aria-label="Close guest profile" title="Close guest profile" onClick={onClose}>
-              <X size={18} aria-hidden="true" />
-            </button>
-          </div>
-        </div>
-
-        <ProfileTags person={person} definitions={state.tagDefinitions} />
-        {bio ? <p className="profile-bio">{bio}</p> : null}
-        <SocialIconLinks links={socialLinks} />
-        {currentRecord ? (
-          <>
-            <ProfileContext record={currentRecord} />
-            <ProfileGuestActions
-              record={currentRecord}
-              person={person}
-              lumaCheckInGuestKey={lumaCheckInGuestKey}
-              reinvitingGuestKey={reinvitingGuestKey}
-              onAction={onGuestAction}
-            />
-          </>
-        ) : null}
-
-        {person.crmNotes?.trim() ? (
-          <details className="profile-disclosure" open>
-            <summary>💬 Comments</summary>
-            <section className="profile-section">
-              <article className="profile-note-card">
-                <strong>Latest comment</strong>
-                <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
-                  {person.crmNotes}
-                </ReactMarkdown>
-                {person.crmNotesUpdatedAt ? (
-                  <time dateTime={person.crmNotesUpdatedAt}>Added {formatProfileDateTime(person.crmNotesUpdatedAt)}</time>
-                ) : null}
-              </article>
+          {currentRecord ? (
+            <section className="profile-registration-card" aria-label="Registration details and actions">
+              <ProfileContext record={currentRecord} />
+              <div className="profile-registration-controls">
+                {currentStatus ? <StatusPill status={currentStatus} /> : null}
+                <ProfileGuestActions
+                  record={currentRecord}
+                  person={person}
+                  lumaCheckInGuestKey={lumaCheckInGuestKey}
+                  reinvitingGuestKey={reinvitingGuestKey}
+                  onAction={onGuestAction}
+                />
+              </div>
             </section>
-          </details>
-        ) : null}
+          ) : null}
+          <button className="profile-close icon-button" type="button" aria-label="Close guest profile" title="Close guest profile" onClick={onClose}>
+            <X size={18} aria-hidden="true" />
+          </button>
+        </header>
 
-        {answerGroups.length || answerGroupsLoading ? (
-          <details className="profile-disclosure" open>
-            <summary>Registration answers</summary>
-            <section className="profile-section">
-              {answerGroups.length ? answerGroups.map((group) => (
+        <div className="profile-review-content">
+          <ProfileComments key={person.id} person={state.people.find((candidate) => candidate.id === person.id) || person} request={request} onManage={onOpenComments} />
+          <div className="profile-review-grid">
+            <details className="profile-review-section profile-disclosure profile-answers" aria-labelledby="profile-answers-title" open>
+              <summary className="profile-section-heading"><h3 id="profile-answers-title">Registration answers</h3><span>{answerGroups.length} {answerGroups.length === 1 ? "event" : "events"}</span></summary>
+              <section className="profile-section">
+                {answerGroups.length ? [...answerGroups].sort((a, b) => Number(b.event.id === currentRecord?.event.id) - Number(a.event.id === currentRecord?.event.id)).map((group) => (
                   <article
                     className={collapsedAnswerEvents.has(group.event.id) ? "answer-card collapsed" : "answer-card"}
                     key={group.event.id}
@@ -9281,7 +9272,7 @@ function ProfilePanel({ state, person, trace, lumaCheckInGuestKey, reinvitingGue
                         aria-label={`Open ${group.event.title}`}
                         onClick={() => onSelectEvent(group.event.id, { preserveProfile: true })}
                       >
-                        <strong>{group.event.title}</strong>
+                        <strong>{group.event.id === state.selectedEventId ? <small className="profile-current-label">Current event</small> : null}{group.event.title}</strong>
                         <span>{formatDate(group.event.date)} <ArrowRight size={12} aria-hidden="true" /></span>
                       </button>
                       <button
@@ -9317,87 +9308,150 @@ function ProfilePanel({ state, person, trace, lumaCheckInGuestKey, reinvitingGue
                       </dl>
                     ) : null}
                   </article>
-                )) : (
+                )) : answerGroupsLoading ? (
                   <div className="guest-loading-state compact" role="status" aria-label="Loading registration answers">
                     <span className="loading-spinner" aria-hidden="true" />
                   </div>
-                )}
-            </section>
-          </details>
-        ) : null}
+                ) : <p className="profile-empty">No registration answers recorded.</p>}
+                {answerGroups.length > 0 && answerGroupsLoading ? <p className="profile-loading" role="status"><RefreshCw className="animate-spin" size={13} aria-hidden="true" /> Loading earlier answers…</p> : null}
+              </section>
+            </details>
 
-        <details className="profile-disclosure" open>
-          <summary>Event activity</summary>
-          <section className="profile-section">
-            <div className="trace-toolbar">
-              {traceRecords.length ? (
-                <details
-                  className="activity-filter-menu"
-                  ref={activityMenuRef}
-                  onKeyDown={(event) => {
-                    if (event.key !== "Escape") return;
-                    event.preventDefault();
-                    event.stopPropagation();
-                    event.currentTarget.removeAttribute("open");
-                    event.currentTarget.querySelector("summary")?.focus();
-                  }}
-                >
-                  <summary>
-                    <ListFilter size={15} aria-hidden="true" />
-                    <span>{activityFilterLabel}</span>
-                    <span className="activity-filter-count">
-                      {filteredTraceRecords.length}/{traceRecords.length}
-                    </span>
-                    <ChevronDown className="activity-filter-chevron" size={15} aria-hidden="true" />
-                  </summary>
-                  <div className="activity-filter-popover">
-                    <div className="activity-filter-head">
-                      <strong>Activity types</strong>
-                      <span>{activityFilters.length} selected</span>
-                    </div>
-                    {activityFilterOptions.map((option) => {
-                      const checked = activityFilters.includes(option.status);
-                      return (
-                        <label className="activity-filter-option" key={option.status}>
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            disabled={checked && activityFilters.length === 1}
-                            onChange={() => toggleActivityFilter(option.status)}
-                          />
-                          <span>{option.label}</span>
-                        </label>
-                      );
-                    })}
-                  </div>
-                </details>
-              ) : <span className="activity-filter-placeholder">Activity</span>}
-              <button
-                className="icon-button activity-refresh"
-                type="button"
-                aria-label={trace?.status === "loading" ? "Loading activity" : trace?.status === "ready" ? "Refresh activity" : "Load activity"}
-                title={trace?.status === "loading" ? "Loading activity" : trace?.status === "ready" ? "Refresh activity" : "Load activity"}
-                disabled={trace?.status === "loading"}
-                onClick={onTraceActivity}
-              >
-                <RefreshCw className={trace?.status === "loading" ? "animate-spin" : ""} size={16} aria-hidden="true" />
-              </button>
-            </div>
-            {traceRecords.length ? (
-              <>
-                {filteredTraceRecords.length ? (
-                  <TraceTimeline records={filteredTraceRecords} traced={traceRan && trace?.records?.length > 0} onSelectEvent={onSelectEvent} />
-                ) : (
-                  <div className="empty-state">No event activity matches the selected types.</div>
-                )}
-              </>
-            ) : traceRan && trace?.status === "ready" ? (
-              <div className="empty-state">No activity found in the scanned event window.</div>
-            ) : null}
-          </section>
-        </details>
+            <details className="profile-review-section profile-disclosure profile-history" aria-labelledby="profile-history-title" open>
+              <summary className="profile-section-heading"><h3 id="profile-history-title">Event registration history</h3><span>{traceRecords.length} {traceRecords.length === 1 ? "event" : "events"}</span></summary>
+              <section className="profile-section">
+                <div className="trace-toolbar">
+                  {traceRecords.length ? (
+                    <details
+                      className="activity-filter-menu"
+                      ref={activityMenuRef}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Escape") return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        event.currentTarget.removeAttribute("open");
+                        event.currentTarget.querySelector("summary")?.focus();
+                      }}
+                    >
+                      <summary>
+                        <ListFilter size={15} aria-hidden="true" />
+                        <span>{activityFilterLabel}</span>
+                        <span className="activity-filter-count">
+                          {filteredTraceRecords.length}/{traceRecords.length}
+                        </span>
+                        <ChevronDown className="activity-filter-chevron" size={15} aria-hidden="true" />
+                      </summary>
+                      <div className="activity-filter-popover">
+                        <div className="activity-filter-head">
+                          <strong>Activity types</strong>
+                          <span>{activityFilters.length} selected</span>
+                        </div>
+                        {activityFilterOptions.map((option) => {
+                          const checked = activityFilters.includes(option.status);
+                          return (
+                            <label className="activity-filter-option" key={option.status}>
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                disabled={checked && activityFilters.length === 1}
+                                onChange={() => toggleActivityFilter(option.status)}
+                              />
+                              <span>{option.label}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </details>
+                  ) : <span className="activity-filter-placeholder">Activity</span>}
+                  <button
+                    className="icon-button activity-refresh"
+                    type="button"
+                    aria-label={trace?.status === "loading" ? "Loading activity" : trace?.status === "ready" ? "Refresh activity" : "Load activity"}
+                    title={trace?.status === "loading" ? "Loading activity" : trace?.status === "ready" ? "Refresh activity" : "Load activity"}
+                    disabled={trace?.status === "loading"}
+                    onClick={onTraceActivity}
+                  >
+                    <RefreshCw className={trace?.status === "loading" ? "animate-spin" : ""} size={16} aria-hidden="true" />
+                  </button>
+                </div>
+                {trace?.status === "loading" ? <p className="profile-loading" role="status"><RefreshCw className="animate-spin" size={13} aria-hidden="true" /> Loading event history…</p> : null}
+                {trace?.status === "error" ? <p className="profile-load-error" role="alert">{trace.message || "Unable to load event history."} Use the refresh button to try again.</p> : null}
+                {trace?.truncated ? <p className="profile-empty">Showing available history within the activity lookup limits.</p> : null}
+                {traceRecords.length ? (
+                  <>
+                    {filteredTraceRecords.length ? (
+                      <TraceTimeline records={filteredTraceRecords} traced={traceRan && trace?.records?.length > 0} onSelectEvent={onSelectEvent} />
+                    ) : (
+                      <div className="empty-state">No event activity matches the selected types.</div>
+                    )}
+                  </>
+                ) : traceRan && trace?.status === "ready" ? (
+                  <p className="profile-empty">No event registrations found in the available history.</p>
+                ) : trace?.status !== "loading" && trace?.status !== "error" ? <p className="profile-empty">No event history recorded.</p> : null}
+              </section>
+            </details>
+          </div>
+        </div>
       </div>
     </aside>
+  );
+}
+
+function ProfileComments({ person, request, onManage }) {
+  const commentThreadId = useId();
+  const [expanded, setExpanded] = useState(false);
+  const requestRef = useRef(request);
+  requestRef.current = request;
+  const [revision, setRevision] = useState(0);
+  const [thread, setThread] = useState({ personId: "", comments: [], status: "loading", error: "" });
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setThread({ personId: person.id, comments: [], status: "loading", error: "" });
+    void requestRef.current(`/api/notes?person_id=${encodeURIComponent(person.id)}`, { cache: "no-store", signal: controller.signal })
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Unable to load comments.");
+        if (!controller.signal.aborted) setThread({ personId: person.id, comments: Array.isArray(data.comments) ? data.comments : [], status: "ready", error: "" });
+      })
+      .catch((error) => {
+        if (!controller.signal.aborted) setThread({ personId: person.id, comments: [], status: "error", error: error.message || "Unable to load comments." });
+      });
+    return () => controller.abort();
+  }, [person.id, person.crmNotesUpdatedAt, person.crmNoteCount, person.crmNotes, revision]);
+
+  const current = thread.personId === person.id ? thread : { comments: [], status: "loading", error: "" };
+  const comments = current.status === "ready" ? [...current.comments].reverse() : person.crmNotes?.trim() ? [{ id: "latest", body: person.crmNotes, author: "Latest comment", createdAt: person.crmNotesUpdatedAt }] : [];
+
+  return (
+    <section className="profile-review-section profile-comments" aria-labelledby="profile-comments-title">
+      <div className="profile-section-heading">
+        <div>
+          <h3 id="profile-comments-title">
+            <button className="plain flex items-center gap-2 text-left" type="button" aria-expanded={expanded} aria-controls={commentThreadId} onClick={() => setExpanded((current) => !current)}>
+              <span aria-hidden="true">{expanded ? "−" : "+"}</span> Comments
+            </button>
+          </h3>
+          {current.status === "ready" ? <span>{comments.length}</span> : null}
+        </div>
+        <button className="button ghost profile-comments-manage" type="button" onClick={onManage}><MessageSquare size={14} aria-hidden="true" /> Add / edit</button>
+      </div>
+      <div id={commentThreadId} hidden={!expanded}>
+        {current.status === "loading" ? <p className="profile-loading" role="status"><RefreshCw className="animate-spin" size={13} aria-hidden="true" /> Loading comment history…</p> : null}
+        {current.status === "error" ? <div className="profile-load-error" role="alert"><p>{current.error}</p><button type="button" className="plain" onClick={() => setRevision((value) => value + 1)}>Retry comments</button></div> : null}
+        <div className="profile-comment-list">
+          {comments.map((comment) => (
+            <article className="profile-note-card" key={comment.id}>
+              <header><strong>{comment.author || "Guestbook"}</strong>{comment.createdAt ? <time dateTime={comment.createdAt}>{formatProfileDateTime(comment.createdAt)}</time> : null}</header>
+              <div className="markdown-preview guest-comment-body">
+                <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={{ a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noopener noreferrer" /> }}>{comment.body}</ReactMarkdown>
+              </div>
+            </article>
+          ))}
+        </div>
+        {current.status === "ready" && !comments.length ? <p className="profile-empty">No comments yet. Add the first review note.</p> : null}
+      </div>
+    </section>
   );
 }
 

@@ -168,7 +168,7 @@ export function createLumaClient({
       method,
       headers: {
         ...(method === "POST" ? { "content-type": "application/json" } : {}),
-        "x-luma-auth-session": credential.value,
+        cookie: `luma.auth-session-key=${encodeURIComponent(credential.value)}`,
         "x-luma-client-type": "luma-web",
       },
       body: method === "POST" && options.body !== undefined ? JSON.stringify(options.body) : undefined,

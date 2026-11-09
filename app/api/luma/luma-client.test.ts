@@ -34,6 +34,39 @@ test("reserves a bounded page budget for both future and past session events", a
   assert.equal(result.truncated, true);
 });
 
+test("private GET and POST authenticate with the browser session cookie only", async () => {
+  const calls: Array<{ method: string; headers: Headers; body: unknown }> = [];
+  const client = createLumaClient({
+    logger,
+    fetchImpl: async (_input, init) => {
+      calls.push({ method: init?.method || "GET", headers: new Headers(init?.headers), body: init?.body });
+      return Response.json({ ok: true });
+    },
+  });
+  await client.privateGet({
+    requestId: "cookie-get",
+    lumaSessionToken: "usr-example.session",
+    path: "/event/analytics/survey-responses",
+    params: { event_api_id: "evt-one" },
+    operation: "event feedback",
+  });
+  await client.privatePost({
+    requestId: "cookie-post",
+    sessionToken: { envName: "LUMA_SESSION_TOKEN", value: "usr-example.session", order: 0 },
+    path: "/event/admin/update-check-in",
+    body: { event_api_id: "evt-one" },
+    operation: "check-in",
+  });
+  assert.deepEqual(calls.map((call) => call.method), ["GET", "POST"]);
+  for (const call of calls) {
+    assert.equal(call.headers.get("cookie"), "luma.auth-session-key=usr-example.session");
+    assert.equal(call.headers.has("x-luma-auth-session"), false);
+    assert.equal(call.headers.get("x-luma-client-type"), "luma-web");
+  }
+  assert.equal(calls[1].headers.get("content-type"), "application/json");
+  assert.equal(calls[1].body, JSON.stringify({ event_api_id: "evt-one" }));
+});
+
 test("private requests identify configured credentials without logging token values", async () => {
   const logs: Array<Record<string, any>> = [];
   const client = createLumaClient({

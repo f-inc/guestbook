@@ -59,13 +59,16 @@ export function normalizeEventFeedback(payload: unknown, maximumResponses = 1_00
     .map(normalizeFeedbackResponse)
     .filter((response): response is EventFeedbackResponse => Boolean(response))
     .sort((left, right) => timestamp(right.createdAt) - timestamp(left.createdAt));
-  const ratingCounts = { ...EMPTY_RATING_COUNTS };
-  let ratingTotal = 0;
-
+  const responseRatingCounts = { ...EMPTY_RATING_COUNTS };
   responses.forEach((response) => {
-    ratingCounts[response.rating as 1 | 2 | 3 | 4 | 5] += 1;
-    ratingTotal += response.rating;
+    responseRatingCounts[response.rating as 1 | 2 | 3 | 4 | 5] += 1;
   });
+  const ratingCounts = normalizeRatingCounts(root.rating_counts)
+    ?? normalizeRatingCounts(data.rating_counts)
+    ?? responseRatingCounts;
+  const ratedCount = Object.values(ratingCounts).reduce((sum, count) => sum + count, 0);
+  const ratingTotal = ([1, 2, 3, 4, 5] as const)
+    .reduce((sum, rating) => sum + rating * ratingCounts[rating], 0);
 
   const upstreamTotal = finiteInteger(
     root.num_responses,
@@ -73,12 +76,14 @@ export function normalizeEventFeedback(payload: unknown, maximumResponses = 1_00
     root.total_responses,
     data.total_responses,
   );
-  const totalResponses = Math.max(rawResponses.length, upstreamTotal ?? 0);
+  const totalResponses = Math.max(rawResponses.length, upstreamTotal ?? 0, ratedCount);
+  const upstreamAverage = validAverage(root.average_rating, data.average_rating);
 
   return {
     responses,
     totalResponses,
-    averageRating: responses.length ? Number((ratingTotal / responses.length).toFixed(2)) : null,
+    averageRating: upstreamAverage
+      ?? (ratedCount ? Number((ratingTotal / ratedCount).toFixed(2)) : null),
     ratingCounts,
     truncated: totalResponses > responses.length,
   };
@@ -136,6 +141,31 @@ export function aggregateEventFeedback(sources: EventFeedbackSource[]): Aggregat
     truncated: sources.some((source) => source.feedback.truncated),
     sources: normalizedSources,
   };
+}
+
+function normalizeRatingCounts(value: unknown): EventFeedback["ratingCounts"] | null {
+  if (!Array.isArray(value) || !value.length) return null;
+  const counts = { ...EMPTY_RATING_COUNTS };
+  const seen = new Set<number>();
+  for (const entry of value) {
+    const item = record(entry);
+    const rating = item.rating;
+    const count = item.count;
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5
+      || !Number.isSafeInteger(count) || count < 0 || seen.has(rating)) return null;
+    seen.add(rating);
+    counts[rating as 1 | 2 | 3 | 4 | 5] = count;
+  }
+  return counts;
+}
+
+function validAverage(...values: unknown[]): number | null {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isFinite(value) && value >= 1 && value <= 5) {
+      return Number(value.toFixed(2));
+    }
+  }
+  return null;
 }
 
 function normalizeFeedbackResponse(value: unknown, index: number): EventFeedbackResponse | null {

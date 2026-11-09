@@ -114,3 +114,97 @@ test("aggregates ratings and keeps source event context on responses", () => {
     [["First event", 2], ["Second event", 1]],
   );
 });
+
+
+test("uses Luma's complete summary when only commented responses are returned", () => {
+  const feedback = normalizeEventFeedback({
+    num_responses: 9,
+    average_rating: 5,
+    rating_counts: [
+      { rating: 5, count: 9 },
+      { rating: 4, count: 0 },
+      { rating: 3, count: 0 },
+      { rating: 2, count: 0 },
+      { rating: 1, count: 0 },
+    ],
+    survey_responses: Array.from({ length: 3 }, (_, index) => ({
+      id: `comment-${index}`, rating: 5, feedback: "Great event",
+    })),
+  });
+  assert.equal(feedback.totalResponses, 9);
+  assert.equal(feedback.averageRating, 5);
+  assert.deepEqual(feedback.ratingCounts, { 1: 0, 2: 0, 3: 0, 4: 0, 5: 9 });
+  assert.equal(feedback.responses.length, 3);
+  assert.equal(feedback.truncated, true);
+});
+
+test("partial response cards and display caps do not change the full rating distribution", () => {
+  const feedback = normalizeEventFeedback({
+    data: {
+      num_responses: 8,
+      average_rating: 4.375,
+      rating_counts: [{ rating: 5, count: 3 }, { rating: 4, count: 5 }],
+      survey_responses: [{ rating: 5 }, { rating: 5 }, { rating: 5 }],
+    },
+  }, 1);
+  assert.equal(feedback.totalResponses, 8);
+  assert.equal(feedback.responses.length, 1);
+  assert.equal(feedback.averageRating, 4.38);
+  assert.deepEqual(feedback.ratingCounts, { 1: 0, 2: 0, 3: 0, 4: 5, 5: 3 });
+});
+
+test("keeps full rating summaries without individual response cards", () => {
+  const feedback = normalizeEventFeedback({
+    num_responses: 8,
+    average_rating: null,
+    rating_counts: [{ rating: 5, count: 3 }, { rating: 4, count: 5 }],
+    survey_responses: [],
+  });
+  assert.equal(feedback.totalResponses, 8);
+  assert.equal(feedback.averageRating, 4.38);
+  assert.equal(feedback.ratingCounts[4], 5);
+  assert.equal(feedback.responses.length, 0);
+});
+
+test("invalid summary fields fall back to the available response ratings", () => {
+  for (const rating_counts of [
+    undefined, [], [{ rating: 6, count: 8 }], [{ rating: 5, count: -1 }],
+    [{ rating: 5, count: 1.5 }], [{ rating: 5, count: null }],
+    [{ rating: 5, count: 2 }, { rating: 5, count: 2 }],
+  ]) {
+    const feedback = normalizeEventFeedback({
+      num_responses: 2,
+      average_rating: 9,
+      rating_counts,
+      survey_responses: [{ rating: 4 }, { rating: 5 }],
+    });
+    assert.equal(feedback.averageRating, 4.5);
+    assert.deepEqual(feedback.ratingCounts, { 1: 0, 2: 0, 3: 0, 4: 1, 5: 1 });
+  }
+});
+
+test("combined feedback weights all ratings rather than available response cards", () => {
+  const aggregate = aggregateEventFeedback([
+    {
+      eventId: "evt-many", eventTitle: "Eight ratings",
+      feedback: normalizeEventFeedback({
+        num_responses: 8, average_rating: 4.375,
+        rating_counts: [{ rating: 5, count: 3 }, { rating: 4, count: 5 }],
+        survey_responses: [{ id: "one-card", rating: 5 }],
+      }),
+    },
+    {
+      eventId: "evt-few", eventTitle: "Two ratings",
+      feedback: normalizeEventFeedback({
+        num_responses: 2, average_rating: 1,
+        rating_counts: [{ rating: 1, count: 2 }],
+        survey_responses: [{ id: "second-card", rating: 1 }],
+      }),
+    },
+  ]);
+  assert.equal(aggregate.totalResponses, 10);
+  assert.equal(aggregate.averageRating, 3.7);
+  assert.deepEqual(aggregate.ratingCounts, { 1: 2, 2: 0, 3: 0, 4: 5, 5: 3 });
+  assert.equal(aggregate.responses.length, 2);
+  assert.equal(aggregate.truncated, true);
+});

@@ -9073,6 +9073,9 @@ function FeedbackTab({ events, feedback, people, onRefresh, onLoad, onOpenPerson
           <small>{feedback.totalResponses || 0} {feedback.totalResponses === 1 ? "rating" : "ratings"}</small>
         </div>
         <div className="feedback-distribution">
+          {ratedCount < feedback.totalResponses ? (
+            <p>Rating distribution available for {ratedCount} of {feedback.totalResponses} ratings.</p>
+          ) : null}
           {feedbackRatingOptions.map((option) => {
             const count = Number(feedback.ratingCounts?.[option.rating] || 0);
             const percent = ratedCount ? Math.round((count / ratedCount) * 100) : 0;
@@ -9131,7 +9134,9 @@ function FeedbackTab({ events, feedback, people, onRefresh, onLoad, onOpenPerson
       </div>
 
       {feedback.truncated ? (
-        <p className="feedback-truncated">Showing the newest {responses.length} of {feedback.totalResponses} responses.</p>
+        <p className="feedback-truncated">
+          Showing {responses.length} individual responses out of {feedback.totalResponses} total ratings.
+        </p>
       ) : null}
 
       {responses.length ? (
@@ -9173,7 +9178,13 @@ function FeedbackTab({ events, feedback, people, onRefresh, onLoad, onOpenPerson
             );
           })}
         </div>
-      ) : <div className="empty-state">No feedback has been submitted for {bulk ? "these events" : "this event"} yet.</div>}
+      ) : (
+        <div className="empty-state">
+          {feedback.totalResponses
+            ? "No individual responses are available from Luma."
+            : `No feedback has been submitted for ${bulk ? "these events" : "this event"} yet.`}
+        </div>
+      )}
     </section>
   );
 }

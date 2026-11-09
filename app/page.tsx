@@ -10947,9 +10947,11 @@ function workspaceEventFeedback(events, feedbackByEventId) {
       error: feedback.error || "",
     })),
     errorEvents,
-    error: errorEvents.length
-      ? `${errorEvents.length} ${errorEvents.length === 1 ? "event" : "events"} could not be loaded.`
-      : "",
+    error: errorEvents.length === 1
+      ? errorEvents[0].error
+      : errorEvents.length
+        ? `${errorEvents.length} events could not be loaded.`
+        : "",
   };
 }
 

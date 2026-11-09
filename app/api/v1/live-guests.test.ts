@@ -77,7 +77,8 @@ test("live reads fall back to configured session access and paginate its complet
     const url = new URL(String(input));
     paths.push(url.pathname);
     if (url.pathname.startsWith("/v1/")) return new Response("denied", { status: 403 });
-    assert.equal(new Headers(init.headers).get("x-luma-auth-session"), "mock-session");
+    assert.equal(new Headers(init.headers).get("cookie"), "luma.auth-session-key=mock-session");
+    assert.equal(new Headers(init.headers).has("x-luma-auth-session"), false);
     if (!url.searchParams.has("pagination_cursor")) return Response.json({ entries: [{ api_id: "g1", user_api_id: "u1", approval_status: "invited" }], next_cursor: "more", has_more: true });
     return Response.json({ entries: [{ api_id: "g2", user_api_id: "u2", approval_status: "approved" }], has_more: false });
   } });

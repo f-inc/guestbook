@@ -1,4 +1,5 @@
 import { recordLumaIssue } from "./email-policy";
+import { browserLumaSession, withBrowserLumaSession } from "./browser-session";
 import { withActivityInvitationStatuses } from "./activity-invitation-status";
 import { trackedSend, eligibleInvitationRecipients, cacheReinviteEmail } from "./invite-tracking-store";
 import { appendFile, mkdir } from "node:fs/promises";
@@ -68,7 +69,11 @@ const lumaPrivateGet = lumaClient.privateGet;
 const lumaPrivatePost = lumaClient.privatePost;
 const resolveLumaEventReadCredential = lumaClient.resolveEventReadCredential;
 
-export async function GET(request: Request) {
+export function GET(request: Request) {
+  return withBrowserLumaSession(request, () => handleGET(request));
+}
+
+async function handleGET(request: Request) {
   const requestId = createRequestId();
   const startedAt = Date.now();
 
@@ -541,13 +546,13 @@ export async function GET(request: Request) {
     if (refreshEventsOnly && hasLumaDb()) {
       const snapshots = managedRawEvents.map((rawEvent, index) => ({ rawEvent, event: events[index] }));
       const indexed = await upsertNormalizedLumaEvents(snapshots);
-      const archived = rawEvents.truncated
+      const archived = rawEvents.truncated || browserLumaSession()
         ? { skipped: true, archivedEventCount: 0 }
         : await archiveIndexedEventsMissingFromCatalog(events.map((event) => event.id));
       catalogSummary = {
         indexedEventCount: indexed.eventCount,
         archivedEventCount: archived.archivedEventCount,
-        deletionReconciliationSkipped: rawEvents.truncated,
+        deletionReconciliationSkipped: rawEvents.truncated || Boolean(browserLumaSession()),
       };
     }
 
@@ -595,7 +600,11 @@ export async function GET(request: Request) {
     return jsonError(error, requestId);
   }
 }
-export async function POST(request: Request) {
+export function POST(request: Request) {
+  return withBrowserLumaSession(request, () => handlePOST(request));
+}
+
+async function handlePOST(request: Request) {
   const requestId = createRequestId();
   const startedAt = Date.now();
 
@@ -1331,6 +1340,7 @@ function cacheTtlMs(envName, fallbackSeconds) {
 }
 
 function cacheStore() {
+  if (browserLumaSession()) return browserLumaSession()!.cache;
   if (!globalThis[CACHE_KEY]) globalThis[CACHE_KEY] = new Map();
   return globalThis[CACHE_KEY];
 }
@@ -1341,6 +1351,7 @@ function inFlightStore() {
 }
 
 function eventGuestScanInFlightStore(): Map<string, Promise<any>> {
+  if (browserLumaSession()) return browserLumaSession()!.guestScans;
   if (!globalThis[EVENT_GUEST_SCAN_IN_FLIGHT_KEY]) globalThis[EVENT_GUEST_SCAN_IN_FLIGHT_KEY] = new Map();
   return globalThis[EVENT_GUEST_SCAN_IN_FLIGHT_KEY];
 }

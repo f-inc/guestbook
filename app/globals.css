@@ -6473,3 +6473,108 @@
   .profile-registration-card .profile-context { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .profile-registration-controls { flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: space-between; }
 }
+.luma-connection { position: relative; }
+.luma-connection > summary { cursor: pointer; list-style: none; }
+.luma-connection > summary::-webkit-details-marker { display: none; }
+.luma-connection-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 100;
+  width: min(390px, calc(100vw - 40px));
+  max-height: 70vh;
+  overflow: auto;
+  padding: 18px;
+  background: #fff;
+  color: #252724;
+  border: 1px solid #deded7;
+  border-radius: 12px;
+  box-shadow: 0 8px 28px #0002;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.notification-bell { position: relative; width: 42px; height: 42px; padding: 0; justify-content: center; }
+.notification-badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 19px;
+  height: 19px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--color-danger);
+  color: white;
+  border: 2px solid var(--color-canvas);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+}
+.notification-panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.notification-panel-heading > span { color: var(--color-muted); }
+.notification-list { list-style: none; margin: 0; padding: 0; }
+.notification-item { padding: 14px 0; border-top: 1px solid var(--color-border); }
+.notification-item p { margin: 6px 0 8px; color: var(--color-muted); overflow-wrap: anywhere; }
+.notification-persistent { font-size: 12px; color: var(--color-muted); }
+.notification-panel-footer { padding-top: 14px; border-top: 1px solid var(--color-border); }
+.notification-panel-footer p { margin: 0 0 10px; font-size: 12px; color: var(--color-muted); }
+
+.workspace-settings-trigger { width: 42px; height: 42px; padding: 0; justify-content: center; }
+.workspace-settings-modal {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  width: min(520px, calc(100vw - 32px));
+  max-height: calc(100dvh - 48px);
+  overflow-y: auto;
+  padding: 28px;
+  color: var(--color-ink);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 22px;
+  box-shadow: 0 24px 80px #0003;
+}
+.workspace-settings-modal::backdrop { background: #19191855; backdrop-filter: blur(5px); }
+.workspace-settings-heading { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 18px; }
+.workspace-settings-emblem { display: grid; place-items: center; width: 50px; height: 50px; border-radius: 15px; background: var(--color-brand-soft); color: var(--color-brand); }
+.workspace-settings-modal h2 { margin: 0; font-size: 28px; font-weight: 700; letter-spacing: -0.03em; line-height: 1.2; }
+.workspace-settings-modal > p { margin: 8px 0 0; color: var(--color-muted); font-size: 14px; }
+.workspace-settings-modal > .workspace-settings-section-label { margin: 28px 0 10px; font-size: 11px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; }
+.workspace-settings-options { border: 1px solid var(--color-border); border-radius: 14px; overflow: hidden; }
+.workspace-settings-option {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  padding: 18px 16px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-decoration: none;
+  text-align: left;
+  cursor: pointer;
+  transition: background 140ms ease;
+}
+.workspace-settings-option + .workspace-settings-option { border-top: 1px solid var(--color-border); }
+.workspace-settings-option:hover { background: var(--color-canvas); }
+.workspace-settings-option:focus-visible { outline: 2px solid var(--color-brand); outline-offset: -3px; }
+.workspace-settings-option-icon { flex-shrink: 0; display: grid; place-items: center; width: 42px; height: 42px; border-radius: 11px; background: var(--color-subtle); color: var(--color-muted); }
+.workspace-settings-option-copy { display: grid; flex: 1; gap: 4px; }
+.workspace-settings-option-copy strong { font-size: 15px; font-weight: 650; }
+.workspace-settings-option-copy > span { font-size: 13px; line-height: 1.45; color: var(--color-muted); }
+.workspace-settings-option > svg { flex-shrink: 0; color: var(--color-muted); }
+.luma-session-settings { display: grid; gap: 16px; margin-top: 24px; }
+.luma-session-storage-state { margin: 0; font-size: 13px; color: var(--color-muted); }
+.luma-session-settings-note, .luma-session-instructions { margin: 0; font-size: 13px; line-height: 1.6; color: var(--color-muted); }
+.luma-session-instructions summary { cursor: pointer; color: var(--color-ink); font-weight: 600; }
+.luma-session-instructions ol { margin: 12px 0 0; padding-left: 20px; }
+.luma-session-instructions li + li { margin-top: 8px; }
+.luma-session-instructions code { overflow-wrap: anywhere; }
+.luma-session-settings-actions { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
+.luma-session-success { margin: 0; padding: 12px; border-radius: 10px; color: var(--color-brand); background: var(--color-brand-soft); font-size: 14px; }
+.notification-item .button { margin-bottom: 10px; }
+.notification-persistent { display: block; }
+@media (max-width: 480px) {
+  .workspace-settings-modal { padding: 22px 18px; }
+  .workspace-settings-option { padding: 16px 12px; gap: 11px; }
+}

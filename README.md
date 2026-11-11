@@ -67,6 +67,29 @@ Open `http://localhost:3030`.
 
 ## Data Refresh
 
+The header's notification bell shows a badge for unresolved Luma session issues.
+Notifications persist in browser storage across reloads and cannot be dismissed;
+they clear when a successful check confirms resolution. Opening the panel does
+not clear its badge. Checks run on load, window focus, and every minute while
+visible. **Check again** lets you verify a fix immediately. Temporary outages keep
+existing session warnings. Each check reads one future event per server session,
+with a 10-second timeout; it does not fetch guests, sync events, or access the
+database. Calendar API keys are not validated by this check. A connected session
+confirms event-list access, not permission for every event or account identity.
+Open **Settings → Luma connection** (or **Update session** in a notification) to
+paste, validate, and save a session in this browser. It is used for both personal
+event discovery and Luma actions, replacing server session credentials for that
+request; calendar API keys remain available. Saving refreshes the catalog and
+rechecks notifications. Removing it restores server-session fallback. Each browser
+and site origin has its own saved session. Environment variables remain an optional
+fallback for server jobs, which cannot access browser storage.
+
+The browser sends the token only in a header to same-origin Luma API routes.
+It is never put in URLs, returned in status payloads, or stored in the database,
+logs, or notification storage. Server credential routing and response caches for
+browser-session requests are request-scoped. Catalog refreshes using a browser
+session do not archive other indexed events based on that account's visibility.
+
 Guestbook refreshes the lightweight Luma event catalog on app load and when the browser tab becomes active. For the selected event, it compares Luma's approved, pending, waitlist, invited, declined, and checked-in counts with the local snapshot before fetching guests.
 
 The former hourly full-sync Worker is archived. The `/api/luma/sync` endpoint remains available as a deliberate recovery or backfill command:

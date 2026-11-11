@@ -1,6 +1,9 @@
 "use client";
 
 import { AudienceVerification } from "./email-verification-ui";
+import { LumaConnectionStatus } from "./luma-connection-status";
+import { WorkspaceSettings } from "./workspace-settings";
+import { addBrowserLumaSession, LUMA_SESSION_UPDATED_EVENT } from "./luma-session";
 import { inviteStatusLabels } from "./invite-tracking";
 import { InvitationTrackingProvider, InvitationStatus, TrackingControls, InvitationOutcomes, GuestsPageFrame } from "./invitation-tracking-ui";
 import type { CSSProperties } from "react";
@@ -1002,9 +1005,12 @@ export default function Home() {
     };
     document.addEventListener("visibilitychange", refreshIfVisible);
     window.addEventListener("focus", refreshIfVisible);
+    const refreshAfterSessionUpdate = () => { void refreshLumaEventCatalog({ reason: "session_updated", force: true }); };
+    window.addEventListener(LUMA_SESSION_UPDATED_EVENT, refreshAfterSessionUpdate);
     return () => {
       document.removeEventListener("visibilitychange", refreshIfVisible);
       window.removeEventListener("focus", refreshIfVisible);
+      window.removeEventListener(LUMA_SESSION_UPDATED_EVENT, refreshAfterSessionUpdate);
     };
   }, [sessionStatus, guestbookKey]);
 
@@ -4096,16 +4102,8 @@ export default function Home() {
           <kbd aria-label="Command K"><span aria-hidden="true">⌘</span><span>K</span></kbd>
         </button>
         <div className="topbar-actions">
-          <a className="button" href="/admin">API access</a>
-          <a className="button" href="/requests"><FileText size={17} aria-hidden="true" />Requests</a>
-          <button className="button" type="button" onClick={openTagSettings}>
-            <Tag size={17} aria-hidden="true" />
-            Tags
-          </button>
-          <button className="button" type="button" onClick={() => lockSession()}>
-            <Lock size={17} aria-hidden="true" />
-            Lock
-          </button>
+          <LumaConnectionStatus request={apiFetch} />
+          <WorkspaceSettings onOpenTags={openTagSettings} request={apiFetch} />
           <button className="button primary" type="button" onClick={() => setEventDraft(blankEventDraft())}>
             <Plus size={17} aria-hidden="true" />
             New event
@@ -5532,7 +5530,6 @@ function GuestbookKeyGate({ value, error, checking, onChange, onSubmit }) {
               autoComplete="current-password"
               autoFocus
               value={value}
-              disabled={checking}
               onChange={(event) => onChange(event.target.value)}
             />
           </label>
@@ -10368,21 +10365,32 @@ async function postBulkLumaAction(payload, apiFetch) {
 
 async function verifyGuestbookKey(guestbookKey: string) {
   try {
-    const response = await guestbookFetch(guestbookKey, "/api/session", { cache: "no-store" });
+    const response = await guestbookFetch(guestbookKey, "/api/session", {
+      cache: "no-store",
+      signal: AbortSignal.timeout(10_000),
+    });
     const data: any = await response.json();
     return {
       ok: response.ok && data.ok !== false,
       status: response.status,
       error: data.error || "Unable to validate the Guestbook key.",
     };
-  } catch {
-    return { ok: false, status: 0, error: "Unable to reach Guestbook. Try again." };
+  } catch (error) {
+    return { ok: false, status: 0, error: error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name)
+      ? "Guestbook took too long to respond. Try again."
+      : "Unable to reach Guestbook. Try again." };
   }
 }
 
 function guestbookFetch(guestbookKey: string, input: RequestInfo | URL, init: RequestInit = {}) {
   const headers = new Headers(init.headers);
   headers.set(GUESTBOOK_KEY_HEADER, guestbookKey);
+  if (typeof window !== "undefined") {
+    try {
+      addBrowserLumaSession(headers, input instanceof Request ? input.url : String(input), window.location.origin,
+        window.localStorage.getItem(LUMA_SESSION_TOKEN_STORAGE_KEY) || "");
+    } catch {}
+  }
   return fetch(input, { ...init, headers });
 }
 

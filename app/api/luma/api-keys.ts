@@ -1,3 +1,5 @@
+import { browserLumaSession } from "./browser-session";
+
 export type LumaApiKey = {
   envName: string;
   value: string;
@@ -50,6 +52,8 @@ export function lumaApiKeys(environment: Environment = process.env): LumaApiKey[
 }
 
 export function lumaSessionTokens(environment: Environment = process.env): LumaSessionToken[] {
+  const browser = environment === process.env ? browserLumaSession() : null;
+  if (browser) return [{ envName: "browser-session", value: browser.token, order: 0 }];
   return numberedCredentials("LUMA_SESSION_TOKEN", environment);
 }
 
@@ -131,6 +135,8 @@ export function mergeLumaEvents(eventGroups: unknown[][]) {
 }
 
 function eventCredentialStore(): Map<string, CachedCredentialSource> {
+  const browser = browserLumaSession();
+  if (browser) return browser.credentials;
   const root = globalThis as typeof globalThis & { [EVENT_CREDENTIAL_STORE]?: Map<string, CachedCredentialSource> };
   root[EVENT_CREDENTIAL_STORE] ||= new Map<string, CachedCredentialSource>();
   return root[EVENT_CREDENTIAL_STORE];

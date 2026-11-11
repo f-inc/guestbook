@@ -1,4 +1,5 @@
 import { appendFile, mkdir } from "node:fs/promises";
+import { withBrowserLumaSession } from "../browser-session";
 
 type AnyRecord = Record<string, any>;
 type HttpError = Error & { status?: number };
@@ -39,7 +40,7 @@ const approvalToStatus = {
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
-  if (url.searchParams.get("run") === "1") return runSync(request);
+  if (url.searchParams.get("run") === "1") return withBrowserLumaSession(request, () => runSync(request));
 
   const requestId = createRequestId();
   try {
@@ -58,7 +59,7 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   // Recovery/backfill only. Routine freshness uses the event catalog endpoint
   // plus selected-event count reconciliation.
-  return runSync(request);
+  return withBrowserLumaSession(request, () => runSync(request));
 }
 
 async function runSync(request: Request) {

@@ -1,3 +1,4 @@
+import { humanIdentityEnabled } from "./human-mode";
 import { activeEmailSql, emailRemovalEnabled, removedEmails } from "./email-inactivity";
 import { emailDecision } from "./email-policy";
 import { issueEvidence } from "./email-issues";
@@ -9,8 +10,9 @@ import { emailableCredits, verificationBudget, emailableRequest, parseVerificati
 import { logVerification, redactVerificationMessage } from "./verification-log";
 
 // The indexed community only: no live contacts/list or calendar guest scans.
-const community = Prisma.sql`
+const community = () => Prisma.sql`
   WITH addresses AS (
+    ${humanIdentityEnabled() ? Prisma.sql`SELECT email_lower AS email,person_id AS "personId",NULL::text AS name FROM guestbook_person_emails UNION ALL` : Prisma.empty}
     SELECT lower(trim(coalesce(email_lower, email))) AS email, person_id AS "personId", name FROM luma_people
     UNION ALL
     SELECT lower(trim(coalesce(g.email_lower, g.email))), g.person_id, p.name
@@ -19,8 +21,12 @@ const community = Prisma.sql`
     SELECT lower(trim("emailLower")), "personId", name FROM luma_invite_tracking
     UNION ALL SELECT "emailLower", "personId", name FROM email_addresses
     UNION ALL SELECT "emailLower", NULL, NULL FROM luma_calendar_opt_outs
-  ), community AS (
-    SELECT email, min("personId") AS "personId", min(name) AS name FROM addresses
+  )${humanIdentityEnabled() ? Prisma.sql`, canonical_addresses AS (
+    SELECT address.email,COALESCE(identity.person_id,human.merged_into_id,address."personId") AS "personId",address.name
+    FROM addresses address LEFT JOIN guestbook_account_identities identity ON identity.account_id=address."personId"
+    LEFT JOIN (SELECT person_id,merged_into_id FROM public."guestbook_people") human ON human.person_id=address."personId"
+  )` : Prisma.empty}, community AS (
+    SELECT email, ${humanIdentityEnabled() ? Prisma.sql`CASE WHEN COUNT(DISTINCT "personId")=1 THEN MIN("personId") ELSE NULL END` : Prisma.sql`min("personId")`} AS "personId", min(name) AS name FROM ${Prisma.raw(humanIdentityEnabled()?'canonical_addresses':'addresses')}
     WHERE email IS NOT NULL AND email <> '' GROUP BY email
   )`;
 const activeStatuses = ["running", "paused", "submission_unknown"];
@@ -50,7 +56,7 @@ export async function verificationOverview(query = "", filter = "issues", offset
     : filter === "issues" ? Prisma.sql`(v.state IN ('undeliverable', 'risky', 'unknown') OR v."lumaBlockedReason" IS NOT NULL OR EXISTS (SELECT 1 FROM luma_calendar_opt_outs o WHERE o."emailLower" = c.email))`
     : Prisma.sql`coalesce(v.state, 'unchecked') = ${filter}`;
   const [summary, rows, run, bounced] = await Promise.all([
-    db.$queryRaw<any[]>(Prisma.sql`${community}
+    db.$queryRaw<any[]>(Prisma.sql`${community()}
       SELECT count(*)::int AS total,
         ${emailRemovalEnabled() ? Prisma.sql`(SELECT count(*)::int FROM email_inactive)` : Prisma.sql`0`} AS inactive,
         count(*) FILTER (WHERE ${activeEmailSql(Prisma.sql`c.email`)} AND v."lumaBlockedReason" IS NULL AND (v."checkedAt" IS NULL OR v."checkedAt" < ${freshness()}))::int AS pending,
@@ -62,7 +68,7 @@ export async function verificationOverview(query = "", filter = "issues", offset
         count(*) FILTER (WHERE v.state = 'unknown')::int AS unknown,
         count(*) FILTER (WHERE v."checkedAt" IS NULL)::int AS unchecked
       FROM community c LEFT JOIN email_addresses v ON v."emailLower" = c.email WHERE ${activeEmailSql(Prisma.sql`c.email`)}`),
-    db.$queryRaw<any[]>(Prisma.sql`${community}
+    db.$queryRaw<any[]>(Prisma.sql`${community()}
       SELECT c.email AS "emailLower", c."personId", c.name, coalesce(v.state, 'unchecked') AS state,
         ${emailRemovalEnabled() ? Prisma.sql`(SELECT "inactiveAt" FROM email_inactive i WHERE i."emailLower"=c.email)` : Prisma.sql`NULL::timestamptz`} AS "inactiveAt", ${emailRemovalEnabled() ? Prisma.sql`EXISTS (SELECT 1 FROM email_removal_items ri WHERE ri."emailLower"=c.email AND ri.status='succeeded')` : Prisma.sql`FALSE`} AS "hasRemoval", v.reason, v.score, v.flags, v."checkedAt", v."lumaBlockedReason", v."lumaCheckedAt", v."lumaClearedAt"
       FROM community c LEFT JOIN email_addresses v ON v."emailLower" = c.email
@@ -119,7 +125,7 @@ export async function startVerification(maxEmails = Number.MAX_SAFE_INTEGER, db 
         : "An email scan is currently working. Try adding this audience again after it finishes its current batch."), { status: 409, publicMessage: true });
     if (active && await tx.emailVerificationBatch.findFirst({ where: { runId: active.id, status: "submitting" } }))
       throw Object.assign(new Error("A submission needs reconciliation before pending scans can be combined."), { status: 409, publicMessage: true });
-    await tx.$executeRaw(Prisma.sql`${community}
+    await tx.$executeRaw(Prisma.sql`${community()}
       INSERT INTO email_addresses ("emailLower", "personId", name)
       SELECT email, "personId", name FROM community
       ON CONFLICT ("emailLower") DO UPDATE SET "personId" = EXCLUDED."personId", name = EXCLUDED.name`);
@@ -127,7 +133,7 @@ export async function startVerification(maxEmails = Number.MAX_SAFE_INTEGER, db 
     // Existing queued addresses already reserve credits; duplicates consume no extra slots.
     const reserved = active ? await tx.emailAddress.count({ where: { queuedRunId: id } }) : 0;
     const remainingBudget = Math.min(budget, Math.max(0, credits - reserved));
-    const count = await tx.$executeRaw(Prisma.sql`${community}
+    const count = await tx.$executeRaw(Prisma.sql`${community()}
       , candidates AS (
         SELECT v."emailLower" FROM email_addresses v JOIN community c ON v."emailLower" = c.email
         WHERE ${activeEmailSql(Prisma.sql`v."emailLower"`)} AND (v."checkedAt" IS NULL OR v."checkedAt" < ${freshness()}) AND v."lumaBlockedReason" IS NULL

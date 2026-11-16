@@ -482,3 +482,16 @@ verify a database backup/snapshot using the deployment's normal procedure. To
 recover from an individual incorrect merge, use Undo; retain the merge tables
 and operation ledger during any code rollback so links can be restored. Do not
 run a schema push or drop the merge ledger as a rollback shortcut.
+
+### Human-based identity rollout
+
+The human-based implementation gives people permanent Guestbook IDs and keeps
+Luma accounts/registrations as linked source evidence. Directory, history,
+audiences, tags, notes, statistics and integration APIs use that human index when
+`GUESTBOOK_IDENTITY_MODE=human` is explicitly enabled. Alias searches and linked
+email addresses resolve to the same person, while invitations choose one eligible
+address per human. Legacy mode remains the default until cutover.
+
+See [the architecture, migration, validation and recovery runbook](docs/human-identity.md).
+The new schema and bounded backfill must be reviewed and separately authorized
+before application to production; no schema change or backfill runs automatically.

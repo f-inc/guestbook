@@ -1,6 +1,8 @@
+import { humanIdentityEnabled } from "../../luma/human-mode";
+import { mergeHumans, undoHumanMerge } from "./humans";
 import { Prisma } from "@prisma/client";
 import { randomUUID } from "node:crypto";
-import { prisma } from "../../luma/db";
+import { prisma, invalidateIndexedAudienceCaches, runAutomaticTagClassifier } from "../../luma/db";
 import { linkedPersonIds, mergesReady, type Membership } from "../../luma/merge-identity";
 import { findMergeCandidates, type MergeProfile, type MergeSignal } from "../../luma/merge-matching";
 
@@ -20,16 +22,25 @@ export async function station(db = prisma(), signals: MergeSignal[] = ["name", "
         eventGuests: { orderBy: [{ lastSeenAt: "desc" }, { eventId: "asc" }], take: REGISTRATION_LIMIT + 1,
           select: { email: true, phoneNumber: true, socialLinks: true, registrationAnswers: true } } },
     }),
-    mergeEnabled ? db.$queryRaw<Array<{ id: string; after: Membership[]; createdAt: Date; undoneAt: Date | null }>>`SELECT id, after, created_at AS "createdAt", undone_at AS "undoneAt" FROM person_merge_operations ORDER BY created_at DESC LIMIT 20` : Promise.resolve([]),
+    humanIdentityEnabled() ? (db as any).guestbookHumanMerge.findMany({orderBy:{createdAt:"desc"},take:20,select:{id:true,after:true,createdAt:true,undoneAt:true}}).then((rows:any[])=>rows.map(o=>({...o,after:o.after.members}))) : mergeEnabled ? db.$queryRaw<Array<{ id: string; after: Membership[]; createdAt: Date; undoneAt: Date | null }>>`SELECT id, after, created_at AS "createdAt", undone_at AS "undoneAt" FROM person_merge_operations ORDER BY created_at DESC LIMIT 20` : Promise.resolve([]),
   ]);
   const scannedIds = rows.slice(0, PROFILE_LIMIT).map(r => r.personId);
-  const memberships: Membership[] = mergeEnabled && scannedIds.length ? await db.$queryRaw(Prisma.sql`SELECT person_id AS "personId", canonical_id AS "canonicalId" FROM person_merge_members WHERE person_id IN (${Prisma.join(scannedIds)})`) : [];
+  const memberships: Membership[] = !humanIdentityEnabled() && mergeEnabled && scannedIds.length ? await db.$queryRaw(Prisma.sql`SELECT person_id AS "personId", canonical_id AS "canonicalId" FROM person_merge_members WHERE person_id IN (${Prisma.join(scannedIds)})`) : [];
   const canonical = new Map(memberships.map(m => [m.personId, m.canonicalId]));
   const profiles: MergeProfile[] = rows.slice(0, PROFILE_LIMIT).map(row => ({ personId: row.personId, name: row.name, email: row.email,
     phoneNumber: row.phoneNumber, socialLinks: row.socialLinks, tags: row.tags,
     canonicalId: canonical.get(row.personId) || row.personId,
     registrations: row.eventGuests.slice(0, REGISTRATION_LIMIT),
   }));
+  let accountsTruncated=false;
+  if (humanIdentityEnabled() && scannedIds.length) {
+    const emails = await (db as any).guestbookPersonEmail.findMany({where:{personId:{in:scannedIds}}});
+    const byId = new Map(profiles.map(p=>[p.personId,p]));
+    emails.forEach((e:any)=>byId.get(e.personId)?.registrations.push({email:e.emailLower}));
+    const identities=await (db as any).guestbookAccountIdentity.findMany({where:{personId:{in:scannedIds}},orderBy:{accountId:"asc"},take:50001,include:{account:{select:{name:true,email:true,phoneNumber:true,socialLinks:true}}}});
+    accountsTruncated=identities.length>50000;
+    identities.slice(0,50000).forEach((identity:any)=>byId.get(identity.personId)?.registrations.push({...identity.account,registrationAnswers:[{label:"Full name",value:identity.account.name}]}));
+  }
   const matches = findMergeCandidates(profiles, 1000, signals);
   const involved = new Set([...matches.candidates.flatMap(c => [c.left, c.right]), ...operations.flatMap(o => o.after.map(m => m.personId))]);
   return { ...matches, mergeEnabled,
@@ -37,7 +48,7 @@ export async function station(db = prisma(), signals: MergeSignal[] = ["name", "
     operations,
     coverage: { scannedPeople: profiles.length, peopleTruncated: rows.length > PROFILE_LIMIT,
       registrationsPerPerson: REGISTRATION_LIMIT, registrationsTruncated: rows.some(r => r._count.eventGuests > REGISTRATION_LIMIT),
-      candidateLimit: 1000 },
+      candidateLimit: 1000, accountsTruncated },
   };
 }
 export async function preview(ids: string[], db = prisma()) {
@@ -58,12 +69,24 @@ export async function preview(ids: string[], db = prisma()) {
     if (r.email && !event.emails.includes(r.email)) event.emails.push(r.email);
     event.registrations++; events.set(r.eventId, event);
   }
-  return { people: people.map(p => ({ ...p, comments: p.comments.slice(0, 100).map(c => ({ ...c, id: String(c.id) })) })),
-    events: [...events.values()], registrationsTruncated: registrations.length > 1000,
+  const accounts = humanIdentityEnabled() ? await (db as any).guestbookAccountIdentity.findMany({where:{personId:{in:memberIds}},select:{personId:true,account:{select:{name:true,email:true,lumaUserId:true,phoneNumber:true}}}}) : [];
+  const sourceIds=humanIdentityEnabled() ? await (db as any).guestbookAccountIdentity.findMany({where:{personId:{in:memberIds}},select:{accountId:true}}) : [];
+  const originals=sourceIds.length ? await ((db as any).$source||db).lumaEventGuest.findMany({where:{personId:{in:sourceIds.map((s:any)=>s.accountId)}},take:1001,orderBy:[{eventId:"asc"},{personId:"asc"}],select:{eventId:true,email:true,personId:true,status:true}}) : [];
+  if(humanIdentityEnabled()) for(const event of events.values()){
+    const original=originals.filter((r:any)=>r.eventId===event.eventId);
+    event.registrations=original.length;
+    event.emails=[...new Set<string>(original.map((r:any)=>r.email).filter(Boolean))];
+  }
+  return { accounts, people: people.map(p => ({ ...p, comments: p.comments.slice(0, 100).map(c => ({ ...c, id: String(c.id) })) })),
+    events: [...events.values()], registrationsTruncated: registrations.length > 1000 || originals.length>1000,
     commentsTruncated: people.some(p => p.comments.length > 100) };
 }
 function snapshot(rows: Membership[]) { return JSON.stringify([...rows].sort((a, b) => a.personId.localeCompare(b.personId))); }
 export async function mergePeople(left: string, right: string, primary: string, db = prisma(), reviewedIds: string[] = [left, right]) {
+  if (humanIdentityEnabled()) {
+    const result=await mergeHumans(db,left,right,primary,reviewedIds);
+    return finalizeHumanChange(result);
+  }
   await requireMergeTables(db);
   return db.$transaction(async (tx: Prisma.TransactionClient) => {
     // Serialize all group edits so overlapping requests cannot split identities.
@@ -83,6 +106,10 @@ export async function mergePeople(left: string, right: string, primary: string, 
   });
 }
 export async function undoMerge(id: string, db = prisma()) {
+  if (humanIdentityEnabled()) {
+    const result=await undoHumanMerge(db,id);
+    return finalizeHumanChange(result);
+  }
   await requireMergeTables(db);
   return db.$transaction(async (tx: Prisma.TransactionClient) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(821157031)`;
@@ -97,4 +124,10 @@ export async function undoMerge(id: string, db = prisma()) {
     await tx.$executeRaw`UPDATE person_merge_operations SET undone_at = NOW() WHERE id = ${id}`;
     return { id, undone: true };
   });
+}
+
+async function finalizeHumanChange<T extends {personIds:string[]}>(result:T){
+  invalidateIndexedAudienceCaches();
+  try { await runAutomaticTagClassifier({personIds:result.personIds}); return {...result,classificationPending:false}; }
+  catch { return {...result,classificationPending:true}; }
 }

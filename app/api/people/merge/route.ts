@@ -1,4 +1,5 @@
 import type { MergeSignal } from "../../luma/merge-matching";
+import { invalidateIndexedAudienceCaches } from "../../luma/db";
 import { requireGuestbookKey } from "../../session-auth";
 import { mergeError, mergePeople, preview, station, undoMerge } from "./store";
 export const runtime = "nodejs";
@@ -43,6 +44,7 @@ export async function DELETE(request: Request) {
 }
 
 function clearCaches() {
+  invalidateIndexedAudienceCaches();
   const cache = (globalThis as typeof globalThis & { __guestbookLumaCache?: Map<string, unknown> }).__guestbookLumaCache;
   cache?.clear();
 }

@@ -1,3 +1,4 @@
+import { humanIdentityEnabled } from "../luma/human-mode";
 import { requireGuestbookKey } from "../session-auth";
 
 export const runtime = "nodejs";
@@ -7,7 +8,7 @@ export async function GET(request: Request) {
   try {
     requireGuestbookKey(request);
     return Response.json(
-      { ok: true },
+      { ok: true, identityMode: humanIdentityEnabled() ? "human" : "legacy" },
       { headers: { "cache-control": "private, no-store" } },
     );
   } catch (error: any) {

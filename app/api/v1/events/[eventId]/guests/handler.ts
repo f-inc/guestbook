@@ -1,3 +1,4 @@
+import { humanIdentityEnabled } from "../../../../luma/human-mode";
 import { randomUUID } from "node:crypto";
 import { fetchLiveGuests } from "../../../live-guests";
 import { prisma } from "../../../../luma/db";
@@ -27,6 +28,21 @@ export async function guests(request: Request, eventId: string, db?: ReturnType<
     const checkedIn = params.get("checked_in");
     const registered = params.get("registered");
     const live = await fetchGuests(eventId, requestId);
+    if (humanIdentityEnabled()) {
+      const source=(db as any).$source||db;
+      const registrations=await source.lumaEventGuest.findMany({where:{eventId,OR:[{personId:{in:live.guests.map(g=>g.personId)}},{lumaGuestId:{in:live.guests.map(g=>g.lumaGuestId)}}]},select:{personId:true,lumaGuestId:true,person:{select:{humanIdentity:{select:{personId:true,person:{select:{name:true}}}}}}}});
+      const mapping=new Map<string,string>();const names=new Map<string,string>();
+      registrations.forEach((r:any)=>{if(r.person.humanIdentity){names.set(r.person.humanIdentity.personId,r.person.humanIdentity.person.name);mapping.set(r.personId,r.person.humanIdentity.personId);if(r.lumaGuestId)mapping.set(`guest:${r.lumaGuestId}`,r.person.humanIdentity.personId);}});
+      const unique=new Map<string,typeof live.guests[number]>();
+      for(const guest of live.guests){
+        const personId=mapping.get(guest.personId)||mapping.get(`guest:${guest.lumaGuestId}`);
+        if(!personId)fail("This event's human index is incomplete. Refresh its guests in Guestbook.",503);
+        const preferredName=names.get(personId)||guest.name;
+        const row={...guest,personId,name:/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(preferredName)?"Unnamed guest":preferredName};const prior=unique.get(personId);
+        if(!prior||row.checkedIn||(!prior.checkedIn&&row.registeredAt))unique.set(personId,row);
+      }
+      live.guests=[...unique.values()];
+    }
     const decisions = await db.lumaEventGuest.findMany({
       where: { eventId, personId: { in: live.guests.map(guest => guest.personId) } },
       select: { personId: true, operatorDecision: true },

@@ -13,8 +13,9 @@ export async function POST(request: Request) {
     const body = await request.json() as Record<string, unknown>;
     const action = body.action === "apply" ? "apply" : "preview";
     const parsed = parseBulkEmails(body.emails);
-    const matchedPeople = await matchIndexedPeopleByEmails(parsed.emails);
-    const matchedEmailSet = new Set(matchedPeople.map((person) => person.emailLower).filter(Boolean));
+    const matches = await matchIndexedPeopleByEmails(parsed.emails);
+    const matchedPeople=[...new Map(matches.map(p=>[p.personId,p])).values()];
+    const matchedEmailSet = new Set(matches.map((person) => person.emailLower).filter(Boolean));
     const unmatchedEmails = [
       ...parsed.emails.filter((email) => !matchedEmailSet.has(email)),
       ...parsed.invalidEmails,

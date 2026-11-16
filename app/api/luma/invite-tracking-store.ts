@@ -1,3 +1,5 @@
+import { humanIdentityEnabled, humanClient } from "./human-mode";
+import { resolveHumanIds } from "./human-store";
 import { removedEmails } from "./email-inactivity";
 import { emailDecision, recordLumaIssue } from "./email-policy";
 import { calendarIdFromEvent } from "./tracking-policy";
@@ -58,6 +60,7 @@ export async function trackedSend(
   client: ReturnType<typeof createLumaClient>,
   database = prisma(),
 ) {
+  if(humanIdentityEnabled()) guests=await chooseHumanRecipients(guests,database,eventId);
   const { eligible, excluded } = await eligibleInvitationRecipients(
     guests,
     database,
@@ -90,7 +93,7 @@ export async function trackedSend(
     const emailLower = g.email.trim().toLowerCase();
     const person = people.find((p) => p.emailLower === emailLower);
     const data = {
-      personId: person?.personId,
+      personId: g.personId || person?.personId,
       lumaUserId: person?.lumaUserId,
       name: person?.name || g.name,
       eventTitle: event?.title,
@@ -221,4 +224,32 @@ export async function cacheReinviteEmail(
     update: data,
   });
   if (issue) await recordLumaIssue(emailLower, issue, entry.email?.bounced_at || entry.email?.marked_as_spam_at ? new Date(entry.email.bounced_at || entry.email.marked_as_spam_at) : null, db);
+}
+
+// Destination selection happens after human deduplication, with the existing
+// per-address verification/removal/calendar policies applied before fallback.
+export async function chooseHumanRecipients(guests:any[],db:any,eventId:string){
+  const source=db.$source||db;
+  if(typeof source.$transaction==='function')return source.$transaction(async(tx:any)=>{await tx.$executeRaw`SELECT pg_advisory_xact_lock(821157031)`;return chooseHumanRecipients(guests,humanClient(tx),eventId);},{timeout:30000});
+  const requested=[...new Set<string>(guests.map(g=>String(g.email).trim().toLowerCase()))];
+  const links=await source.guestbookPersonEmail.findMany({where:{emailLower:{in:requested},person:{mergedIntoId:null}}});
+  const groups=new Map<string,any>();
+  for(const guest of guests){
+    const email=String(guest.email).trim().toLowerCase();
+    let personId=guest.personId||guest.id;
+    if(personId)[personId]=await resolveHumanIds(source,[personId]);
+    else {
+      const owners=[...new Set(links.filter((l:any)=>l.emailLower===email).map((l:any)=>l.personId))];
+      if(owners.length>1)throw Object.assign(new Error('Select a person when an email address belongs to multiple people.'),{status:409});
+      personId=owners[0];
+    }
+    if(personId&&!links.some((l:any)=>l.personId===personId&&l.emailLower===email))throw Object.assign(new Error('The selected email is not linked to this person.'),{status:409});
+    const key=personId||`email:${email}`;
+    if(!groups.has(key))groups.set(key,{...guest,email,personId});
+  }
+  const ids=[...groups.values()].map(g=>g.personId).filter(Boolean);
+  const contacts=await source.guestbookPersonEmail.findMany({where:{personId:{in:ids},person:{mergedIntoId:null}}});
+  const candidates=[...groups.values()].flatMap(g=>[g,...contacts.filter((c:any)=>c.personId===g.personId&&c.emailLower!==g.email).map((c:any)=>({...g,email:c.emailLower}))]);
+  const allowed=await eligibleInvitationRecipients(candidates,db,eventId);
+  return [...groups.values()].map(g=>allowed.eligible.find(c=>g.personId?c.personId===g.personId:c.email===g.email)||g);
 }

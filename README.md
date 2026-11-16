@@ -429,11 +429,10 @@ filters, pagination, examples, and the required additive migration.
 ### Past-event audiences
 
 In the invitation builder, choose **Didn’t attend** under **Past event groups**
-to add or subtract registered guests with no recorded check-in for a past event.
-This includes pending, waitlisted, approved, and no-show registrations, plus
-previously registered guests who declined. People who were only invited are not
-included. A check-in timestamp or checked-in status always excludes a guest.
-When multiple events are selected as **Didn’t attend**, a guest must have registered
+to add or subtract **accepted registrations with no recorded check-in** for a
+past event: approved (`going`) and no-show (`no_show`) guests only. Pending,
+waitlisted, declined, and invitation-only guests are excluded. A check-in timestamp or checked-in status always excludes a guest.
+When multiple events are selected as **Didn’t attend**, a guest must have been accepted
 for at least one and have no check-in at any of those events. Attending even one
 excludes them from this event audience. The same rule applies to subtraction and
 registration-answer narrowing. Event tiles show individual event counts; the

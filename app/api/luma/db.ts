@@ -7,6 +7,7 @@ type AnyRecord = Record<string, any>;
 type HttpError = Error & { status?: number };
 import { orderAvatarCandidates } from "../../avatar-order";
 import { guestStatusAfterEvent } from "../../guest-display-status";
+import { NO_SHOW_AUDIENCE_STATUSES } from "../../audience-cohort";
 import { isAnyRegistrationAnswer } from "../../audience-answer-rules";
 import { databaseUrlWithPoolLimits } from "./database-url";
 import { lumaEventDate } from "./event-date";
@@ -232,7 +233,7 @@ function indexedRegisteredGuestPredicateSql() {
 export function indexedAudienceCohortPredicateSql(cohort: "attended" | "not_attended" | "registered" | "invited", notAttendedEventIds: string[] = []) {
   if (cohort === "attended") return Prisma.sql`(guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')`;
   if (cohort === "not_attended") return Prisma.sql`(
-    ${indexedRegisteredGuestPredicateSql()}
+    guest.status IN (${Prisma.join(NO_SHOW_AUDIENCE_STATUSES)})
     AND guest.checked_in_at IS NULL
     AND guest.status <> 'checked_in'
     AND ${notAttendedEventIds.length ? Prisma.sql`NOT EXISTS (

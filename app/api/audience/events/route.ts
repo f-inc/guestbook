@@ -29,6 +29,7 @@ export async function GET(request: Request) {
               answerKey: option.answerKey,
               count: option.count,
               checkedInCount: option.checkedInCount,
+              noShowCount: option.noShowCount,
             })),
           })),
       });

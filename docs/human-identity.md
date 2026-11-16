@@ -126,3 +126,35 @@ fixture data. It tests the real migration SQL, confirmed-group import, canonical
 queries, live/scoped APIs, shared-email ambiguity, invitation fallback, human-owned
 notes/tags, merge/undo, concurrent source sync, and preserved original records.
 Without the explicit isolated URL it skips; it never falls back to `DB_URL`.
+
+## Merge review and the Undo window
+
+Pressing **M** immediately hides the reviewed pair and overlapping suggestions,
+then shows a five-second countdown toast with **Undo**. This is an in-memory UI
+draft, not a merge job: no merge request is sent and no queue or audit entry is
+persisted during this window. Undo removes the draft entirely and restores the
+original rows immediately. It does not create a cancellation or reversal record.
+Leaving the page before the window expires also discards these drafts.
+
+Only after five seconds does an uncancelled confirmation become a persisted
+browser-outbox job and begin saving. Each rapid confirmation has its own full
+window. The worker saves separate merges serially while review remains enabled.
+The user-facing Undo shortcut and toast action cancel pending drafts only; they
+do not issue an immediate merge followed by a compensating unmerge.
+
+The **Recently merged** tab shows successful completed merges only. Drafts,
+queued work, failures, cancellations, and reversed historical operations are
+excluded. The server returns the latest 20 non-reversed audit operations; the
+client combines these with successful recent saves, deduplicated by operation ID.
+Search, matching rules, coverage, and shortcuts live in the sidebar. Review rows
+expand in place for full evidence, source accounts, notes, and event history.
+
+After the window expires, the outbox runs while this page is open and resumes
+interrupted jobs on reopening the same browser/origin. Web Locks prevents two
+station tabs from overwriting it. Persisted data contains IDs and statuses,
+not contact details or credentials. Uncertain requests show a safe retry in the
+sidebar, outside completed history. A client UUID doubles as the server audit ID,
+so repeated requests recover the existing result instead of applying a merge
+twice. Existing saved-merge reversal support and audit records remain for recovery
+and compatibility, but draft cancellation never invokes them. No schema change
+is needed.

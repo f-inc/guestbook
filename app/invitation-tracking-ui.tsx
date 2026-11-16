@@ -481,6 +481,7 @@ export function GuestsPageFrame({
         </div>
       </div>
       <nav className="event-tabs" aria-label="Guests sections">
+        <a className="event-tab" href="/merge">Merge station</a>
         <button
           className={`event-tab ${tab === "all" ? "active" : ""}`}
           onClick={() => changeTab("all")}

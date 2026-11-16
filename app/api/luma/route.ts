@@ -200,6 +200,10 @@ async function handleGET(request: Request) {
       const enrichTrace = async (payload: AnyRecord) => {
         if (!hasLumaDb()) return payload;
         try {
+          if (forceRefresh) {
+            const linked = await getIndexedTrace({ tracePersonId, traceEmail, limit: safeInt("LUMA_INDEX_TRACE_MAX_RECORDS", 500, 1, 5000) });
+            if (linked.linkedPersonIds?.length > 1) payload = linked;
+          }
           return await withActivityInvitationStatuses(prisma(), payload, tracePersonId, traceEmail);
         } catch (error) {
           await debugLog(requestId, "activity invitation cache unavailable", { message: error.message }, "error");

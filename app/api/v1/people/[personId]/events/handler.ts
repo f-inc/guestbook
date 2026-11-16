@@ -1,3 +1,4 @@
+import { linkedPersonIds } from "../../../../luma/merge-identity";
 import { randomUUID } from "node:crypto";
 import { prisma } from "../../../../luma/db";
 import { apiError, authorize, fail, json, page, pagination } from "../../../shared";
@@ -38,6 +39,8 @@ export async function personEvents(
         ...(identity.lumaUserId ? [{ lumaUserIdLower: identity.lumaUserId.toLowerCase() }] : []),
       ] };
     }
+    const linkedIds = await linkedPersonIds(db, [membership.OR[0].personId]);
+    if (linkedIds.length > 1) membership.OR.push({ personId: { in: linkedIds } });
     const includeEmail = key.scopes.includes("guests:email");
     const rows = await db.lumaEvent.findMany({
       where: {
@@ -54,7 +57,7 @@ export async function personEvents(
         guests: {
           where: membership,
           orderBy: [{ syncedAt: "desc" }, { personId: "asc" }],
-          take: 1,
+          take: linkedIds.length > 1 ? 100 : 1,
           select: {
             personId: true, lumaUserId: true, lumaGuestId: true,
             status: true, lumaApprovalStatus: true, operatorDecision: true,
@@ -69,7 +72,7 @@ export async function personEvents(
     const result = page(rows, limit, (row: { eventId: string }) => row.eventId);
     const data = result.data.flatMap((row: any) => {
       const { guests, ...event } = row;
-      const guest = guests[0];
+      const guest = guests.find((g: any) => g.checkedInAt || g.status === "checked_in") || guests[0];
       // A membership can disappear between the event and relation reads.
       if (!guest) return [];
       const { person, email, personId: _indexedPersonId, lumaUserId: _lumaUserId, ...fields } = guest;

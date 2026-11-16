@@ -62,6 +62,8 @@ model LumaPerson {
   lastSeenAt        DateTime  @default(now()) @map("last_seen_at") @db.Timestamptz(6)
   syncedAt          DateTime  @default(now()) @map("synced_at") @db.Timestamptz(6)
 
+  mergeMembership PersonMergeMember? @relation("MergeSource")
+  mergedMembers PersonMergeMember[] @relation("MergePrimary")
   eventGuests         LumaEventGuest[]
   comments            GuestComment[]
   automaticTagMatches AutomaticTagAssignment[]
@@ -446,4 +448,23 @@ model IntegrationApiKey {
   revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(6)
 
   @@map("integration_api_keys")
+}
+
+// Local identity links preserve original Luma accounts and registrations.
+model PersonMergeMember {
+  personId String @id @map("person_id")
+  canonicalId String @map("canonical_id")
+  person LumaPerson @relation("MergeSource", fields: [personId], references: [personId], onDelete: Restrict)
+  primary LumaPerson @relation("MergePrimary", fields: [canonicalId], references: [personId], onDelete: Restrict)
+  @@index([canonicalId])
+  @@map("person_merge_members")
+}
+
+model PersonMergeOperation {
+  id String @id
+  before Json
+  after Json
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  undoneAt DateTime? @map("undone_at") @db.Timestamptz(6)
+  @@map("person_merge_operations")
 }

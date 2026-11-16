@@ -21,6 +21,7 @@ function setup(key: any = baseKey) {
     }],
   });
   const db = {
+    $queryRaw: async (..._args: any[]): Promise<any[]> => [{ ready: false }],
     integrationApiKey: { findUnique: async () => key },
     lumaEventGuest: { findFirst: async (query: any) => { calls.push({ identityLookup: query }); return { personId: "internal@example.test", lumaUserId: "usr-one" }; } },
     lumaEvent: { findMany: async (query: any) => { calls.push(query); return Array.from({ length: 11 }, (_, i) => makeEvent(String.fromCharCode(97 + i))); } },
@@ -175,4 +176,15 @@ test("guest-only identity resolution is event-scoped and does not reveal inacces
   assert.deepEqual(result.data, []);
   assert.equal(result.source, "luma-index");
   assert.equal(ctx.calls.length, 1);
+});
+
+test("merged history expands linked accounts while preserving event restrictions and email scope", async () => {
+  const ctx = setup({ ...baseKey, eventIds: ["a"] });
+  ctx.db.$queryRaw = async (query: any) => (Array.isArray(query) ? query.join("") : query.sql).includes("to_regclass")
+    ? [{ ready: true }] : [{ personId: "usr-one", canonicalId: "usr-one" }, { personId: "usr-two", canonicalId: "usr-one" }];
+  const result: any = await (await personEvents(request(), "usr-one", ctx.db)).json();
+  assert.deepEqual(ctx.calls[0].where.eventId.in, ["a"]);
+  assert.deepEqual(ctx.calls[0].where.guests.some.OR.at(-1), { personId: { in: ["usr-one", "usr-two"] } });
+  assert.equal(ctx.calls[0].select.guests.take, 100);
+  assert.equal(result.data[0].email, undefined);
 });

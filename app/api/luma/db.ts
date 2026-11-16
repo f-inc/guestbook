@@ -2274,6 +2274,21 @@ function indexedPersonPageSortSql(query: GuestListQuery, alias: "person" | "page
   return Prisma.sql`page.latest_activity ${direction} NULLS LAST, page.person_id`;
 }
 
+function indexedRegistrationAnswerSearchSql(searchPattern: string) {
+  // Search the person's saved answers across events without expanding the
+  // selected event/status cohort or fetching any additional data from Luma.
+  return Prisma.sql`EXISTS (
+    SELECT 1
+    FROM luma_event_guests AS answer_guest
+    CROSS JOIN LATERAL JSONB_ARRAY_ELEMENTS(
+      CASE WHEN JSONB_TYPEOF(answer_guest.registration_answers) = 'array'
+        THEN answer_guest.registration_answers ELSE '[]'::jsonb END
+    ) AS search_answer
+    WHERE answer_guest.person_id = guest.person_id
+      AND search_answer->>'value' ILIKE ${searchPattern}
+  )`;
+}
+
 function indexedMultiEventGuestPageWhereSql(query: GuestListQuery) {
   const predicates: Prisma.Sql[] = [];
   appendIndexedStatusRules(predicates, query, indexedMultiEventStatusPredicateSql);
@@ -2284,6 +2299,7 @@ function indexedMultiEventGuestPageWhereSql(query: GuestListQuery) {
     const phonePattern = `%${phoneDigits}%`;
     predicates.push(Prisma.sql`(
       guest.search_text ILIKE ${searchPattern}
+      OR ${indexedRegistrationAnswerSearchSql(searchPattern)}
       OR guest.profile_description ILIKE ${searchPattern}
       OR guest.email ILIKE ${searchPattern}
       OR (${Boolean(phoneDigits)} AND REGEXP_REPLACE(COALESCE(guest.phone_number, ''), '[^0-9]', '', 'g') LIKE ${phonePattern})
@@ -2376,6 +2392,7 @@ function indexedGuestPageWhereSql(
     predicates.push(Prisma.sql`
       (
         guest.search_text ILIKE ${searchPattern}
+        OR ${indexedRegistrationAnswerSearchSql(searchPattern)}
         OR guest.profile_description ILIKE ${searchPattern}
         OR guest.email ILIKE ${searchPattern}
         OR (${Boolean(phoneDigits)} AND REGEXP_REPLACE(COALESCE(guest.phone_number, ''), '[^0-9]', '', 'g') LIKE ${phonePattern})

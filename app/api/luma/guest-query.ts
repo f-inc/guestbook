@@ -137,6 +137,7 @@ export function guestFilterRequiresIndex(filter: GuestFilter): boolean {
 
 export function guestQueryRequiresIndex(query: GuestListQuery): boolean {
   return guestQueryStatusFilters(query).some(guestFilterRequiresIndex)
+    || Boolean(query.search)
     || query.sortBy === "events_attended"
     || query.sortBy === "events_registered"
     || query.sortDirection === "asc"
@@ -570,7 +571,12 @@ function isFirstRegistration(guest: any): boolean {
 function guestMatchesSearch(guest: any, person: any, search: string): boolean {
   if (!search) return true;
   const query = search.toLowerCase();
-  const matchesText = [person.name, person.email, person.title, person.bio, person.phoneNumber, guest.phoneNumber, guest.profileDescription, guest.searchText]
+  const answers = Array.isArray(guest.registrationAnswers) ? guest.registrationAnswers : [];
+  const matchesText = [
+    person.name, person.email, person.title, person.bio, person.phoneNumber,
+    guest.phoneNumber, guest.profileDescription, guest.searchText,
+    ...answers.map((answer: any) => answer?.value),
+  ]
     .filter(Boolean)
     .join(" ")
     .toLowerCase()

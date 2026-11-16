@@ -1,3 +1,6 @@
+import { humanIdentityEnabled } from "./human-mode";
+import { sourceAccountsForHumans, resolveHumanIds } from "./human-store";
+import { sourcePrisma } from "./db";
 import { recordLumaIssue } from "./email-policy";
 import { browserLumaSession, withBrowserLumaSession } from "./browser-session";
 import { withActivityInvitationStatuses } from "./activity-invitation-status";
@@ -202,7 +205,7 @@ async function handleGET(request: Request) {
         try {
           if (forceRefresh) {
             const linked = await getIndexedTrace({ tracePersonId, traceEmail, limit: safeInt("LUMA_INDEX_TRACE_MAX_RECORDS", 500, 1, 5000) });
-            if (linked.linkedPersonIds?.length > 1) payload = linked;
+            if (humanIdentityEnabled() || linked.linkedPersonIds?.length > 1) payload = linked;
           }
           return await withActivityInvitationStatuses(prisma(), payload, tracePersonId, traceEmail);
         } catch (error) {
@@ -484,6 +487,7 @@ async function handleGET(request: Request) {
         cacheStore().delete("events");
         clearCachePrefix("trace-person:");
       }
+      if (humanIdentityEnabled()) throw Object.assign(new Error("The human index could not be loaded. Retry after index recovery."),{status:503});
       writeCache(cacheKey, payload, cacheTtlMs("LUMA_GUEST_CACHE_SECONDS", 600));
       const filteredPayload = filterGuestPayload(payload, guestQuery);
       await debugLog(requestId, "event guests success", {
@@ -1170,7 +1174,7 @@ async function handlePOST(request: Request) {
       let skippedCount = 0;
       for (const eventId of eventIds) {
         for (let index = 0; index < recipients.length; index += inviteLimit) {
-          const guests = recipients.slice(index, index + inviteLimit).map(({ email, name }) => ({ email, name: name || null }));
+          const guests = recipients.slice(index, index + inviteLimit).map(({ id, email, name }) => ({ personId:id, email, name: name || null }));
           const result = await trackedSend(eventId, guests, message, requestId, lumaClient);
           acceptedCount += result.accepted;
           skippedCount += result.skipped;
@@ -1194,6 +1198,7 @@ async function handlePOST(request: Request) {
         .filter((guest) => guest.source === "luma" && guest.email)
         .map((guest) => ({
           email: guest.email,
+          personId: guest.personId || guest.id,
           name: guest.name || null,
         }));
 
@@ -1593,7 +1598,7 @@ async function tracePersonActivity({ requestId, tracePersonId, traceEmail, force
     maxEventPages: safeInt("LUMA_TRACE_MAX_EVENT_PAGES", 5, 1, 10),
     requestDelayMs: safeInt("LUMA_TRACE_REQUEST_DELAY_MS", 325, 0, 2000),
   };
-  const useKnownScope = traceScope !== "all" && hasLumaDb();
+  const useKnownScope = (humanIdentityEnabled() || traceScope !== "all") && hasLumaDb();
   await debugLog(requestId, "trace person cache miss", {
     hasPersonId: Boolean(target.id),
     hasEmail: Boolean(target.email),
@@ -1635,34 +1640,42 @@ async function tracePersonActivity({ requestId, tracePersonId, traceEmail, force
   const scannedEventIds = [];
   const matchedEventIds = [];
   let failedEventCount = 0;
+  let lookupCount = 0;
+  const lookupLimit = safeInt("LUMA_TRACE_MAX_LOOKUPS", 250, 1, 500);
   const lookupId = typeof traceEmail === "string" && traceEmail.trim() ? traceEmail.trim() : typeof tracePersonId === "string" ? tracePersonId.trim() : "";
 
   for (let index = 0; index < eventCandidates.length; index += 1) {
     const { rawEvent, event } = eventCandidates[index];
     if (!useKnownScope && index > 0 && limits.requestDelayMs) await wait(limits.requestDelayMs);
     try {
+      const lookupAccounts = humanIdentityEnabled() ? await sourceAccountsForHumans(sourcePrisma(),[tracePersonId]) : [];
+      const sourceRegistrations = lookupAccounts.length ? await sourcePrisma().lumaEventGuest.findMany({where:{eventId:event.id,personId:{in:lookupAccounts}},select:{lumaGuestId:true,email:true,lumaUserId:true}}) : [];
+      const lookups = humanIdentityEnabled() ? sourceRegistrations : [null];
+      for (const sourceLookup of lookups) {
+      if (lookupCount++ >= lookupLimit) { truncatedEvents = true; break; }
       const rawGuest = await lumaFetchForEvent("/v1/events/guests/get", event.id, {
         requestId,
-        params: { event_id: event.id, id: lookupId },
+        params: { event_id: event.id, id: sourceLookup?.lumaGuestId || sourceLookup?.lumaUserId || sourceLookup?.email || lookupId },
         logParams: { event_id: event.id, id: "[redacted-person]" },
         allowNotFound: true,
       });
       scannedEventIds.push(event.id);
       if (!rawGuest) continue;
       const guest = normalizeGuest(rawEvent, rawGuest);
-      if (!matchesTraceTarget(guest, target)) continue;
+      if (!humanIdentityEnabled() && !matchesTraceTarget(guest, target)) continue;
       matchedEventIds.push(event.id);
       records.push(normalizeTraceRecord(event, guest));
       if (useKnownScope) await upsertNormalizedLumaGuestActivity({ event, guest, rawGuest });
       else await writeSnapshotToIndex({ requestId, rawEvent, event, guests: [guest], rawGuests: [rawGuest] });
       clearEventGuestCache(event.id);
+      }
     } catch (error) {
       failedEventCount += 1;
       await debugLog(requestId, "trace direct lookup error", { eventId: event.id, status: error.status || 500, message: error.message }, "error");
     }
   }
 
-  const reconciliation = hasLumaDb()
+  const reconciliation = hasLumaDb() && !humanIdentityEnabled()
     ? await removeIndexedTraceRecordsMissingFromEvents({ tracePersonId, traceEmail, scannedEventIds, matchedEventIds })
     : { deletedCount: 0 };
 

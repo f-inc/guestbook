@@ -5,8 +5,8 @@ import styles from "./page.module.css";
 
 type Operation = { id: string; after: Array<{ personId: string; canonicalId: string }>; createdAt: string; undoneAt: string | null };
 type Station = { mergeEnabled: boolean; profiles: MergeProfile[]; candidates: MergeCandidate[]; truncated: boolean; operations: Operation[];
-  coverage: { scannedPeople: number; peopleTruncated: boolean; registrationsTruncated: boolean; registrationsPerPerson: number; candidateLimit: number } };
-type Preview = { people: Array<MergeProfile & { comments: Array<{ id: string; body: string; author: string }> }>;
+  coverage: { scannedPeople: number; peopleTruncated: boolean; registrationsTruncated: boolean; registrationsPerPerson: number; candidateLimit: number; accountsTruncated?:boolean } };
+type Preview = { accounts?: Array<{personId:string;account:{name:string;email:string|null;lumaUserId:string|null;phoneNumber:string|null}}>; people: Array<MergeProfile & { comments: Array<{ id: string; body: string; author: string }> }>;
   events: Array<{ eventId: string; title: string; attended: boolean; emails: string[]; registrations: number }>;
   registrationsTruncated: boolean; commentsTruncated: boolean };
 const labels: Record<MergeSignal, string> = { name: "First + last name", social: "LinkedIn / Twitter", phone: "Phone number" };
@@ -74,8 +74,8 @@ export default function MergeStation() {
     setBusy(true); setError("");
     setData({ ...data, candidates: data.candidates.filter(c => !members.has(c.left) && !members.has(c.right)) });
     try {
-      await request("", { method: "POST", body: JSON.stringify({ left: selected.left, right: selected.right, primary, reviewedPersonIds: detail.people.map(p => p.personId) }) });
-      setSelected(null); setNotice("Profiles merged. Their combined history is available from either profile. Original registrations, notes, and tags are preserved.");
+      const saved = await request("", { method: "POST", body: JSON.stringify({ left: selected.left, right: selected.right, primary, reviewedPersonIds: detail.people.map(p => p.personId) }) });
+      setSelected(null); setNotice("Profiles merged. Their combined history is available from either profile. Original registrations, notes, and tags are preserved." + ((saved as any).classificationPending ? " Some automatic tags are awaiting refresh." : ""));
       await load();
     } catch (cause) { setData(previous); setError((cause as Error).message); }
     finally { setBusy(false); }
@@ -101,7 +101,7 @@ export default function MergeStation() {
         <section className={styles.toolbar} aria-label="Candidate filters"><div className={styles.filters}>{(Object.keys(labels) as MergeSignal[]).map(signal => <label key={signal}><input type="checkbox" checked={filters.includes(signal)} disabled={busy} onChange={() => { setFilters(old => old.includes(signal) ? old.filter(s => s !== signal) : [...old, signal]); setSelected(null); }} />{labels[signal]}</label>)}</div><label className={styles.search}>Search candidates<input type="search" placeholder="Name or email" value={search} onChange={e => setSearch(e.target.value)} /></label><button className="button" disabled={loading || busy} onClick={() => { setSelected(null); void load(); }}>{loading ? "Scanning…" : "Refresh matches"}</button></section>
         <p className={styles.hint}>Matches use any selected rule. Socials must match exactly, and the profile handle must contain the first name on both records. Phone matching removes formatting and normalizes US +1.</p>
         {data && <p className={styles.coverage}>{candidates.length} suggested pairs · {data.coverage.scannedPeople.toLocaleString()} indexed profiles scanned · up to {data.coverage.registrationsPerPerson} recent registrations per profile</p>}
-        {data && (data.truncated || data.coverage.peopleTruncated || data.coverage.registrationsTruncated) && <p role="status" className={styles.warning}>This scan is partial.{data.coverage.peopleTruncated ? " Only the first 10,000 profiles were scanned." : ""}{data.coverage.registrationsTruncated ? " Older registration answers and contact details may not be included." : ""}{data.truncated ? " Showing the first 1,000 candidate pairs." : ""}</p>}
+        {data && (data.truncated || data.coverage.peopleTruncated || data.coverage.registrationsTruncated || data.coverage.accountsTruncated) && <p role="status" className={styles.warning}>This scan is partial.{data.coverage.peopleTruncated ? " Only the first 10,000 profiles were scanned." : ""}{data.coverage.registrationsTruncated ? " Older registration answers and contact details may not be included." : ""}{data.truncated ? " Showing the first 1,000 candidate pairs." : ""}{data.coverage.accountsTruncated ? " Some linked-account evidence exceeded this scan’s limit." : ""}</p>}
         {data && !data.mergeEnabled && <p className={styles.warning}>Matching and previews are available. Saving merges requires the reviewed database migration; no database setup runs automatically.</p>}
         {notice && <p role="status" className={styles.notice}>{notice}</p>}
         <div className={styles.layout}><section className={styles.candidates} aria-label="Suggested merges" aria-busy={loading}>
@@ -114,6 +114,7 @@ export default function MergeStation() {
             <h2>Review this merge</h2><p>Choose the primary profile. All original accounts, emails, and registrations remain linked. Undo is available below.</p>
             {previewError ? <p role="alert">{previewError}</p> : !detail ? <p role="status">Loading profiles and history…</p> : <>
               <fieldset disabled={busy}><legend>Primary profile</legend>{detail.people.map(p => <label className={styles.profile} key={p.personId}><input type="radio" name="primary" checked={primary === p.personId} onChange={() => setPrimary(p.personId)} /><span><strong>{p.name}</strong><small>{p.email || "No email"}{p.phoneNumber ? ` · ${p.phoneNumber}` : ""}</small>{Array.isArray(p.tags) && p.tags.length > 0 && <small>Tags: {p.tags.map(String).join(", ")}</small>}</span></label>)}</fieldset>
+              {!!detail.accounts?.length && <><h3>Linked source accounts</h3><div className={styles.history}>{detail.accounts.map((a,i)=><div key={i}><strong>{a.account.name}</strong><small>{a.account.email || "No email"}{a.account.phoneNumber ? ` · ${a.account.phoneNumber}` : ""}</small></div>)}</div></>}
               <h3>{detail.events.length}{detail.registrationsTruncated ? "+" : ""} distinct events · {detail.events.filter(e => e.attended).length} attended</h3>
               <p className={styles.hint}>Each event counts once, even when both accounts registered.</p>
               {(detail.registrationsTruncated || detail.commentsTruncated) && <p className={styles.warning}>Preview is partial: up to 1,000 registrations and 100 notes per profile. The merge links all records.</p>}

@@ -288,6 +288,7 @@ export default function Home() {
   const pendingWorkspaceScrollRef = useRef<number | null>(null);
   const [workspaceScrollRestoreVersion, setWorkspaceScrollRestoreVersion] = useState(0);
   const pendingProfileIdRef = useRef("");
+  const profileResolveAttemptRef = useRef("");
   const [apiState, setApiStateValue] = useState({ status: "loading", message: "Checking Luma API" });
   const [toastSequence, setToastSequence] = useState(0);
   const [toastVisible, setToastVisible] = useState(true);
@@ -1469,7 +1470,7 @@ export default function Home() {
     setProfilePanelOpen(true);
   };
 
-  const openAnalyticsResponsePerson = async (personId: string) => {
+  const openAnalyticsResponsePerson = async (personId: string, replaceUrl = false) => {
     if (!personId) return;
     if (getPerson(state, personId)) {
       openPerson(personId);
@@ -1483,9 +1484,11 @@ export default function Home() {
       if (!response.ok || !data.person) {
         throw new Error(withRequestId(data.error || "Unable to load this respondent.", data.requestId));
       }
+      const resolvedId=data.person.id || personId;
+      pendingProfileIdRef.current="";
       setActivityTraces((current) => ({
         ...current,
-        [personId]: {
+        [resolvedId]: {
           status: "ready",
           records: data.records || [],
           scanned: data.scanned,
@@ -1495,20 +1498,28 @@ export default function Home() {
           message: `${(data.records || []).length} indexed activity records.`,
         },
       }));
-      workspaceUrlModeRef.current = "push";
+      workspaceUrlModeRef.current = replaceUrl ? "replace" : "push";
       setState((current) => ({
         ...current,
         people: [
-          ...current.people.filter((person) => person.id !== personId),
-          mergePersonRecord(getPerson(current, personId), data.person),
+          ...current.people.filter((person) => person.id !== personId && person.id !== resolvedId),
+          mergePersonRecord(getPerson(current, resolvedId) || getPerson(current, personId), data.person),
         ],
       }));
-      setProfilePersonId(personId);
+      setProfilePersonId(resolvedId);
       setProfilePanelOpen(true);
     } catch (error: any) {
       setApiState({ status: "error", message: error.message });
     }
   };
+
+  useEffect(() => {
+    const pending=pendingProfileIdRef.current;
+    if(!pending){profileResolveAttemptRef.current="";return;}
+    if(sessionStatus!=="ready" || !workspaceUrlReady || getPerson(state,pending) || profileResolveAttemptRef.current===pending)return;
+    profileResolveAttemptRef.current=pending;
+    void openAnalyticsResponsePerson(pending,true);
+  },[sessionStatus,workspaceUrlReady,state.people]);
 
   const openAnalyticsRespondents = (
     question,
@@ -2259,7 +2270,7 @@ export default function Home() {
 
     try {
       const params = new URLSearchParams();
-      params.set("trace_person_id", person.lumaUserId || person.id);
+      params.set("trace_person_id", person.id);
       if (person.email) params.set("trace_email", person.email);
       if (force) {
         params.set("refresh", "1");
@@ -9353,6 +9364,8 @@ function ProfilePanel({ state, person, trace, request, onOpenComments, lumaCheck
             <div className="profile-identity">
               <h2>{person.name}</h2>
               <CopyableEmail email={person.email} />
+              {Array.isArray(person.emails) && person.emails.length>1 && <details><summary className="quiet-note">{person.emails.length} linked email addresses</summary>{person.emails.filter(email=>email!==person.email?.toLowerCase()).map(email=><CopyableEmail key={email} email={email}/>)}</details>}
+              {person.linkedAccountCount>1 && <small className="quiet-note">{person.linkedAccountCount} linked Luma accounts</small>}
             </div>
             <div className="profile-header-meta">
               <ProfileTags person={person} definitions={state.tagDefinitions} />

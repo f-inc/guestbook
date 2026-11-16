@@ -1,3 +1,5 @@
+import { humanIdentityEnabled } from "./human-mode";
+import { resolveHumanIds } from "./human-store";
 import { Prisma } from "@prisma/client";
 
 type Reader = { $queryRaw: any };
@@ -7,6 +9,7 @@ export async function mergesReady(db: Reader): Promise<boolean> {
   return Boolean(rows[0]?.ready);
 }
 export async function linkedPersonIds(db: Reader, ids: string[]): Promise<string[]> {
+  if (humanIdentityEnabled()) return resolveHumanIds(db, ids);
   if (!ids.length || !await mergesReady(db)) return ids;
   const rows: Membership[] = await db.$queryRaw(Prisma.sql`
     SELECT person_id AS "personId", canonical_id AS "canonicalId" FROM person_merge_members
@@ -19,7 +22,7 @@ export async function linkedPersonIds(db: Reader, ids: string[]): Promise<string
 
 /** Join each requested account to all linked accounts for distinct-event counts. */
 export async function mergedHistoryJoin(db: Reader, ids: string[]) {
-  if (!await mergesReady(db)) return Prisma.sql`JOIN unnest(${ids}::text[]) AS identity(requested_id) ON identity.requested_id = guest.person_id`;
+  if (humanIdentityEnabled() || !await mergesReady(db)) return Prisma.sql`JOIN unnest(${ids}::text[]) AS identity(requested_id) ON identity.requested_id = guest.person_id`;
   return Prisma.sql`JOIN (
     SELECT requested.person_id AS requested_id, COALESCE(member.person_id, requested.person_id) AS source_id
     FROM unnest(${ids}::text[]) AS requested(person_id)

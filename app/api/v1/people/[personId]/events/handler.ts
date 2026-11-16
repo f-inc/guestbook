@@ -1,3 +1,4 @@
+import { humanIdentityEnabled } from "../../../../luma/human-mode";
 import { linkedPersonIds } from "../../../../luma/merge-identity";
 import { randomUUID } from "node:crypto";
 import { prisma } from "../../../../luma/db";
@@ -22,7 +23,7 @@ export async function personEvents(
     if (personId.startsWith("guest:")) {
       // Guest-only API IDs are event-local. Resolve the linked indexed person
       // within the key's event access before discovering their other events.
-      const identity = await db.lumaEventGuest.findFirst({
+      const identity = await (humanIdentityEnabled() ? ((db as any).$source||db) : db).lumaEventGuest.findFirst({
         where: {
           lumaGuestId: personId.slice(6),
           ...(key.eventIds.length ? { eventId: { in: key.eventIds } } : {}),
@@ -40,7 +41,7 @@ export async function personEvents(
       ] };
     }
     const linkedIds = await linkedPersonIds(db, [membership.OR[0].personId]);
-    if (linkedIds.length > 1) membership.OR.push({ personId: { in: linkedIds } });
+    if (humanIdentityEnabled() || linkedIds.length > 1) membership.OR.push({ personId: { in: linkedIds } });
     const includeEmail = key.scopes.includes("guests:email");
     const rows = await db.lumaEvent.findMany({
       where: {
@@ -79,7 +80,7 @@ export async function personEvents(
       // The public guest API uses guest:{id} for identities without a Luma user
       // ID. Internal index IDs can be email addresses and must not leak through
       // an identity field when a key cannot read email addresses.
-      const publicPersonId = guest.lumaUserId || person.lumaUserId
+      const publicPersonId = humanIdentityEnabled() ? guest.personId : guest.lumaUserId || person.lumaUserId
         || (guest.lumaGuestId ? `guest:${guest.lumaGuestId}` : personId);
       const name = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(person.name || "") ? "Unnamed guest" : person.name || "Unnamed guest";
       return [{

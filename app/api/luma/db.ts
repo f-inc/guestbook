@@ -1,3 +1,5 @@
+import { humanClient, humanIdentityEnabled } from "./human-mode";
+import { projectSourceAccounts, projectHumans, resolveHumanIds } from "./human-store";
 import { aggregateMergedHistory } from "./merge-history";
 import { linkedPersonIds, mergedHistoryJoin } from "./merge-identity";
 import { activePersonSql, emailRemovalEnabled, inactivePeopleAmongCandidatesSql } from "./email-inactivity";
@@ -468,6 +470,7 @@ export async function refreshIndexedEventOverviewStats(eventIds: string[]) {
         target.event_id,
         JSONB_BUILD_OBJECT(
           'version', 1,
+          'identityMode', ${humanIdentityEnabled() ? 'human' : 'legacy'},
           'total', COUNT(guest.person_id)::integer,
           'checkedIn', COUNT(guest.person_id) FILTER (WHERE guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')::integer,
           'accepted', COUNT(guest.person_id) FILTER (WHERE guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)}))::integer,
@@ -664,6 +667,7 @@ export async function searchIndexedPeople(search: string, {
       COALESCE(person.email, '') || ' ' ||
       COALESCE(person.title, '') || ' ' ||
       COALESCE(person.bio, '')
+      ${humanIdentityEnabled() ? Prisma.sql`|| ' ' || person.search_aliases` : Prisma.empty}
     ) LIKE LOWER(${containsQuery}) ESCAPE '\\'
     ${phoneDigits ? Prisma.sql`OR REGEXP_REPLACE(COALESCE(person.phone_number, ''), '[^0-9]', '', 'g') LIKE ${containsPhoneDigits}` : Prisma.empty}
   )`;
@@ -871,7 +875,8 @@ export async function searchIndexedPeopleByName(search: string, { limit = 20, of
   const matches = await prisma().$queryRaw<Array<{ personId: string }>>(Prisma.sql`
     SELECT person.person_id AS "personId"
     FROM luma_people AS person
-    WHERE LOWER(person.name) LIKE LOWER(${containsQuery}) ESCAPE '\\'
+    WHERE (LOWER(person.name) LIKE LOWER(${containsQuery}) ESCAPE '\\'
+      ${humanIdentityEnabled() ? Prisma.sql`OR person.search_aliases ILIKE ${containsQuery}` : Prisma.empty})
       AND ${activePersonSql(Prisma.sql`person.person_id`)}
     ORDER BY
       CASE
@@ -1186,11 +1191,20 @@ export function notAttendedAudienceEventIds(selections: Array<{ eventId: string;
   return [...new Set(selections.filter(({ cohort }) => cohort === "not_attended").map(({ eventId }) => eventId))];
 }
 
+async function humanAudienceCriteria(raw: IndexedAudienceCriteria) {
+  const criteria=normalizeIndexedAudienceCriteria(raw);
+  if(humanIdentityEnabled()){
+    criteria.includePersonIds=await resolveHumanIds(sourcePrisma(),criteria.includePersonIds||[]);
+    criteria.excludePersonIds=await resolveHumanIds(sourcePrisma(),criteria.excludePersonIds||[]);
+  }
+  return criteria;
+}
+
 export async function resolveIndexedAudiencePersonIds(
   rawCriteria: IndexedAudienceCriteria,
   { useCache = true } = {},
 ) {
-  const criteria = normalizeIndexedAudienceCriteria(rawCriteria);
+  const criteria = await humanAudienceCriteria(rawCriteria);
   const cacheKey = JSON.stringify(criteria);
   const cached = audienceResolutionCache.get(cacheKey);
   if (!emailRemovalEnabled() && useCache && cached && cached.expiresAt > Date.now()) return cached.personIds;
@@ -1375,7 +1389,7 @@ export async function listIndexedAudiencePage(
   rawCriteria: IndexedAudienceCriteria,
   { cursor = "", pageSize = 100, includeTotals = true, query = "" }: { cursor?: string | number; pageSize?: number; includeTotals?: boolean; query?: string } = {},
 ) {
-  const criteria = normalizeIndexedAudienceCriteria(rawCriteria);
+  const criteria = await humanAudienceCriteria(rawCriteria);
   const normalizedQuery = String(query || "").trim().slice(0, 120);
   const searchPattern = `%${normalizedQuery}%`;
   const offset = includeTotals && typeof cursor === "number" ? Math.max(0, Math.trunc(cursor) || 0) : 0;
@@ -1531,6 +1545,7 @@ export async function listIndexedAudiencePage(
         AND ${normalizedQuery ? Prisma.sql`(
           person.name ILIKE ${searchPattern}
           OR person.email ILIKE ${searchPattern}
+          ${humanIdentityEnabled() ? Prisma.sql`OR person.search_aliases ILIKE ${searchPattern}` : Prisma.empty}
         )` : Prisma.sql`TRUE`}
       ORDER BY ${includeTotals
         ? Prisma.sql`person.last_seen_at DESC, person.name ASC, person.person_id`
@@ -1600,7 +1615,7 @@ export async function listIndexedAudiencePage(
 }
 
 export async function countIndexedAudience(criteria: IndexedAudienceCriteria) {
-  const normalized = normalizeIndexedAudienceCriteria(criteria);
+  const normalized = await humanAudienceCriteria(criteria);
   const includeTagIds = normalized.includeTagIds || [];
   const excludeTagIds = normalized.excludeTagIds || [];
   const includeSuperTagIds = normalized.includeSuperTagIds || [];
@@ -1726,7 +1741,7 @@ export async function countIndexedAudience(criteria: IndexedAudienceCriteria) {
 export async function listIndexedAudienceInviteRecipients(criteria: IndexedAudienceCriteria) {
   const personIds = await resolveIndexedAudiencePersonIds(criteria, { useCache: false });
   if (!personIds.length) return [];
-  if (emailRemovalEnabled()) {
+  if (humanIdentityEnabled() || emailRemovalEnabled()) {
     // Keep the current address when active; fall back only when it was removed.
     const recipients = await prisma().$queryRaw<Array<{id:string;email:string;name:string}>>(Prisma.sql`
       SELECT person.person_id AS id, active.email, person.name
@@ -1735,6 +1750,8 @@ export async function listIndexedAudienceInviteRecipients(criteria: IndexedAudie
         SELECT pe.email FROM guestbook_person_email_addresses pe
         LEFT JOIN email_inactive i ON i."emailLower"=pe.email
         WHERE pe.person_id=person.person_id AND i."emailLower" IS NULL
+          AND NOT EXISTS (SELECT 1 FROM email_addresses restriction WHERE restriction."emailLower"=pe.email AND (restriction."lumaBlockedReason" IS NOT NULL OR (restriction.state='undeliverable' AND restriction."checkedAt">NOW()-INTERVAL '30 days')))
+          AND NOT EXISTS (SELECT 1 FROM email_removal_items removal WHERE removal."emailLower"=pe.email AND removal.status='succeeded')
         ORDER BY (pe.email=lower(trim(person.email))) DESC NULLS LAST, pe.email LIMIT 1
       ) active ON TRUE WHERE person.person_id = ANY(${personIds}::text[])
     `);
@@ -2276,6 +2293,7 @@ function indexedMultiEventGuestPageWhereSql(query: GuestListQuery) {
           AND (
             search_person.name ILIKE ${searchPattern}
             OR search_person.email ILIKE ${searchPattern}
+            ${humanIdentityEnabled() ? Prisma.sql`OR search_person.search_aliases ILIKE ${searchPattern}` : Prisma.empty}
             OR (${Boolean(phoneDigits)} AND REGEXP_REPLACE(COALESCE(search_person.phone_number, ''), '[^0-9]', '', 'g') LIKE ${phonePattern})
             OR search_person.title ILIKE ${searchPattern}
             OR search_person.bio ILIKE ${searchPattern}
@@ -2368,6 +2386,7 @@ function indexedGuestPageWhereSql(
             AND (
               search_person.name ILIKE ${searchPattern}
               OR search_person.email ILIKE ${searchPattern}
+            ${humanIdentityEnabled() ? Prisma.sql`OR search_person.search_aliases ILIKE ${searchPattern}` : Prisma.empty}
               OR (${Boolean(phoneDigits)} AND REGEXP_REPLACE(COALESCE(search_person.phone_number, ''), '[^0-9]', '', 'g') LIKE ${phonePattern})
               OR search_person.title ILIKE ${searchPattern}
               OR search_person.bio ILIKE ${searchPattern}
@@ -2799,7 +2818,7 @@ export async function getIndexedLifetimeEventCounts(
   personIds: string[],
   diagnosticReporter?: EventSwitchDiagnosticReporter,
 ) {
-  const boundedPersonIds = [...new Set(personIds.filter(Boolean))].slice(0, 100);
+  const boundedPersonIds = await resolveHumanIds(sourcePrisma(),[...new Set(personIds.filter(Boolean))].slice(0,100));
   if (!boundedPersonIds.length) return { source: "luma-index", eventId, counts: [] };
   const diagnosticStartedAt = Date.now();
   const identityJoin = await mergedHistoryJoin(prisma(), boundedPersonIds);
@@ -3739,7 +3758,15 @@ export async function mutateIndexedPeopleTags({
   tagIds: string[];
   removed: boolean;
 }) {
+  if(humanIdentityEnabled()) {
+    const mapped=await Promise.all(people.map(async p=>({...p,personId:(await resolveHumanIds(sourcePrisma(),[p.personId]))[0]})));
+    people=[...new Map(mapped.map(p=>[p.personId,p])).values()];
+  }
   const result = await prisma().$transaction(async (db: Prisma.TransactionClient) => {
+    if(humanIdentityEnabled()){
+      const mapped=await Promise.all(people.map(async p=>({...p,personId:(await resolveHumanIds(db,[p.personId]))[0]})));
+      people=[...new Map(mapped.map(p=>[p.personId,p])).values()];
+    }
     const personIds = people.map((person) => person.personId);
     const eventIds = [...new Set(people.map((person) => person.eventId).filter((eventId): eventId is string => Boolean(eventId)))];
     const [storedPeople, definitions, eventCount] = await Promise.all([
@@ -3899,9 +3926,13 @@ export async function mutateIndexedPersonTag({ personId, tagId, eventId, removed
   return person;
 }
 
-export async function matchIndexedPeopleByEmails(emails: string[]) {
+export async function matchIndexedPeopleByEmails(emails: string[]): Promise<Array<IndexedPersonTagMutationResult & {name:string;email:string|null;emailLower:string|null}>> {
   const normalizedEmails = [...new Set(emails.map((email) => normalizeEmail(email)).filter(Boolean))];
   if (!normalizedEmails.length) return [];
+  if(humanIdentityEnabled()) {
+    const matches=await sourcePrisma().guestbookPersonEmail.findMany({where:{emailLower:{in:normalizedEmails},person:{mergedIntoId:null}},include:{person:{select:{personId:true,name:true,email:true,tags:true,manualTags:true,automaticTags:true}}}});
+    return matches.map(m=>({...m.person,emailLower:m.emailLower}));
+  }
   return prisma().lumaPerson.findMany({
     where: { emailLower: { in: normalizedEmails } },
     select: {
@@ -3949,7 +3980,9 @@ export async function appendIndexedPersonComment({
   body: string;
   author: string;
 }) {
+  [personId] = await resolveHumanIds(sourcePrisma(),[personId]);
   return prisma().$transaction(async (transaction) => {
+    [personId]=await resolveHumanIds(transaction,[personId]);
     const person = await transaction.lumaPerson.findUnique({
       where: { personId },
       select: { personId: true },
@@ -4060,12 +4093,13 @@ export async function runAutomaticTagClassifier({ personIds, forceFull = false, 
     throw error;
   }
 
-  const requestedPersonIds = normalizeAutomaticTagPersonIds(personIds);
+  let requestedPersonIds = normalizeAutomaticTagPersonIds(personIds);
   const startedAt = Date.now();
   const settleMinutes = safeInt("AUTOMATIC_TAG_EVENT_SETTLE_MINUTES", 360, 0, 60 * 24 * 7);
   const timeout = safeInt("AUTOMATIC_TAG_TRANSACTION_TIMEOUT_MS", 120000, 5000, 300000);
 
   const result = await prisma().$transaction(async (db: Prisma.TransactionClient) => {
+    requestedPersonIds=await resolveHumanIds(db,requestedPersonIds);
     const lockRows = await db.$queryRaw<Array<{ acquired: boolean }>>(Prisma.sql`
       SELECT pg_try_advisory_xact_lock(hashtext('guestbook:auto-tags')) AS acquired
     `);
@@ -4676,9 +4710,12 @@ export async function getIndexedTrace({ tracePersonId, traceEmail, limit = 500 }
   if (targetEmail) guestMatches.push({ emailLower: targetEmail });
 
   const identityRows = await prisma().lumaPerson.findMany({
-    where: { OR: guestMatches }, select: { personId: true }, take: 100,
+    where: { OR: humanIdentityEnabled() && rawPersonId ? guestMatches.filter(m=>!("emailLower" in m)) : guestMatches }, select: { personId: true }, take: 100,
   });
-  const memberIds = await linkedPersonIds(prisma(), [...new Set([...identityRows.map(p => p.personId), ...(rawPersonId ? [rawPersonId] : [])])]);
+  const contactOwners = humanIdentityEnabled() && !rawPersonId && targetEmail ? await sourcePrisma().guestbookPersonEmail.findMany({where:{emailLower:targetEmail,person:{mergedIntoId:null}},select:{personId:true},take:101}) : [];
+  if(contactOwners.length>1)throw Object.assign(new Error("This email belongs to multiple people. Select a Guestbook person."),{status:409});
+  const memberIds = await linkedPersonIds(prisma(), [...new Set([...identityRows.map(p => p.personId),...contactOwners.map(p=>p.personId), ...(rawPersonId ? [rawPersonId] : [])])]);
+  if(humanIdentityEnabled()) guestMatches.splice(0,guestMatches.length);
   if (memberIds.length) guestMatches.push({ personId: { in: memberIds } });
   const rows = await prisma().lumaEventGuest.findMany({
     where: { OR: guestMatches },
@@ -4705,12 +4742,15 @@ export async function getIndexedTrace({ tracePersonId, traceEmail, limit = 500 }
 
   const records = aggregateMergedHistory<ReturnType<typeof indexedGuestToTraceRecord>>(rows.slice(0, limit).map(indexedGuestToTraceRecord)).sort((a, b) => new Date(b.eventStartsAt || b.eventDate || b.sortAt).getTime() - new Date(a.eventStartsAt || a.eventDate || a.sortAt).getTime());
 
-  const primary = memberIds.length > 1 ? await prisma().lumaPerson.findUnique({ where: { personId: memberIds[0] }, select: INDEXED_TRACE_PERSON_SELECT }) : null;
+  const primary = (humanIdentityEnabled() && memberIds.length) || memberIds.length > 1 ? await prisma().lumaPerson.findUnique({ where: { personId: memberIds[0] }, select: INDEXED_TRACE_PERSON_SELECT }) : null;
+  const person=primary ? indexedPersonToApiPerson(primary) : rows[0] ? indexedPersonToApiPerson(rows[0].person,rows[0]) : null;
+  const contacts=humanIdentityEnabled() && person ? await sourcePrisma().guestbookPersonEmail.findMany({where:{personId:person.id},select:{emailLower:true}}) : [];
+  const linkedAccountCount=humanIdentityEnabled() && person ? await sourcePrisma().guestbookAccountIdentity.count({where:{personId:person.id}}) : 0;
   return {
     linkedPersonIds: memberIds,
     truncated: rows.length > limit,
     source: "luma-index",
-    person: primary ? indexedPersonToApiPerson(primary) : rows[0] ? indexedPersonToApiPerson(rows[0].person, rows[0]) : null,
+    person: person && humanIdentityEnabled() ? {...person,emails:contacts.map(c=>c.emailLower),linkedAccountCount} : person,
     records,
     loadedAt: new Date().toISOString(),
     cached: false,
@@ -4753,9 +4793,11 @@ export async function removeIndexedTraceRecordsMissingFromEvents({ tracePersonId
 
 export async function removeIndexedEventGuestsMissingFromSnapshot({ eventId, personIds = [] }: AnyRecord = {}) {
   if (!eventId) return { deletedCount: 0, personIds: [] };
-  const currentPersonIds = [...new Set(personIds.filter(Boolean))];
+  const currentPersonIds = [...new Set<string>(personIds.filter((id:unknown)=>typeof id==="string" && Boolean(id)))];
   const serialized = JSON.stringify(currentPersonIds);
-  const rows = await prisma().$queryRaw<Array<{ personId: string }>>(Prisma.sql`
+  const reconcile=async (db: Prisma.TransactionClient)=>{
+  if(humanIdentityEnabled()) await db.$executeRaw`SELECT pg_advisory_xact_lock(821157031)`;
+  const rows = await db.$queryRaw<Array<{ personId: string }>>(Prisma.sql`
     DELETE FROM luma_event_guests AS guest
     WHERE guest.event_id = ${eventId}
       ${currentPersonIds.length ? Prisma.sql`
@@ -4767,13 +4809,20 @@ export async function removeIndexedEventGuestsMissingFromSnapshot({ eventId, per
       ` : Prisma.empty}
     RETURNING guest.person_id AS "personId"
   `);
+  if (humanIdentityEnabled()) {
+    const affected = await resolveHumanIds(db, [...currentPersonIds,...rows.map(r=>r.personId)]);
+    for(let start=0;start<affected.length;start+=1000) await projectHumans(db,affected.slice(start,start+1000),[eventId]);
+    return {deletedCount:rows.length,personIds:affected};
+  }
   return { deletedCount: rows.length, personIds: rows.map((row) => row.personId) };
+  };
+  return humanIdentityEnabled() ? sourcePrisma().$transaction(reconcile,{timeout:30000}) : reconcile(sourcePrisma());
 }
 
 export async function updateIndexedGuestStatus({ eventId, lumaGuestId, status, lumaApprovalStatus }) {
   if (!eventId || !lumaGuestId) return { updatedCount: 0 };
   const now = new Date();
-  const result = await prisma().lumaEventGuest.updateMany({
+  const result = await sourcePrisma().lumaEventGuest.updateMany({
     where: { eventId, lumaGuestId },
     data: {
       status,
@@ -4785,6 +4834,10 @@ export async function updateIndexedGuestStatus({ eventId, lumaGuestId, status, l
       syncedAt: now,
     },
   });
+  if (humanIdentityEnabled() && result.count) {
+    const accounts = await sourcePrisma().lumaEventGuest.findMany({where:{eventId,lumaGuestId},select:{personId:true}});
+    await projectSourceAccounts(sourcePrisma(),accounts.map(p=>p.personId),[eventId]);
+  }
   if (result.count) await refreshIndexedEventOverviewStats([eventId]);
   return { updatedCount: result.count };
 }
@@ -4792,7 +4845,7 @@ export async function updateIndexedGuestStatus({ eventId, lumaGuestId, status, l
 export async function updateIndexedGuestCheckIn({ eventId, lumaGuestId, checkedIn }) {
   if (!eventId || !lumaGuestId) return { updatedCount: 0 };
   const now = new Date();
-  const result = await prisma().lumaEventGuest.updateMany({
+  const result = await sourcePrisma().lumaEventGuest.updateMany({
     where: { eventId, lumaGuestId },
     data: {
       status: checkedIn ? "checked_in" : "going",
@@ -4803,12 +4856,17 @@ export async function updateIndexedGuestCheckIn({ eventId, lumaGuestId, checkedI
       syncedAt: now,
     },
   });
+  if (humanIdentityEnabled() && result.count) {
+    const accounts = await sourcePrisma().lumaEventGuest.findMany({where:{eventId,lumaGuestId},select:{personId:true}});
+    await projectSourceAccounts(sourcePrisma(),accounts.map(p=>p.personId),[eventId]);
+  }
   if (result.count) await refreshIndexedEventOverviewStats([eventId]);
   return { updatedCount: result.count };
 }
 
 export async function updateIndexedPersonPhoneNumber(personId: string, phoneNumber: string | null) {
   if (!personId) return { updatedCount: 0 };
+  [personId] = await resolveHumanIds(sourcePrisma(),[personId]);
   const result = await prisma().lumaPerson.updateMany({
     where: { personId },
     data: { phoneNumber },
@@ -4839,6 +4897,20 @@ export async function listIndexedGuestReferrerTargets(eventId: string, limit = 1
 
 export async function updateIndexedGuestReferrers(eventId: string, updates: Array<{ personId: string; referrer: AnyRecord }>) {
   if (!eventId || !updates.length) return { updatedCount: 0 };
+  if(humanIdentityEnabled()) {
+    let updatedCount=0;
+    for(const update of updates){
+      const [personId]=await resolveHumanIds(sourcePrisma(),[update.personId]);
+      const guest=await prisma().lumaEventGuest.findUnique({where:{eventId_personId:{eventId,personId}},select:{lumaGuestId:true}});
+      if(!guest?.lumaGuestId)continue;
+      const targets=await sourcePrisma().lumaEventGuest.findMany({where:{eventId,lumaGuestId:guest.lumaGuestId},select:{personId:true}});
+      const result=await sourcePrisma().lumaEventGuest.updateMany({where:{eventId,lumaGuestId:guest.lumaGuestId},data:{referrer:sanitizeJson(update.referrer)}});
+      updatedCount+=result.count;
+      await projectSourceAccounts(sourcePrisma(),targets.map(p=>p.personId),[eventId]);
+    }
+    return {updatedCount};
+  }
+
   const now = new Date();
   const uniqueUpdates = [...new Map(
     updates
@@ -4913,6 +4985,7 @@ export async function getIndexStats() {
 
 export async function getIndexedPersonAvatarSource(personId) {
   if (!personId) return null;
+  [personId]=await resolveHumanIds(sourcePrisma(),[personId]);
   return prisma().lumaPerson.findUnique({
     where: { personId },
     select: {
@@ -4927,6 +5000,7 @@ export async function getIndexedPersonAvatarSource(personId) {
 
 export async function updateIndexedPersonAvatar(personId, avatarUrl) {
   if (!personId || !isHttpUrl(avatarUrl)) return null;
+  [personId]=await resolveHumanIds(sourcePrisma(),[personId]);
   return prisma().lumaPerson.update({
     where: { personId },
     data: { avatarUrl, lastSeenAt: new Date() },
@@ -5105,7 +5179,7 @@ export async function upsertNormalizedLumaSnapshot({ rawEvent, event, guests = [
   const uniquePeople = new Set();
   const chunkSize = safeInt("DB_SYNC_GUEST_WRITE_CHUNK_SIZE", 250, 1, 1000);
   const timeout = safeInt("DB_TRANSACTION_TIMEOUT_MS", 30000, 5000, 120000);
-  await prisma().$transaction(
+  await sourcePrisma().$transaction(
     async (tx) => {
       await upsertEvent(tx, event, rawEvent);
     },
@@ -5115,7 +5189,7 @@ export async function upsertNormalizedLumaSnapshot({ rawEvent, event, guests = [
   for (let start = 0; start < guests.length; start += chunkSize) {
     const guestChunk = guests.slice(start, start + chunkSize);
     const rawGuestChunk = rawGuests.slice(start, start + chunkSize);
-    await prisma().$transaction(
+    await sourcePrisma().$transaction(
       async (tx) => {
         await upsertGuestChunk(tx, event, guestChunk, rawGuestChunk, uniquePeople);
       },
@@ -5140,7 +5214,7 @@ export async function upsertNormalizedLumaEvents(snapshots: Array<{ rawEvent: An
     return { ...data, rawJson: JSON.stringify(data.raw) };
   });
 
-  await prisma().$executeRaw(
+  await sourcePrisma().$executeRaw(
     Prisma.sql`
       INSERT INTO "luma_events" (
         "event_id", "title", "date", "starts_at", "ends_at", "visibility", "location", "category",
@@ -5177,7 +5251,7 @@ export async function upsertNormalizedLumaEvents(snapshots: Array<{ rawEvent: An
 export async function archiveIndexedEventsMissingFromCatalog(eventIds: string[]) {
   if (!hasLumaDb()) return { skipped: true, archivedEventCount: 0 };
   const activeEventIds = [...new Set(eventIds.filter(Boolean))];
-  const result = await prisma().lumaEvent.updateMany({
+  const result = await sourcePrisma().lumaEvent.updateMany({
     where: {
       catalogActive: true,
       ...(activeEventIds.length ? { eventId: { notIn: activeEventIds } } : {}),
@@ -5191,7 +5265,7 @@ export async function upsertNormalizedLumaGuestActivity({ event, guest, rawGuest
   if (!hasLumaDb()) return { skipped: true, guestCount: 0, personCount: 0 };
   const uniquePeople = new Set();
   const timeout = safeInt("DB_TRANSACTION_TIMEOUT_MS", 30000, 5000, 120000);
-  await prisma().$transaction(
+  await sourcePrisma().$transaction(
     async (tx) => {
       await upsertGuestChunk(tx, event, [guest], [rawGuest], uniquePeople);
     },
@@ -5200,7 +5274,7 @@ export async function upsertNormalizedLumaGuestActivity({ event, guest, rawGuest
   return { skipped: false, guestCount: 1, personCount: uniquePeople.size };
 }
 
-export function prisma() {
+export function sourcePrisma() {
   if (!hasLumaDb()) {
     const error = new Error("Missing DB_URL. Add a PostgreSQL connection string before using the Luma index.") as HttpError;
     error.status = 503;
@@ -5232,6 +5306,8 @@ export function prisma() {
   return globalThis[PRISMA_KEY];
 }
 
+export function prisma() { return humanClient(sourcePrisma()); }
+
 async function upsertEvent(tx, event, rawEvent = {}) {
   const data = normalizedEventData(event, rawEvent);
 
@@ -5262,6 +5338,7 @@ function normalizedEventData(event: AnyRecord, rawEvent: AnyRecord = {}, now = n
 }
 
 async function upsertGuestChunk(tx, event, guests, rawGuests, uniquePeople) {
+  if(humanIdentityEnabled()) await tx.$executeRaw`SELECT pg_advisory_xact_lock(821157031)`;
   const now = new Date();
   const peopleById = new Map();
   const guestRowsByPersonId = new Map();
@@ -5280,6 +5357,7 @@ async function upsertGuestChunk(tx, event, guests, rawGuests, uniquePeople) {
   const guestRows = [...guestRowsByPersonId.values()];
   if (people.length) await bulkUpsertPeople(tx, people);
   if (guestRows.length) await bulkUpsertEventGuests(tx, guestRows);
+  if (humanIdentityEnabled() && people.length) await projectSourceAccounts(tx, people.map((p: any) => p.personId), [event.id]);
 }
 
 function normalizeGuestRows(event, guest, rawGuest = {}, now = new Date()) {
@@ -5639,7 +5717,7 @@ async function upsertGuest(tx, event, guest, rawGuest = {}) {
 }
 
 function indexedEventToApiEvent(row) {
-  const guestStats = row.overviewStatsUpdatedAt
+  const guestStats = (humanIdentityEnabled() ? row.overviewStats?.identityMode === "human" : row.overviewStats?.identityMode !== "human") && row.overviewStatsUpdatedAt
     ? normalizedEventOverviewStats(row.overviewStats)
     : null;
   return {
@@ -5719,6 +5797,7 @@ function indexedPersonToApiPerson(row: any, guestRow: any = {}) {
   const crmNoteCount = Number(row.crmNoteCount ?? row._count?.comments ?? (latestComment ? 1 : 0)) || 0;
   return {
     id: row.personId,
+    ...(humanIdentityEnabled() ? {identitySystem:"human"} : {}),
     lumaUserId: row.lumaUserId || null,
     name: row.name || "Unnamed guest",
     email: row.email || guestRow.email || "",

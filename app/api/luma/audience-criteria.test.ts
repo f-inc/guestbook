@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { audienceAnswerQuestionMode, normalizeIndexedAudienceCriteria } from "./db";
+import { audienceAnswerQuestionMode, indexedAudienceCohortPredicateSql, normalizeIndexedAudienceCriteria } from "./db";
 import { ANY_REGISTRATION_ANSWER_KEY, isAnyRegistrationAnswer } from "../../audience-answer-rules";
 
 test("represents selecting every response as one bounded wildcard rule", () => {
@@ -90,4 +90,65 @@ test("drops malformed audience criteria", () => {
     includePersonIds: [],
     excludePersonIds: [],
   });
+});
+
+test("preserves didn't-attend audiences for additions, subtractions, and answer narrowing", () => {
+  const selection = { eventId: "event-1", cohort: "not_attended" as const };
+  const rule = { ...selection, question: "Role", answer: "Founder", answerKey: "founder" };
+  const normalized = normalizeIndexedAudienceCriteria({
+    includeEventCohorts: [selection],
+    excludeEventCohorts: [selection],
+    includeEventAnswers: [rule],
+  });
+  assert.deepEqual(normalized.includeEventCohorts, [selection]);
+  assert.deepEqual(normalized.excludeEventCohorts, [selection]);
+  assert.deepEqual(normalized.includeEventAnswers, [rule]);
+});
+
+
+test("didn't-attend SQL requires registration and excludes either kind of check-in evidence", () => {
+  const predicate = indexedAudienceCohortPredicateSql("not_attended");
+  assert.match(predicate.text, /guest.checked_in_at IS NULL/);
+  assert.match(predicate.text, /guest.status <> 'checked_in'/);
+  assert.match(predicate.text, /guest.status IN/);
+  assert.match(predicate.text, /guest.status = 'declined' AND guest.registered_at IS NOT NULL/);
+  assert.deepEqual(predicate.values, ["registered", "waitlisted", "going", "checked_in", "no_show"]);
+});
+
+test("multiple didn't-attend events exclude anyone who attended even one selected event", async () => {
+  // Explicitly isolated in-memory fixtures: never use the configured application DB.
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec(`CREATE TABLE luma_event_guests (
+      event_id TEXT, person_id TEXT, status TEXT, registered_at TEXT, checked_in_at TEXT
+    )`);
+    const insert = db.prepare("INSERT INTO luma_event_guests VALUES (?, ?, ?, ?, ?)");
+    for (const row of [
+      ["a", "missed-both", "no_show", "date", null],
+      ["b", "missed-both", "going", "date", null],
+      ["a", "attended-b", "no_show", "date", null],
+      ["b", "attended-b", "checked_in", "date", null],
+      ["a", "attended-a", "going", "date", "timestamp"],
+      ["b", "attended-a", "no_show", "date", null],
+      ["a", "only-a", "registered", "date", null],
+      ["b", "only-invited", "invited", null, null],
+      ["a", "declined-registration", "declined", "date", null],
+      ["a", "declined-invite", "declined", null, null],
+      ["a", "attended-unselected", "no_show", "date", null],
+      ["c", "attended-unselected", "checked_in", "date", "timestamp"],
+    ]) insert.run(...row);
+    const match = (eventIds: string[]) => {
+      const predicate = indexedAudienceCohortPredicateSql("not_attended", eventIds);
+      return db.prepare(`SELECT DISTINCT guest.person_id FROM luma_event_guests AS guest
+        WHERE guest.event_id IN (${eventIds.map(() => "?").join(",")}) AND ${predicate.sql}
+        ORDER BY guest.person_id`).all(...eventIds, ...predicate.values as Array<string | null>)
+        .map((row) => row.person_id);
+    };
+    assert.deepEqual(match(["a", "b"]), ["attended-unselected", "declined-registration", "missed-both", "only-a"]);
+    // Removing event B makes its attendees eligible again; adding B removes them.
+    assert.deepEqual(match(["a"]), ["attended-b", "attended-unselected", "declined-registration", "missed-both", "only-a"]);
+  } finally {
+    db.close();
+  }
 });

@@ -1,5 +1,7 @@
 "use client";
 
+import { audienceCohortLabel, audienceAnswerCount } from "./audience-cohort";
+
 import { AudienceVerification } from "./email-verification-ui";
 import { LumaConnectionStatus } from "./luma-connection-status";
 import { WorkspaceSettings } from "./workspace-settings";
@@ -7727,7 +7729,7 @@ function InviteTab({
       .filter(([eventId]) => !includeEventAnswers.some((rule) => rule.eventId === eventId))
       .map(([eventId, selection]: [string, any]) => ({
         label: (eventById.get(eventId) as any)?.title || "Historical event",
-        detail: `${selection.cohort} group`,
+        detail: `${audienceCohortLabel(selection.cohort)} group`,
       })),
     ...includeEventAnswers.map((selection) => ({
       label: selection.answer,
@@ -7742,7 +7744,7 @@ function InviteTab({
     ...excludeTags.map((name) => ({ label: name, detail: "Tag group" })),
     ...Object.entries(excludeEventCohorts).map(([eventId, selection]: [string, any]) => ({
       label: (eventById.get(eventId) as any)?.title || "Historical event",
-      detail: `${selection.cohort} group`,
+      detail: `${audienceCohortLabel(selection.cohort)} group`,
     })),
     ...excludeEventAnswers.map((selection) => ({
       label: selection.answer,
@@ -8185,7 +8187,7 @@ function RegistrationAnswerEventCard({ mode, event, cohort, sourceCount, rules, 
   const question = questions.find((item) => item.id === questionId) || null;
   const normalizedSearch = answerSearch.trim().toLocaleLowerCase();
   const visibleOptions = (question?.options || []).filter((option) => !normalizedSearch || option.label.toLocaleLowerCase().includes(normalizedSearch));
-  const questionDenominator = (question?.options || []).reduce((total, option) => total + Number(cohort === "attended" ? option.checkedInCount : option.count || 0), 0);
+  const questionDenominator = (question?.options || []).reduce((total, option) => total + audienceAnswerCount(option, cohort), 0);
   const selectedForQuestion = rules.filter((rule) => rule.question.toLocaleLowerCase() === question?.label?.toLocaleLowerCase());
   const allAnswersSelected = selectedForQuestion.some((rule) => rule.answerKey === ANY_REGISTRATION_ANSWER_KEY);
   const toggleOption = (option) => {
@@ -8210,7 +8212,7 @@ function RegistrationAnswerEventCard({ mode, event, cohort, sourceCount, rules, 
     <article className={`invite-answer-event-card ${open ? "open" : ""} ${rules.length ? "filtered" : ""}`}>
       <div className="invite-answer-event-summary">
         <EventArtwork event={event} />
-        <div className="invite-answer-event-identity"><strong>{event.title}</strong><span><span className="invite-answer-cohort">{cohort}</span>{sourceCount === null ? "Audience count unavailable" : `${sourceCount.toLocaleString()} ${cohort}`}</span></div>
+        <div className="invite-answer-event-identity"><strong>{event.title}</strong><span><span className="invite-answer-cohort">{audienceCohortLabel(cohort)}</span>{sourceCount === null ? "Audience count unavailable" : `${sourceCount.toLocaleString()} ${audienceCohortLabel(cohort)}`}</span></div>
         <div className="invite-answer-event-status"><strong>{groupedRules.length || "All"}</strong><span>{groupedRules.length ? groupedRules.length === 1 ? "condition" : "conditions" : "included"}</span></div>
         <button className="invite-answer-event-toggle" type="button" aria-expanded={open} onClick={() => setOpen((current) => !current)}>{open ? "Done" : rules.length ? "Edit filters" : mode === "add" ? "Narrow audience" : "Add exclusion"}<ChevronDown className={open ? "rotate-180" : ""} size={15} /></button>
       </div>
@@ -8247,7 +8249,7 @@ function RegistrationAnswerEventCard({ mode, event, cohort, sourceCount, rules, 
               </div>
               <div className="invite-answer-options">
                 {visibleOptions.map((option) => {
-                  const count = Number(cohort === "attended" ? option.checkedInCount : option.count) || 0;
+                  const count = audienceAnswerCount(option, cohort);
                   const percent = questionDenominator ? Math.round((count / questionDenominator) * 100) : 0;
                   const active = allAnswersSelected || selectedForQuestion.some((rule) => rule.answerKey === option.answerKey);
                   return <button className={active ? "active" : ""} type="button" aria-pressed={active} key={option.answerKey} onClick={() => toggleOption(option)}><span className="invite-answer-option-check">{active ? <Check size={13} /> : null}</span><span><strong>{option.label}</strong><small>{percent}% of responses</small></span><em>{count.toLocaleString()}</em></button>;
@@ -8291,11 +8293,13 @@ function EventAudiencePicker({ events, selections, activeLoading, mode, cohortCo
         <div className="invite-event-filter-row">
           <div className="invite-event-cohort-tabs" aria-label="Event group type">
             <button className={cohort === "attended" ? "active" : ""} type="button" onClick={() => setCohort("attended")}>Attended</button>
+            <button className={cohort === "not_attended" ? "active" : ""} type="button" onClick={() => setCohort("not_attended")}>Didn’t attend</button>
             <button className={cohort === "registered" ? "active" : ""} type="button" onClick={() => setCohort("registered")}>Registered</button>
             <button className={cohort === "invited" ? "active" : ""} type="button" onClick={() => setCohort("invited")}>Invited</button>
           </div>
           <small>{countsStatus === "loading" ? "Loading audience counts…" : countsStatus === "refreshing" ? "Refreshing audience counts…" : countsError || "Showing 15 at a time"}</small>
         </div>
+        {cohort === "not_attended" ? <p className="text-xs text-muted">Registered for at least one selected event, with no check-in recorded at any event selected as “Didn’t attend”.</p> : null}
         <div className="invite-event-gallery" onScroll={loadMoreEvents}>
           {visibleEvents.map((event) => {
             const active = selections?.[event.id]?.cohort === cohort;
@@ -8304,7 +8308,7 @@ function EventAudiencePicker({ events, selections, activeLoading, mode, cohortCo
             return (
               <button className={`invite-event-tile ${active ? "active" : ""}`} type="button" disabled={Boolean(activeLoading)} aria-pressed={active} key={event.id} onClick={() => onSelect(event, cohort, mode)}>
                 <EventArtwork event={event} />
-                <span className="invite-event-tile-copy"><strong>{event.title}</strong><small>{formatDate(event.date)}</small><span>{count !== null ? count.toLocaleString() : "—"} <small>{cohort}</small></span></span>
+                <span className="invite-event-tile-copy"><strong>{event.title}</strong><small>{formatDate(event.date)}</small><span>{count !== null ? count.toLocaleString() : "—"} <small>{audienceCohortLabel(cohort)}</small></span></span>
                 <span className="invite-event-tile-action">{busy ? <RefreshCw className="animate-spin" size={15} /> : active ? <CircleCheck size={16} /> : mode === "subtract" ? <UserMinus size={16} /> : <Plus size={16} />}</span>
               </button>
             );
@@ -8318,7 +8322,7 @@ function EventAudiencePicker({ events, selections, activeLoading, mode, cohortCo
           {selectedEntries.map(([eventId, selection]) => {
             const event = events.find((item) => item.id === eventId);
             if (!event) return null;
-            return <button type="button" key={eventId} onClick={() => onSelect(event, selection.cohort, mode)}><CircleCheck size={13} /><span>{event.title}</span><small>{selection.cohort}</small><X size={12} /></button>;
+            return <button type="button" key={eventId} onClick={() => onSelect(event, selection.cohort, mode)}><CircleCheck size={13} /><span>{event.title}</span><small>{audienceCohortLabel(selection.cohort)}</small><X size={12} /></button>;
           })}
         </div>
       ) : null}
@@ -8335,6 +8339,7 @@ function eventCohortCount(event, cohort, indexedCounts: any = null) {
   if (!event.guestsLoaded) return null;
   return event.guests.filter((guest) => {
     if (cohort === "attended") return guest.status === "checked_in" || Boolean(guest.checkedInAt);
+    if (cohort === "not_attended") return isRegisteredGuest(guest) && guest.status !== "checked_in" && !guest.checkedInAt;
     if (cohort === "invited") return hasInvitationEvidence(guest);
     return isRegisteredGuest(guest);
   }).length;

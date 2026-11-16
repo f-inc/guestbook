@@ -424,3 +424,18 @@ filters, pagination, examples, and the required additive migration.
 - Run `npm run dev` in the normal checkout; its development script sets port **3030** explicitly. Do not use localhost:3000 or silently increment ports.
 - Reuse an existing server for this checkout. If the assigned port is occupied by an unrelated process, inspect ownership rather than stopping another project's server.
 - Port changes must update the development script, README, environment examples, and local integration/callback URLs together. Keep real credentials in ignored local environment files; never commit them or change production URLs for local development.
+
+
+### Past-event audiences
+
+In the invitation builder, choose **Didn’t attend** under **Past event groups**
+to add or subtract registered guests with no recorded check-in for a past event.
+This includes pending, waitlisted, approved, and no-show registrations, plus
+previously registered guests who declined. People who were only invited are not
+included. A check-in timestamp or checked-in status always excludes a guest.
+When multiple events are selected as **Didn’t attend**, a guest must have registered
+for at least one and have no check-in at any of those events. Attending even one
+excludes them from this event audience. The same rule applies to subtraction and
+registration-answer narrowing. Event tiles show individual event counts; the
+recipient list shows the combined audience. Counts reflect
+recorded check-ins; missing check-in data does not prove someone was absent.

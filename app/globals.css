@@ -2407,7 +2407,7 @@
   }
 
   .invite-event-cohort-tabs {
-    @apply inline-flex rounded-lg bg-subtle p-1;
+    @apply inline-flex flex-wrap rounded-lg bg-subtle p-1;
   }
 
   .invite-event-cohort-tabs button {

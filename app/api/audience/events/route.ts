@@ -34,7 +34,7 @@ export async function GET(request: Request) {
       });
     }
     const requestedCohort = url.searchParams.get("cohort");
-    const cohort = requestedCohort === "registered" || requestedCohort === "invited" ? requestedCohort : "attended";
+    const cohort = requestedCohort === "not_attended" || requestedCohort === "registered" || requestedCohort === "invited" ? requestedCohort : "attended";
     const idsOnly = url.searchParams.get("ids_only") === "1";
     if (!eventId) return Response.json({ error: "An event id is required." }, { status: 400 });
     return Response.json(await listIndexedPeopleByEventCohort(eventId, cohort, { idsOnly }));

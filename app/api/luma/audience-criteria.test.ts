@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { audienceAnswerQuestionMode, normalizeIndexedAudienceCriteria } from "./db";
+import { audienceAnswerQuestionMode, indexedAudienceCohortPredicateSql, normalizeIndexedAudienceCriteria } from "./db";
 import { ANY_REGISTRATION_ANSWER_KEY, isAnyRegistrationAnswer } from "../../audience-answer-rules";
 
 test("represents selecting every response as one bounded wildcard rule", () => {
@@ -90,4 +90,27 @@ test("drops malformed audience criteria", () => {
     includePersonIds: [],
     excludePersonIds: [],
   });
+});
+
+test("preserves didn't-attend audiences for additions, subtractions, and answer narrowing", () => {
+  const selection = { eventId: "event-1", cohort: "not_attended" as const };
+  const rule = { ...selection, question: "Role", answer: "Founder", answerKey: "founder" };
+  const normalized = normalizeIndexedAudienceCriteria({
+    includeEventCohorts: [selection],
+    excludeEventCohorts: [selection],
+    includeEventAnswers: [rule],
+  });
+  assert.deepEqual(normalized.includeEventCohorts, [selection]);
+  assert.deepEqual(normalized.excludeEventCohorts, [selection]);
+  assert.deepEqual(normalized.includeEventAnswers, [rule]);
+});
+
+
+test("didn't-attend SQL requires registration and excludes either kind of check-in evidence", () => {
+  const predicate = indexedAudienceCohortPredicateSql("not_attended");
+  assert.match(predicate.text, /guest.checked_in_at IS NULL/);
+  assert.match(predicate.text, /guest.status <> 'checked_in'/);
+  assert.match(predicate.text, /guest.status IN/);
+  assert.match(predicate.text, /guest.status = 'declined' AND guest.registered_at IS NOT NULL/);
+  assert.deepEqual(predicate.values, ["registered", "waitlisted", "going", "checked_in", "no_show"]);
 });

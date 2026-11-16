@@ -44,15 +44,15 @@ type AudienceSuperTagGroup = {
   count: number;
   rules: Array<{ source: "tag_exact" | "tag" | "event"; phrase: string }>;
 };
-type AudienceEventCount = { eventId: string; attended: number; registered: number; invited: number };
+type AudienceEventCount = { eventId: string; attended: number; not_attended: number; registered: number; invited: number };
 export type IndexedAudienceCriteria = {
   includeTagIds?: string[];
   excludeTagIds?: string[];
   includeSuperTagIds?: string[];
   excludeSuperTagIds?: string[];
-  includeEventCohorts?: Array<{ eventId: string; cohort: "attended" | "registered" | "invited" }>;
-  excludeEventCohorts?: Array<{ eventId: string; cohort: "attended" | "registered" | "invited" }>;
-  includeEventAnswers?: Array<{ eventId: string; cohort: "attended" | "registered" | "invited"; question: string; answer: string; answerKey: string }>;
+  includeEventCohorts?: Array<{ eventId: string; cohort: "attended" | "not_attended" | "registered" | "invited" }>;
+  excludeEventCohorts?: Array<{ eventId: string; cohort: "attended" | "not_attended" | "registered" | "invited" }>;
+  includeEventAnswers?: Array<{ eventId: string; cohort: "attended" | "not_attended" | "registered" | "invited"; question: string; answer: string; answerKey: string }>;
   excludeEventAnswers?: Array<{ eventId: string; question: string; answer: string; answerKey: string }>;
   excludeExistingEventIds?: string[];
   includePersonIds?: string[];
@@ -226,6 +226,18 @@ function indexedRegisteredGuestPredicateSql() {
     guest.status IN (${Prisma.join(GUEST_REGISTERED_STATUSES)})
     OR (guest.status = 'declined' AND guest.registered_at IS NOT NULL)
   )`;
+}
+
+// Keep counts, audience pages, sends, and answer rules on the same cohort predicate.
+export function indexedAudienceCohortPredicateSql(cohort: "attended" | "not_attended" | "registered" | "invited") {
+  if (cohort === "attended") return Prisma.sql`(guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')`;
+  if (cohort === "not_attended") return Prisma.sql`(
+    ${indexedRegisteredGuestPredicateSql()}
+    AND guest.checked_in_at IS NULL
+    AND guest.status <> 'checked_in'
+  )`;
+  if (cohort === "invited") return indexedInvitationEvidencePredicateSql();
+  return indexedRegisteredGuestPredicateSql();
 }
 
 function indexedGuestPhoneNumberSql() {
@@ -1043,7 +1055,7 @@ export async function listIndexedPeopleByTag(tag: string, { tagId = "", limit = 
 
 export async function listIndexedPeopleByEventCohort(
   eventId: string,
-  cohort: "attended" | "registered" | "invited",
+  cohort: "attended" | "not_attended" | "registered" | "invited",
   { limit = 5000, idsOnly = false } = {},
 ) {
   const normalizedEventId = eventId.trim().slice(0, 200);
@@ -1054,11 +1066,7 @@ export async function listIndexedPeopleByEventCohort(
     FROM luma_event_guests AS guest
     JOIN luma_people AS person ON person.person_id = guest.person_id
     WHERE guest.event_id = ${normalizedEventId}
-      AND ${cohort === "attended"
-        ? Prisma.sql`(guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')`
-        : cohort === "invited"
-          ? Prisma.sql`(guest.invited_at IS NOT NULL OR guest.status = 'invited')`
-          : indexedRegisteredGuestPredicateSql()}
+      AND ${indexedAudienceCohortPredicateSql(cohort)}
     ORDER BY person.name ASC, person.person_id
     LIMIT ${resultLimit}
   `);
@@ -1081,8 +1089,8 @@ function normalizedAudienceCohorts(values: unknown) {
   return values.flatMap((value) => {
     const eventId = String(value?.eventId || "").trim();
     const cohort = value?.cohort;
-    return eventId && ["attended", "registered", "invited"].includes(cohort)
-      ? [{ eventId, cohort: cohort as "attended" | "registered" | "invited" }]
+    return eventId && ["attended", "not_attended", "registered", "invited"].includes(cohort)
+      ? [{ eventId, cohort: cohort as "attended" | "not_attended" | "registered" | "invited" }]
       : [];
   }).slice(0, 500);
 }
@@ -1095,9 +1103,9 @@ function normalizedAudienceEventAnswers(values: unknown, { requireCohort = false
     const answer = String(value?.answer || "").trim().slice(0, 500);
     const answerKey = String(value?.answerKey || "").trim().slice(0, 500);
     const cohort = value?.cohort;
-    const validCohort = ["attended", "registered", "invited"].includes(cohort);
+    const validCohort = ["attended", "not_attended", "registered", "invited"].includes(cohort);
     return eventId && question && answer && answerKey && (!requireCohort || validCohort)
-      ? [{ eventId, ...(validCohort ? { cohort: cohort as "attended" | "registered" | "invited" } : {}), question, answer, answerKey }]
+      ? [{ eventId, ...(validCohort ? { cohort: cohort as "attended" | "not_attended" | "registered" | "invited" } : {}), question, answer, answerKey }]
       : [];
   });
   const unique = new Map(normalized.map((value) => [
@@ -1302,25 +1310,21 @@ function indexedRegistrationAnswerChoicePredicateSql(item: Prisma.Sql, answer: s
   )`;
 }
 
-function audienceEventCohortsWhereSql(selections: Array<{ eventId: string; cohort: "attended" | "registered" | "invited" }>) {
+function audienceEventCohortsWhereSql(selections: Array<{ eventId: string; cohort: "attended" | "not_attended" | "registered" | "invited" }>) {
   if (!selections.length) return Prisma.sql`FALSE`;
   return Prisma.sql`(${Prisma.join(selections.map(({ eventId, cohort }) => Prisma.sql`
-    (guest.event_id = ${eventId} AND ${cohort === "attended"
-      ? Prisma.sql`(guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')`
-      : cohort === "invited"
-        ? Prisma.sql`(guest.invited_at IS NOT NULL OR guest.status = 'invited')`
-        : indexedRegisteredGuestPredicateSql()})
+    (guest.event_id = ${eventId} AND ${indexedAudienceCohortPredicateSql(cohort)})
   `), " OR ")})`;
 }
 
 function audienceEventAnswersWhereSql(
-  selections: Array<{ eventId: string; cohort?: "attended" | "registered" | "invited"; question: string; answer: string; answerKey: string }>,
+  selections: Array<{ eventId: string; cohort?: "attended" | "not_attended" | "registered" | "invited"; question: string; answer: string; answerKey: string }>,
   { questionMode = "all" }: { questionMode?: "all" | "any" } = {},
 ) {
   if (!selections.length) return Prisma.sql`FALSE`;
   const eventGroups = new Map<string, {
     eventId: string;
-    cohort?: "attended" | "registered" | "invited";
+    cohort?: "attended" | "not_attended" | "registered" | "invited";
     questions: Map<string, { question: string; answers: Array<{ answer: string; answerKey: string }> }>;
   }>();
   selections.forEach(({ eventId, cohort, question, answer, answerKey }) => {
@@ -1334,11 +1338,7 @@ function audienceEventAnswersWhereSql(
   });
   return Prisma.sql`(${Prisma.join([...eventGroups.values()].map(({ eventId, cohort, questions }) => Prisma.sql`
     (guest.event_id = ${eventId}
-      AND ${cohort === "attended"
-        ? Prisma.sql`(guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')`
-        : cohort === "invited"
-          ? Prisma.sql`(guest.invited_at IS NOT NULL OR guest.status = 'invited')`
-          : cohort === "registered" ? indexedRegisteredGuestPredicateSql() : Prisma.sql`TRUE`}
+      AND ${cohort ? indexedAudienceCohortPredicateSql(cohort) : Prisma.sql`TRUE`}
       AND (${Prisma.join([...questions.values()].map(({ question, answers }) => Prisma.sql`
         EXISTS (
           SELECT 1
@@ -1739,6 +1739,7 @@ export async function listIndexedEventCohortCounts() {
     SELECT
       guest.event_id AS "eventId",
       COUNT(*) FILTER (WHERE guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')::integer AS attended,
+      COUNT(*) FILTER (WHERE ${indexedAudienceCohortPredicateSql("not_attended")})::integer AS not_attended,
       COUNT(*) FILTER (WHERE ${indexedRegisteredGuestPredicateSql()})::integer AS registered,
       COUNT(*) FILTER (WHERE guest.invited_at IS NOT NULL OR guest.status = 'invited')::integer AS invited
     FROM luma_event_guests AS guest

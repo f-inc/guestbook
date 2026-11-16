@@ -7994,10 +7994,26 @@ function InviteTab({
                   const manuallySelected = directorySelectedPeople.includes(person.id);
                   const directoryLocked = stage === "message" || stage === "confirm";
                   const directoryActionLabel = stage === "subtract" ? "Subtract" : "Add";
+                  const openRecipient = () => { onMergePeople([person]); onOpenPerson(person.id); };
                   return (
-                  <tr className={rowAlreadyInTargetEvent ? "invite-directory-row-ineligible" : ""} key={person.id}>
-                    <td><PersonButton person={person} onAvatarClick={onAvatarClick} onClick={() => { onMergePeople([person]); onOpenPerson(person.id); }} /></td>
-                    <td className="tag-cell" onClick={(event) => event.stopPropagation()}>
+                  <tr
+                    className={`invite-recipient-row ${rowAlreadyInTargetEvent ? "invite-directory-row-ineligible" : ""}`}
+                    key={person.id}
+                    tabIndex={0}
+                    aria-label={`View ${person.name}'s profile`}
+                    onClick={(event) => {
+                      if (event.target instanceof Element && event.target.closest("button, a, input, textarea, select, [role='button'], [role='menu'], [role='dialog']")) return;
+                      if (hasSelectedTextWithin(event.currentTarget)) return;
+                      openRecipient();
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.target !== event.currentTarget || !["Enter", " "].includes(event.key)) return;
+                      event.preventDefault();
+                      openRecipient();
+                    }}
+                  >
+                    <td><PersonButton person={person} onAvatarClick={onAvatarClick} onClick={openRecipient} /></td>
+                    <td className="tag-cell">
                       <PersonTags
                         person={person}
                         definitions={state.tagDefinitions}
@@ -8292,10 +8308,27 @@ function EventAudiencePicker({ events, selections, activeLoading, mode, cohortCo
         <label className="invite-event-search"><Search size={15} aria-hidden="true" /><input type="search" value={query} placeholder="Search historical events" onChange={(event) => setQuery(event.target.value)} />{query ? <button type="button" aria-label="Clear event search" onClick={() => setQuery("")}><X size={14} /></button> : null}</label>
         <div className="invite-event-filter-row">
           <div className="invite-event-cohort-tabs" aria-label="Event group type">
-            <button className={cohort === "attended" ? "active" : ""} type="button" onClick={() => setCohort("attended")}>Attended</button>
-            <button className={cohort === "not_attended" ? "active" : ""} type="button" onClick={() => setCohort("not_attended")}>Didn’t attend</button>
-            <button className={cohort === "registered" ? "active" : ""} type="button" onClick={() => setCohort("registered")}>Registered</button>
-            <button className={cohort === "invited" ? "active" : ""} type="button" onClick={() => setCohort("invited")}>Invited</button>
+            {[
+              { value: "attended", label: "Attended" },
+              { value: "not_attended", label: "Didn’t attend" },
+              { value: "registered", label: "Registered" },
+              { value: "invited", label: "Invited" },
+            ].map(({ value, label }) => {
+              const selectedCount = selectedEntries.filter(([, selection]) => selection.cohort === value).length;
+              return (
+                <button
+                  className={cohort === value ? "active" : ""}
+                  type="button"
+                  key={value}
+                  aria-pressed={cohort === value}
+                  aria-label={`${label}${selectedCount ? `, ${selectedCount} selected event${selectedCount === 1 ? "" : "s"}` : ""}`}
+                  onClick={() => setCohort(value)}
+                >
+                  {label}
+                  {selectedCount ? <span className="invite-event-cohort-count" aria-hidden="true">{selectedCount}</span> : null}
+                </button>
+              );
+            })}
           </div>
           <small>{countsStatus === "loading" ? "Loading audience counts…" : countsStatus === "refreshing" ? "Refreshing audience counts…" : countsError || "Showing 15 at a time"}</small>
         </div>

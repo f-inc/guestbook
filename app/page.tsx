@@ -4104,6 +4104,7 @@ export default function Home() {
           <kbd aria-label="Command K"><span aria-hidden="true">⌘</span><span>K</span></kbd>
         </button>
         <div className="topbar-actions">
+          <a className="button" href="/merge">Merge station</a>
           <LumaConnectionStatus request={apiFetch} />
           <WorkspaceSettings onOpenTags={openTagSettings} request={apiFetch} />
           <button className="button primary" type="button" onClick={() => setEventDraft(blankEventDraft())}>

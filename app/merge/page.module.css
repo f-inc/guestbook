@@ -1,0 +1,48 @@
+.station { min-height: 100vh; background: var(--background, #f5f6f8); color: var(--foreground, #17232d); }
+.brand { display:flex; align-items:center; gap:10px; font-size:22px; font-weight:750; text-decoration:none; color:inherit; }
+.main { max-width:1460px; margin:0 auto; padding:36px 28px 70px; }
+.main h1 { font-size:32px; font-weight:750; margin:6px 0 10px; letter-spacing:-.8px; }
+.main h2 { font-size:19px; font-weight:700; margin:0 0 12px; }
+.main h3 { font-size:15px; font-weight:700; margin:20px 0 8px; }
+.intro { max-width:700px; color:#53616c; line-height:1.6; }
+.toolbar { display:flex; flex-wrap:wrap; align-items:end; gap:16px; margin-top:28px; padding:20px; background:white; border:1px solid #dce2e6; border-radius:12px; }
+.filters { display:flex; flex-wrap:wrap; gap:18px; flex:1; align-self:center; }
+.filters label { display:flex; gap:8px; align-items:center; font-size:14px; font-weight:600; }
+.search, .access label { display:grid; gap:6px; font-size:12px; font-weight:600; }
+.search input, .access input { border:1px solid #cbd4db; background:white; border-radius:7px; padding:9px 12px; font-size:14px; }
+.hint, .coverage { color:#64717d; font-size:13px; line-height:1.6; margin:12px 0; }
+.layout { display:grid; grid-template-columns:minmax(0, 1fr) minmax(360px, 1fr); gap:24px; margin-top:20px; align-items:start; }
+.candidates { display:grid; gap:12px; max-height:900px; overflow:auto; padding:2px; }
+.candidate { display:block; text-align:left; width:100%; border:1px solid #dce2e6; border-radius:12px; padding:20px; background:white; cursor:pointer; }
+.candidate:hover { border-color:#899eac; }
+.candidate:focus-visible { outline:3px solid #0f766e; outline-offset:2px; }
+.active { border-color:#0f766e; box-shadow:0 0 0 1px #0f766e; }
+.pair { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+.pair > span, .profile > span { display:grid; gap:5px; overflow-wrap:anywhere; }
+.pair strong { font-size:15px; }
+.pair small, .profile small, .history small { display:block; color:#64717d; font-size:12px; }
+.badges { display:flex; flex-wrap:wrap; gap:6px; margin-top:16px; }
+.badges > span { color:#145e59; background:#eaf5f2; border-radius:5px; padding:4px 8px; font-size:11px; overflow-wrap:anywhere; }
+.review { background:white; border:1px solid #dce2e6; padding:24px; border-radius:12px; }
+.review > p, .recent > p { font-size:13px; color:#64717d; line-height:1.6; }
+.review fieldset { border:1px solid #dce2e6; border-radius:8px; padding:8px 14px; margin:20px 0; }
+.review legend { padding:0 6px; font-size:12px; font-weight:700; }
+.profile { display:flex; gap:10px; padding:12px 0; align-items:start; }
+.profile input { margin-top:5px; }
+.history { max-height:300px; overflow:auto; margin:12px 0 20px; }
+.history > div { padding:12px 0; border-top:1px solid #edf0f2; display:grid; gap:5px; font-size:13px; overflow-wrap:anywhere; }
+.history p { white-space:pre-wrap; }
+.empty { padding:36px 20px; color:#64717d; line-height:1.6; }
+.recent { margin-top:32px; padding:24px; border:1px solid #dce2e6; border-radius:12px; background:white; }
+.recent > div { display:flex; justify-content:space-between; gap:16px; align-items:center; padding:12px 0; border-top:1px solid #edf0f2; font-size:13px; overflow-wrap:anywhere; }
+.notice, .warning, .error { padding:14px 18px; border-radius:8px; font-size:14px; margin:16px 0; }
+.notice { background:#e4f3ec; color:#176144; }
+.warning { background:#fff4d8; color:#785719; }
+.error { background:#ffe9e6; color:#9b3328; }
+.access { display:flex; gap:12px; align-items:end; margin-top:24px; }
+@media(max-width:900px) { .layout { grid-template-columns:1fr; } .main { padding:24px 16px; } .candidates { max-height:450px; } .pair { grid-template-columns:1fr; gap:12px; } }
+.header { grid-template-columns:minmax(0, 1fr) auto; margin:0; padding:16px 28px; background:white; border-bottom:1px solid #dce2e6; }
+.filters input, .profile input { width:16px; height:16px; padding:0; flex:0 0 16px; accent-color:#0f766e; }
+.access label { min-width:0; width:300px; }
+.search input { max-width:100%; }
+@media(max-width:600px) { .header { grid-template-columns:minmax(0, 1fr); padding:16px; gap:14px; } .header nav { justify-content:flex-start; } .access label { flex:1; } }

@@ -1,3 +1,5 @@
+import { aggregateMergedHistory } from "./merge-history";
+import { linkedPersonIds, mergedHistoryJoin } from "./merge-identity";
 import { activePersonSql, emailRemovalEnabled, inactivePeopleAmongCandidatesSql } from "./email-inactivity";
 import { guestIndexIsReady } from "./guest-index-readiness";
 import { Prisma, PrismaClient } from "@prisma/client";
@@ -2800,21 +2802,23 @@ export async function getIndexedLifetimeEventCounts(
   const boundedPersonIds = [...new Set(personIds.filter(Boolean))].slice(0, 100);
   if (!boundedPersonIds.length) return { source: "luma-index", eventId, counts: [] };
   const diagnosticStartedAt = Date.now();
+  const identityJoin = await mergedHistoryJoin(prisma(), boundedPersonIds);
   const rows = await prisma().$queryRaw<Array<{ personId: string; attended: number; registered: number }>>(Prisma.sql`
     SELECT
-      guest.person_id AS "personId",
-      COUNT(*) FILTER (
+      identity.requested_id AS "personId",
+      COUNT(DISTINCT guest.event_id) FILTER (
         WHERE guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in'
       )::integer AS attended,
-      COUNT(*) FILTER (
+      COUNT(DISTINCT guest.event_id) FILTER (
         WHERE guest.status IN ('registered', 'going', 'waitlisted', 'checked_in', 'no_show')
       )::integer AS registered
     FROM luma_event_guests AS guest
+    ${identityJoin}
     JOIN luma_events AS counted_event ON counted_event.event_id = guest.event_id
-    WHERE guest.person_id IN (${Prisma.join(boundedPersonIds)})
+    WHERE TRUE
       AND counted_event.catalog_active = TRUE
       AND LOWER(COALESCE(counted_event.raw->>'status', '')) NOT IN ('cancelled', 'canceled')
-    GROUP BY guest.person_id
+    GROUP BY identity.requested_id
   `);
   diagnosticReporter?.("lifetime_event_counts", Date.now() - diagnosticStartedAt, {
     personCount: boundedPersonIds.length,
@@ -3477,29 +3481,31 @@ async function indexedEventCountsForPeople(
       ? Prisma.sql`AND history_event.date < ${boundary.date}`
       : Prisma.empty;
 
+  const identityJoin = await mergedHistoryJoin(db, personIds);
   return db.$queryRaw<Array<{ personId: string; attended: number; registered: number; history: number }>>(Prisma.sql`
     SELECT
-      guest.person_id AS "personId",
-      COUNT(*) FILTER (
+      identity.requested_id AS "personId",
+      COUNT(DISTINCT guest.event_id) FILTER (
         WHERE (guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')
           AND history_event.catalog_active = TRUE
           AND LOWER(COALESCE(history_event.raw->>'status', '')) NOT IN ('cancelled', 'canceled')
       )::integer AS attended,
-      COUNT(*) FILTER (
+      COUNT(DISTINCT guest.event_id) FILTER (
         WHERE guest.status IN ('registered', 'going', 'waitlisted', 'checked_in', 'no_show')
           AND history_event.catalog_active = TRUE
           AND LOWER(COALESCE(history_event.raw->>'status', '')) NOT IN ('cancelled', 'canceled')
       )::integer AS registered,
-      COUNT(*) FILTER (
+      COUNT(DISTINCT guest.event_id) FILTER (
         WHERE guest.event_id <> ${eventId}
           AND history_event.catalog_active = TRUE
           AND LOWER(COALESCE(history_event.raw->>'status', '')) NOT IN ('cancelled', 'canceled')
         ${historyBoundary}
       )::integer AS history
     FROM luma_event_guests AS guest
+    ${identityJoin}
     LEFT JOIN luma_events AS history_event ON history_event.event_id = guest.event_id
-    WHERE guest.person_id IN (${Prisma.join(personIds)})
-    GROUP BY guest.person_id
+    WHERE TRUE
+    GROUP BY identity.requested_id
   `);
 }
 
@@ -3918,8 +3924,9 @@ function notFound(message: string) {
 }
 
 export async function listIndexedPersonComments(personId: string, { limit = 200 }: { limit?: number } = {}) {
+  const memberIds = await linkedPersonIds(prisma(), [personId]);
   const comments = await prisma().guestComment.findMany({
-    where: { personId },
+    where: { personId: { in: memberIds } },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     take: Math.max(1, Math.min(500, Math.trunc(limit) || 200)),
     select: {
@@ -3973,7 +3980,7 @@ export async function updateIndexedPersonComment({
 }) {
   return prisma().$transaction(async (transaction) => {
     const existing = await transaction.guestComment.findFirst({
-      where: { id: commentId, personId },
+      where: { id: commentId, personId: { in: await linkedPersonIds(transaction, [personId]) } },
       select: { id: true },
     });
     if (!existing) throw notFound("Comment not found.");
@@ -4002,7 +4009,7 @@ export async function deleteIndexedPersonComment({
 }) {
   return prisma().$transaction(async (transaction) => {
     const removed = await transaction.guestComment.deleteMany({
-      where: { id: commentId, personId },
+      where: { id: commentId, personId: { in: await linkedPersonIds(transaction, [personId]) } },
     });
     if (!removed.count) throw notFound("Comment not found.");
     return indexedPersonCommentSummary(transaction, personId);
@@ -4013,13 +4020,14 @@ async function indexedPersonCommentSummary(
   transaction: Prisma.TransactionClient,
   personId: string,
 ) {
+  const memberIds = await linkedPersonIds(transaction, [personId]);
   const [latestComment, commentCount] = await Promise.all([
     transaction.guestComment.findFirst({
-      where: { personId },
+      where: { personId: { in: memberIds } },
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       select: { body: true, createdAt: true },
     }),
-    transaction.guestComment.count({ where: { personId } }),
+    transaction.guestComment.count({ where: { personId: { in: memberIds } } }),
   ]);
   return { latestComment, commentCount };
 }
@@ -4667,6 +4675,11 @@ export async function getIndexedTrace({ tracePersonId, traceEmail, limit = 500 }
   if (targetId) guestMatches.push({ lumaUserIdLower: targetId });
   if (targetEmail) guestMatches.push({ emailLower: targetEmail });
 
+  const identityRows = await prisma().lumaPerson.findMany({
+    where: { OR: guestMatches }, select: { personId: true }, take: 100,
+  });
+  const memberIds = await linkedPersonIds(prisma(), [...new Set([...identityRows.map(p => p.personId), ...(rawPersonId ? [rawPersonId] : [])])]);
+  if (memberIds.length) guestMatches.push({ personId: { in: memberIds } });
   const rows = await prisma().lumaEventGuest.findMany({
     where: { OR: guestMatches },
     select: {
@@ -4686,23 +4699,26 @@ export async function getIndexedTrace({ tracePersonId, traceEmail, limit = 500 }
         },
       },
     },
-    take: limit,
+    take: limit + 1,
     orderBy: [{ checkedInAt: "desc" }, { registeredAt: "desc" }, { createdAt: "desc" }, { lastSeenAt: "desc" }],
   });
 
-  const records = rows.map(indexedGuestToTraceRecord).sort((a, b) => new Date(b.eventStartsAt || b.eventDate || b.sortAt).getTime() - new Date(a.eventStartsAt || a.eventDate || a.sortAt).getTime());
+  const records = aggregateMergedHistory<ReturnType<typeof indexedGuestToTraceRecord>>(rows.slice(0, limit).map(indexedGuestToTraceRecord)).sort((a, b) => new Date(b.eventStartsAt || b.eventDate || b.sortAt).getTime() - new Date(a.eventStartsAt || a.eventDate || a.sortAt).getTime());
 
+  const primary = memberIds.length > 1 ? await prisma().lumaPerson.findUnique({ where: { personId: memberIds[0] }, select: INDEXED_TRACE_PERSON_SELECT }) : null;
   return {
+    linkedPersonIds: memberIds,
+    truncated: rows.length > limit,
     source: "luma-index",
-    person: rows[0] ? indexedPersonToApiPerson(rows[0].person, rows[0]) : null,
+    person: primary ? indexedPersonToApiPerson(primary) : rows[0] ? indexedPersonToApiPerson(rows[0].person, rows[0]) : null,
     records,
     loadedAt: new Date().toISOString(),
     cached: false,
     indexed: true,
     scanned: {
       eventCount: records.length,
-      guestCount: records.length,
-      truncatedEvents: false,
+      guestCount: Math.min(rows.length, limit),
+      truncatedEvents: rows.length > limit,
       truncatedGuestEventCount: 0,
     },
     limits: {

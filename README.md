@@ -438,3 +438,47 @@ excludes them from this event audience. The same rule applies to subtraction and
 registration-answer narrowing. Event tiles show individual event counts; the
 recipient list shows the combined audience. Counts reflect
 recorded check-ins; missing check-in data does not prove someone was absent.
+
+### Merge station
+
+Open **Merge station** from the top bar or Guests navigation (`/merge`). The three
+independent filters suggest pairs with first and last names found across profile
+names, email local parts, and registration answer values; an identical personal
+LinkedIn or Twitter/X profile whose handle includes the first name on both
+records; or an identical normalized phone number. Names ignore case, accents,
+and order. Email-only names need separators to establish name parts; a known
+full name also matches concatenated email local parts in either order. Questions,
+email domains, company social pages, and short phone fragments are not evidence.
+These are review suggestions, never automatic merges.
+
+Select a pair to review the linked accounts, original emails, notes, tags, and
+combined event history. Choose a primary profile and confirm. Identity links
+preserve Luma account IDs and every original registration: syncs do not overwrite
+or recreate the merge. Activity history and lifetime event counts expand linked
+accounts and count each event once; guest notes are readable from either account.
+The integration person-history endpoint also expands links within the API key's
+existing event and email permissions. Event guest rows and invitation destinations
+remain the original registrations and addresses. This does not deduplicate every
+audience filter or automatically choose an email for sending invitations.
+
+Recent merges can be undone, restoring their previous identity links. If a group
+has been merged again, undo newer merges first. A stale preview is rejected rather
+than silently adding accounts the operator has not reviewed. Original notes,
+tags, and registration edits remain attached to their source profiles on undo.
+
+Candidate scans are explicitly bounded to the first 10,000 indexed profiles by ID,
+50 recent registrations per profile, and 1,000 suggested pairs. The station shows
+coverage and truncation notices. Preview loads up to 1,000 registrations and 100
+notes per linked account; linking itself includes all history. It does not call
+Luma or start full-calendar guest scans.
+
+**Database setup is a separate authorized operation.** Review
+`prisma/manual-migrations/20261115_add_person_merges.sql` and verify the target
+before applying it. It adds two tables and an index in a transaction without
+rewriting existing profiles or registrations. The application never applies it
+automatically; matching and previews remain available before it is present,
+while saving merges is disabled with a setup notice. Before production application, take or
+verify a database backup/snapshot using the deployment's normal procedure. To
+recover from an individual incorrect merge, use Undo; retain the merge tables
+and operation ledger during any code rollback so links can be restored. Do not
+run a schema push or drop the merge ledger as a rollback shortcut.

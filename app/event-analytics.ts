@@ -1,3 +1,5 @@
+import { isNoShowAudienceGuest } from "./audience-cohort";
+
 type AnalyticsCounts = {
   accepted: number;
   checkedIn: number;
@@ -168,6 +170,7 @@ export function buildRegistrationQuestionAnalytics(rows: RegistrationAnswerRow[]
     multiSelect: boolean;
     personId: string;
     checkedIn: boolean;
+    noShow: boolean;
   };
   const answerGroups = new Map<string, { id: string; label: string; responses: RegistrationResponse[] }>();
   rows.forEach(({ personId, registrationAnswers, checkedInAt, status }) => {
@@ -190,13 +193,14 @@ export function buildRegistrationQuestionAnalytics(rows: RegistrationAnswerRow[]
         multiSelect,
         personId,
         checkedIn: Boolean(checkedInAt) || status === "checked_in",
+        noShow: isNoShowAudienceGuest({ status, checkedInAt }),
       });
     });
   });
 
   return [...answerGroups.values()]
     .map((question) => {
-      const groups = new Map<string, { answerKey: string; count: number; checkedInCount: number; variants: Map<string, number> }>();
+      const groups = new Map<string, { answerKey: string; count: number; checkedInCount: number; noShowCount: number; variants: Map<string, number> }>();
       const multiSelect = question.responses.some((response) => response.multiSelect);
       const legacySelections = inferLegacyMultiSelectSelections(question.responses);
       question.responses.forEach((response, responseIndex) => {
@@ -207,9 +211,10 @@ export function buildRegistrationQuestionAnalytics(rows: RegistrationAnswerRow[]
             : [response.value];
         const uniqueSelections = new Map(selections.map((selection) => [normalizeRegistrationAnswer(selection), selection]));
         uniqueSelections.forEach((selection, answerKey) => {
-          const group = groups.get(answerKey) || { answerKey, count: 0, checkedInCount: 0, variants: new Map<string, number>() };
+          const group = groups.get(answerKey) || { answerKey, count: 0, checkedInCount: 0, noShowCount: 0, variants: new Map<string, number>() };
           group.count += 1;
           if (response.checkedIn) group.checkedInCount += 1;
+          if (response.noShow) group.noShowCount += 1;
           group.variants.set(selection, (group.variants.get(selection) || 0) + 1);
           groups.set(answerKey, group);
         });
@@ -223,6 +228,7 @@ export function buildRegistrationQuestionAnalytics(rows: RegistrationAnswerRow[]
           answerKey: group.answerKey,
           count: group.count,
           checkedInCount: group.checkedInCount,
+          noShowCount: group.noShowCount,
           percent: maxCount ? Math.max(1, Math.round((group.count / maxCount) * 100)) : 0,
           checkedInPercent: maxCount && group.checkedInCount ? Math.max(1, Math.round((group.checkedInCount / maxCount) * 100)) : 0,
           attendanceRate: group.count ? Math.round((group.checkedInCount / group.count) * 100) : 0,

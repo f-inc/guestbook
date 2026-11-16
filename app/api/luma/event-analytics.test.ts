@@ -272,3 +272,14 @@ test("matches Luma's event-wide outcome buckets while keeping the invitation tot
     referralDeclined: 0,
   });
 });
+
+test("answer audiences count accepted no-shows without pending, waitlisted, declined, or checked-in guests", () => {
+  const questions = buildRegistrationQuestionAnalytics([
+    ...["going", "no_show", "registered", "waitlisted", "declined", "checked_in"].map((status) => ({
+      personId: status, status, registrationAnswers: [{ label: "Role", value: "Founder" }],
+    })),
+    { personId: "checked-in-going", status: "going", checkedInAt: "2026-11-01", registrationAnswers: [{ label: "Role", value: "Founder" }] },
+  ]);
+  assert.equal(questions[0].options[0].noShowCount, 2);
+  assert.equal(questions[0].options[0].count, 7);
+});

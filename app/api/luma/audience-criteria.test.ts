@@ -106,13 +106,12 @@ test("preserves didn't-attend audiences for additions, subtractions, and answer 
 });
 
 
-test("didn't-attend SQL requires registration and excludes either kind of check-in evidence", () => {
+test("didn't-attend SQL requires acceptance and excludes either kind of check-in evidence", () => {
   const predicate = indexedAudienceCohortPredicateSql("not_attended");
   assert.match(predicate.text, /guest.checked_in_at IS NULL/);
   assert.match(predicate.text, /guest.status <> 'checked_in'/);
   assert.match(predicate.text, /guest.status IN/);
-  assert.match(predicate.text, /guest.status = 'declined' AND guest.registered_at IS NOT NULL/);
-  assert.deepEqual(predicate.values, ["registered", "waitlisted", "going", "checked_in", "no_show"]);
+  assert.deepEqual(predicate.values, ["going", "no_show"]);
 });
 
 test("multiple didn't-attend events exclude anyone who attended even one selected event", async () => {
@@ -131,8 +130,11 @@ test("multiple didn't-attend events exclude anyone who attended even one selecte
       ["b", "attended-b", "checked_in", "date", null],
       ["a", "attended-a", "going", "date", "timestamp"],
       ["b", "attended-a", "no_show", "date", null],
-      ["a", "only-a", "registered", "date", null],
+      ["a", "only-a", "going", "date", null],
       ["b", "only-invited", "invited", null, null],
+      ["a", "pending", "registered", "date", null],
+      ["a", "waitlisted", "waitlisted", "date", null],
+      ["a", "stale-no-show-checkin", "no_show", "date", "timestamp"],
       ["a", "declined-registration", "declined", "date", null],
       ["a", "declined-invite", "declined", null, null],
       ["a", "attended-unselected", "no_show", "date", null],
@@ -145,9 +147,9 @@ test("multiple didn't-attend events exclude anyone who attended even one selecte
         ORDER BY guest.person_id`).all(...eventIds, ...predicate.values as Array<string | null>)
         .map((row) => row.person_id);
     };
-    assert.deepEqual(match(["a", "b"]), ["attended-unselected", "declined-registration", "missed-both", "only-a"]);
+    assert.deepEqual(match(["a", "b"]), ["attended-unselected", "missed-both", "only-a"]);
     // Removing event B makes its attendees eligible again; adding B removes them.
-    assert.deepEqual(match(["a"]), ["attended-b", "attended-unselected", "declined-registration", "missed-both", "only-a"]);
+    assert.deepEqual(match(["a"]), ["attended-b", "attended-unselected", "missed-both", "only-a"]);
   } finally {
     db.close();
   }

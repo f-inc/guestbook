@@ -1,6 +1,6 @@
 "use client";
 
-import { audienceCohortLabel, audienceAnswerCount } from "./audience-cohort";
+import { audienceCohortLabel, audienceAnswerCount, isNoShowAudienceGuest } from "./audience-cohort";
 
 import { AudienceVerification } from "./email-verification-ui";
 import { LumaConnectionStatus } from "./luma-connection-status";
@@ -8299,7 +8299,7 @@ function EventAudiencePicker({ events, selections, activeLoading, mode, cohortCo
           </div>
           <small>{countsStatus === "loading" ? "Loading audience counts…" : countsStatus === "refreshing" ? "Refreshing audience counts…" : countsError || "Showing 15 at a time"}</small>
         </div>
-        {cohort === "not_attended" ? <p className="text-xs text-muted">Registered for at least one selected event, with no check-in recorded at any event selected as “Didn’t attend”.</p> : null}
+        {cohort === "not_attended" ? <p className="text-xs text-muted">Accepted for at least one selected event, with no check-in recorded at any event selected as “Didn’t attend”. Pending, waitlisted, and declined registrations are excluded.</p> : null}
         <div className="invite-event-gallery" onScroll={loadMoreEvents}>
           {visibleEvents.map((event) => {
             const active = selections?.[event.id]?.cohort === cohort;
@@ -8339,7 +8339,7 @@ function eventCohortCount(event, cohort, indexedCounts: any = null) {
   if (!event.guestsLoaded) return null;
   return event.guests.filter((guest) => {
     if (cohort === "attended") return guest.status === "checked_in" || Boolean(guest.checkedInAt);
-    if (cohort === "not_attended") return isRegisteredGuest(guest) && guest.status !== "checked_in" && !guest.checkedInAt;
+    if (cohort === "not_attended") return isNoShowAudienceGuest(guest);
     if (cohort === "invited") return hasInvitationEvidence(guest);
     return isRegisteredGuest(guest);
   }).length;

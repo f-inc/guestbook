@@ -6713,10 +6713,11 @@ function StatusFilter({
   const includedSet = new Set(includedStatuses);
   const excludedSet = new Set(excludedStatuses);
   const activeCount = includedStatuses.length + excludedStatuses.length;
-  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const normalizeStatusSearch = (value: string) => value.toLocaleLowerCase().replace(/[\s-]+/g, "");
+  const normalizedQuery = normalizeStatusSearch(query);
   const filteredOptions = statusOptions
     .map((option, index) => ({ option, index }))
-    .filter(({ option }) => option.label.toLocaleLowerCase().includes(normalizedQuery))
+    .filter(({ option }) => normalizeStatusSearch(option.label).includes(normalizedQuery))
     .sort((left, right) => {
       const priority = (option) => includedSet.has(option.value) ? 0 : excludedSet.has(option.value) ? 1 : 2;
       return priority(left.option) - priority(right.option) || left.index - right.index;

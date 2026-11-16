@@ -28,7 +28,8 @@ export async function POST(request: Request) {
     const body = await request.json() as Record<string, unknown>;
     if (!Array.isArray(body.reviewedPersonIds) || body.reviewedPersonIds.length > 100) throw mergeError("Review the profiles before merging.");
     const reviewed = body.reviewedPersonIds.map(identifier);
-    const result = await mergePeople(identifier(body.left), identifier(body.right), identifier(body.primary), undefined, reviewed);
+    if (body.operationId !== undefined && (typeof body.operationId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.operationId))) throw mergeError("A valid operation ID is required.");
+    const result = await mergePeople(identifier(body.left), identifier(body.right), identifier(body.primary), undefined, reviewed, body.operationId as string | undefined);
     clearCaches();
     return Response.json(result);
   } catch (error) { return failure(error); }

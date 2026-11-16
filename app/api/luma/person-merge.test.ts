@@ -120,3 +120,38 @@ test("candidate review works before migration, without querying missing merge ta
   assert.equal((result.profiles[0] as any).registrations, undefined);
   assert.equal((result.profiles[0] as any).eventGuests, undefined);
 });
+
+test("queued legacy merges reuse receipts and Undo is safe to retry", async () => {
+  const ctx = database();
+  const operationId = "4a3028bd-4e91-40ee-81a4-e88f5d1f8dc7";
+  const first = await mergePeople("a", "b", "a", ctx.db, ["a", "b"], operationId);
+  const retry = await mergePeople("a", "b", "a", ctx.db, ["a", "b"], operationId);
+  assert.equal(first.id, retry.id); assert.equal(ctx.operations().length, 1);
+  await assert.rejects(mergePeople("a", "b", "b", ctx.db, ["a", "b"], operationId), /different merge/);
+  await undoMerge(operationId, ctx.db); await undoMerge(operationId, ctx.db);
+  const afterUndo = await mergePeople("a", "b", "a", ctx.db, ["a", "b"], operationId);
+  assert.equal(afterUndo.undone, true); assert.deepEqual(ctx.members(), []);
+});
+
+test("recent merge history includes named profiles outside the candidate scan", async () => {
+  const { station } = await import("../people/merge/store");
+  const profile = (personId: string, name: string) => ({ personId, name, email: `${personId}@example.test`, phoneNumber: null, socialLinks: [], tags: [] });
+  let historyLookups = 0;
+  const db: any = {
+    $queryRaw: async (query: any) => {
+      const sql = Array.isArray(query) ? query.join("") : query.sql;
+      if (sql.includes("to_regclass")) return [{ready:true}];
+      if (sql.includes("person_merge_operations")) return [{id:"old",after:[{personId:"retired",canonicalId:"outside"},{personId:"outside",canonicalId:"outside"}],createdAt:new Date(),undoneAt:null}];
+      return [];
+    },
+    lumaPerson: { findMany: async ({where}: any) => {
+      if (where) {historyLookups++;assert.deepEqual(new Set(where.personId.in),new Set(["retired","outside"]));return [profile("retired","Earlier Name"),profile("outside","Main Name")];}
+      return [{...profile("scanned","Other Person"),eventGuests:[],_count:{eventGuests:0}}];
+    } },
+  };
+  const result = await station(db);
+  assert.equal(historyLookups,1);
+  assert.equal(result.profiles.find((person: any)=>person.personId==="retired")?.name,"Earlier Name");
+  assert.equal(result.profiles.find((person: any)=>person.personId==="outside")?.name,"Main Name");
+  assert.equal(result.coverage.scannedPeople,1);
+});

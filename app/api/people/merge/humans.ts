@@ -39,11 +39,23 @@ export async function mergeHumans(
   right: string,
   primary: string,
   reviewed: string[],
+  operationId?: string,
 ) {
   db = db.$source || db;
   return db.$transaction(
     async (tx: any) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(821157031)`;
+      if (operationId) {
+        const existing = await tx.guestbookHumanMerge.findUnique({ where: { id: operationId } });
+        if (existing) {
+          const original = [existing.before.primary.personId, existing.before.secondary].sort();
+          if (JSON.stringify(original) !== JSON.stringify([left, right].sort()) ||
+              existing.before.primary.personId !== primary ||
+              JSON.stringify([...new Set(reviewed)].sort()) !== JSON.stringify(original))
+            throw fail("This operation ID belongs to a different merge.");
+          return { id: operationId, personIds: original, primary, replayed: true, undone: Boolean(existing.undoneAt) };
+        }
+      }
       const ids = await resolveHumanIds(tx, [left, right]);
       if (
         ids.length !== 2 ||
@@ -191,7 +203,7 @@ export async function mergeHumans(
         where: { personId: { in: historical.map((p: any) => p.personId) } },
         select: { personId: true, identityVersion: true },
       });
-      const id = randomUUID();
+      const id = operationId || randomUUID();
       const after = json({
         profilePatch,
         members: historical.map((p: any) => ({
@@ -215,8 +227,8 @@ export async function undoHumanMerge(db: any, id: string) {
       const operation = await tx.guestbookHumanMerge.findUnique({
         where: { id },
       });
-      if (!operation || operation.undoneAt)
-        throw fail("This merge is unavailable or already undone.");
+      if (!operation) throw fail("This merge is unavailable.");
+      if (operation.undoneAt) return { id, undone: true, personIds: [], replayed: true };
       const { before, after } = operation;
       const ids = after.versions.map((p: any) => p.personId);
       const versions = await tx.guestbookPerson.findMany({

@@ -22,7 +22,7 @@ export async function station(db = prisma(), signals: MergeSignal[] = ["name", "
         eventGuests: { orderBy: [{ lastSeenAt: "desc" }, { eventId: "asc" }], take: REGISTRATION_LIMIT + 1,
           select: { email: true, phoneNumber: true, socialLinks: true, registrationAnswers: true } } },
     }),
-    humanIdentityEnabled() ? (db as any).guestbookHumanMerge.findMany({orderBy:{createdAt:"desc"},take:20,select:{id:true,after:true,createdAt:true,undoneAt:true}}).then((rows:any[])=>rows.map(o=>({...o,after:o.after.members}))) : mergeEnabled ? db.$queryRaw<Array<{ id: string; after: Membership[]; createdAt: Date; undoneAt: Date | null }>>`SELECT id, after, created_at AS "createdAt", undone_at AS "undoneAt" FROM person_merge_operations ORDER BY created_at DESC LIMIT 20` : Promise.resolve([]),
+    humanIdentityEnabled() ? (db as any).guestbookHumanMerge.findMany({where:{undoneAt:null},orderBy:{createdAt:"desc"},take:20,select:{id:true,after:true,createdAt:true,undoneAt:true}}).then((rows:any[])=>rows.map(o=>({...o,after:o.after.members}))) : mergeEnabled ? db.$queryRaw<Array<{ id: string; after: Membership[]; createdAt: Date; undoneAt: Date | null }>>`SELECT id, after, created_at AS "createdAt", undone_at AS "undoneAt" FROM person_merge_operations WHERE undone_at IS NULL ORDER BY created_at DESC LIMIT 20` : Promise.resolve([]),
   ]);
   const scannedIds = rows.slice(0, PROFILE_LIMIT).map(r => r.personId);
   const memberships: Membership[] = !humanIdentityEnabled() && mergeEnabled && scannedIds.length ? await db.$queryRaw(Prisma.sql`SELECT person_id AS "personId", canonical_id AS "canonicalId" FROM person_merge_members WHERE person_id IN (${Prisma.join(scannedIds)})`) : [];
@@ -43,8 +43,15 @@ export async function station(db = prisma(), signals: MergeSignal[] = ["name", "
   }
   const matches = findMergeCandidates(profiles, 1000, signals);
   const involved = new Set([...matches.candidates.flatMap(c => [c.left, c.right]), ...operations.flatMap(o => o.after.map(m => m.personId))]);
+  // History includes retired people and people outside this bounded candidate scan.
+  const knownIds = new Set(profiles.map(profile => profile.personId));
+  const historyIds = [...new Set<string>(operations.flatMap((operation: { after: Membership[] }) => operation.after.flatMap(member => [member.personId, member.canonicalId])))].filter(id => !knownIds.has(id)).slice(0, 2000);
+  const historyProfiles = historyIds.length ? await (humanIdentityEnabled() ? ((db as any).$source || db).guestbookPerson : db.lumaPerson).findMany({
+    where: { personId: { in: historyIds } },
+    select: { personId: true, name: true, email: true, phoneNumber: true, socialLinks: true, tags: true },
+  }) : [];
   return { ...matches, mergeEnabled,
-    profiles: profiles.filter(p => involved.has(p.personId)).map(({ registrations, ...profile }) => profile),
+    profiles: [...profiles.filter(p => involved.has(p.personId)).map(({ registrations, ...profile }) => profile), ...historyProfiles],
     operations,
     coverage: { scannedPeople: profiles.length, peopleTruncated: rows.length > PROFILE_LIMIT,
       registrationsPerPerson: REGISTRATION_LIMIT, registrationsTruncated: rows.some(r => r._count.eventGuests > REGISTRATION_LIMIT),
@@ -82,15 +89,27 @@ export async function preview(ids: string[], db = prisma()) {
     commentsTruncated: people.some(p => p.comments.length > 100) };
 }
 function snapshot(rows: Membership[]) { return JSON.stringify([...rows].sort((a, b) => a.personId.localeCompare(b.personId))); }
-export async function mergePeople(left: string, right: string, primary: string, db = prisma(), reviewedIds: string[] = [left, right]) {
+export async function mergePeople(left: string, right: string, primary: string, db = prisma(), reviewedIds: string[] = [left, right], operationId?: string) {
   if (humanIdentityEnabled()) {
-    const result=await mergeHumans(db,left,right,primary,reviewedIds);
+    const result=await mergeHumans(db,left,right,primary,reviewedIds,operationId);
     return finalizeHumanChange(result);
   }
   await requireMergeTables(db);
   return db.$transaction(async (tx: Prisma.TransactionClient) => {
     // Serialize all group edits so overlapping requests cannot split identities.
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(821157031)`;
+    if (operationId) {
+      const existing = await tx.$queryRaw<Array<{ after: Membership[]; undoneAt: Date | null }>>`SELECT after, undone_at AS "undoneAt" FROM person_merge_operations WHERE id = ${operationId}`;
+      if (existing.length) {
+        const operation = existing[0];
+        const ids = operation.after.map(member => member.personId);
+        if (!ids.includes(left) || !ids.includes(right) || left === right ||
+            operation.after.some(member => member.canonicalId !== primary) ||
+            JSON.stringify([...ids].sort()) !== JSON.stringify([...new Set(reviewedIds)].sort()))
+          throw mergeError("This operation ID belongs to a different merge.", 409);
+        return { id: operationId, personIds: ids, primary, replayed: true, undone: Boolean(operation.undoneAt) };
+      }
+    }
     const ids = await linkedPersonIds(tx, [left, right]);
     if (!ids.includes(primary) || ids.length > 100 || left === right) throw mergeError("Choose two distinct profiles and a primary profile from this group (maximum 100).");
     if (JSON.stringify([...ids].sort()) !== JSON.stringify([...new Set(reviewedIds)].sort())) throw mergeError("These identity groups changed. Refresh the preview before merging.", 409);
@@ -100,7 +119,7 @@ export async function mergePeople(left: string, right: string, primary: string, 
     if (before.some(m => m.personId === left) && before.some(m => m.personId === right && m.canonicalId === before.find(n => n.personId === left)?.canonicalId)) throw mergeError("These profiles are already merged.", 409);
     const after = ids.map(personId => ({ personId, canonicalId: primary }));
     await tx.$executeRaw(Prisma.sql`INSERT INTO person_merge_members (person_id, canonical_id) VALUES ${Prisma.join(after.map(m => Prisma.sql`(${m.personId}, ${m.canonicalId})`))} ON CONFLICT (person_id) DO UPDATE SET canonical_id = EXCLUDED.canonical_id`);
-    const id = randomUUID();
+    const id = operationId || randomUUID();
     await tx.$executeRaw`INSERT INTO person_merge_operations (id, before, after) VALUES (${id}, ${JSON.stringify(before)}::jsonb, ${JSON.stringify(after)}::jsonb)`;
     return { id, personIds: ids, primary };
   });
@@ -115,7 +134,8 @@ export async function undoMerge(id: string, db = prisma()) {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(821157031)`;
     const operations = await tx.$queryRaw<Array<{ before: Membership[]; after: Membership[]; undoneAt: Date | null }>>`SELECT before, after, undone_at AS "undoneAt" FROM person_merge_operations WHERE id = ${id}`;
     const operation = operations[0];
-    if (!operation || operation.undoneAt) throw mergeError("This merge is unavailable or already undone.", 409);
+    if (!operation) throw mergeError("This merge is unavailable.", 409);
+    if (operation.undoneAt) return { id, undone: true };
     const ids = operation.after.map(m => m.personId);
     const current = await tx.$queryRaw<Membership[]>(Prisma.sql`SELECT person_id AS "personId", canonical_id AS "canonicalId" FROM person_merge_members WHERE canonical_id IN (${Prisma.join(ids)}) OR person_id IN (${Prisma.join(ids)})`);
     if (snapshot(current) !== snapshot(operation.after)) throw mergeError("This group changed after that merge. Undo its newer merges first.", 409);
@@ -126,7 +146,8 @@ export async function undoMerge(id: string, db = prisma()) {
   });
 }
 
-async function finalizeHumanChange<T extends {personIds:string[]}>(result:T){
+async function finalizeHumanChange<T extends {personIds:string[];replayed?:boolean}>(result:T){
+  if (result.replayed) return {...result,classificationPending:false};
   invalidateIndexedAudienceCaches();
   try { await runAutomaticTagClassifier({personIds:result.personIds}); return {...result,classificationPending:false}; }
   catch { return {...result,classificationPending:true}; }

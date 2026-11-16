@@ -1,5 +1,7 @@
 -- Additive migration only. Apply explicitly after reviewing target and backup.
 BEGIN;
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
 CREATE TABLE person_merge_members (
   person_id TEXT PRIMARY KEY REFERENCES luma_people(person_id) ON DELETE RESTRICT ON UPDATE CASCADE,
   canonical_id TEXT NOT NULL REFERENCES luma_people(person_id) ON DELETE RESTRICT ON UPDATE CASCADE

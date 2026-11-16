@@ -8299,7 +8299,7 @@ function EventAudiencePicker({ events, selections, activeLoading, mode, cohortCo
           </div>
           <small>{countsStatus === "loading" ? "Loading audience counts…" : countsStatus === "refreshing" ? "Refreshing audience counts…" : countsError || "Showing 15 at a time"}</small>
         </div>
-        {cohort === "not_attended" ? <p className="text-xs text-muted">Registered for this past event with no check-in recorded.</p> : null}
+        {cohort === "not_attended" ? <p className="text-xs text-muted">Registered for at least one selected event, with no check-in recorded at any event selected as “Didn’t attend”.</p> : null}
         <div className="invite-event-gallery" onScroll={loadMoreEvents}>
           {visibleEvents.map((event) => {
             const active = selections?.[event.id]?.cohort === cohort;

@@ -433,5 +433,9 @@ to add or subtract registered guests with no recorded check-in for a past event.
 This includes pending, waitlisted, approved, and no-show registrations, plus
 previously registered guests who declined. People who were only invited are not
 included. A check-in timestamp or checked-in status always excludes a guest.
-Registration-answer filters can narrow this audience further. Counts reflect
+When multiple events are selected as **Didn’t attend**, a guest must have registered
+for at least one and have no check-in at any of those events. Attending even one
+excludes them from this event audience. The same rule applies to subtraction and
+registration-answer narrowing. Event tiles show individual event counts; the
+recipient list shows the combined audience. Counts reflect
 recorded check-ins; missing check-in data does not prove someone was absent.

@@ -229,12 +229,18 @@ function indexedRegisteredGuestPredicateSql() {
 }
 
 // Keep counts, audience pages, sends, and answer rules on the same cohort predicate.
-export function indexedAudienceCohortPredicateSql(cohort: "attended" | "not_attended" | "registered" | "invited") {
+export function indexedAudienceCohortPredicateSql(cohort: "attended" | "not_attended" | "registered" | "invited", notAttendedEventIds: string[] = []) {
   if (cohort === "attended") return Prisma.sql`(guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')`;
   if (cohort === "not_attended") return Prisma.sql`(
     ${indexedRegisteredGuestPredicateSql()}
     AND guest.checked_in_at IS NULL
     AND guest.status <> 'checked_in'
+    AND ${notAttendedEventIds.length ? Prisma.sql`NOT EXISTS (
+      SELECT 1 FROM luma_event_guests AS attended_guest
+      WHERE attended_guest.person_id = guest.person_id
+        AND attended_guest.event_id IN (${Prisma.join(notAttendedEventIds)})
+        AND (attended_guest.checked_in_at IS NOT NULL OR attended_guest.status = 'checked_in')
+    )` : Prisma.sql`TRUE`}
   )`;
   if (cohort === "invited") return indexedInvitationEvidencePredicateSql();
   return indexedRegisteredGuestPredicateSql();
@@ -1056,7 +1062,7 @@ export async function listIndexedPeopleByTag(tag: string, { tagId = "", limit = 
 export async function listIndexedPeopleByEventCohort(
   eventId: string,
   cohort: "attended" | "not_attended" | "registered" | "invited",
-  { limit = 5000, idsOnly = false } = {},
+  { limit = 5000, idsOnly = false, notAttendedEventIds = [] }: { limit?: number; idsOnly?: boolean; notAttendedEventIds?: string[] } = {},
 ) {
   const normalizedEventId = eventId.trim().slice(0, 200);
   if (!normalizedEventId) return { people: [], total: 0, truncated: false };
@@ -1066,7 +1072,7 @@ export async function listIndexedPeopleByEventCohort(
     FROM luma_event_guests AS guest
     JOIN luma_people AS person ON person.person_id = guest.person_id
     WHERE guest.event_id = ${normalizedEventId}
-      AND ${indexedAudienceCohortPredicateSql(cohort)}
+      AND ${indexedAudienceCohortPredicateSql(cohort, notAttendedEventIds)}
     ORDER BY person.name ASC, person.person_id
     LIMIT ${resultLimit}
   `);
@@ -1173,6 +1179,10 @@ function audienceSuperTagPeopleSql(superTagIds: string[]) {
   `;
 }
 
+export function notAttendedAudienceEventIds(selections: Array<{ eventId: string; cohort?: string }> = []) {
+  return [...new Set(selections.filter(({ cohort }) => cohort === "not_attended").map(({ eventId }) => eventId))];
+}
+
 export async function resolveIndexedAudiencePersonIds(
   rawCriteria: IndexedAudienceCriteria,
   { useCache = true } = {},
@@ -1181,6 +1191,8 @@ export async function resolveIndexedAudiencePersonIds(
   const cacheKey = JSON.stringify(criteria);
   const cached = audienceResolutionCache.get(cacheKey);
   if (!emailRemovalEnabled() && useCache && cached && cached.expiresAt > Date.now()) return cached.personIds;
+  const notAttendedEventIds = notAttendedAudienceEventIds([...(criteria.includeEventCohorts || []), ...(criteria.includeEventAnswers || [])]);
+  const excludedNotAttendedEventIds = notAttendedAudienceEventIds(criteria.excludeEventCohorts);
   const include = new Set(criteria.includePersonIds || []);
   const exclude = new Set(criteria.excludePersonIds || []);
   const collect = async (target: Set<string>, resultPromise: Promise<any>) => {
@@ -1201,16 +1213,16 @@ export async function resolveIndexedAudiencePersonIds(
     ...((criteria.includeSuperTagIds || []).length ? [collect(include, listIndexedPeopleBySuperTags(criteria.includeSuperTagIds || []))] : []),
     ...((criteria.excludeSuperTagIds || []).length ? [collect(exclude, listIndexedPeopleBySuperTags(criteria.excludeSuperTagIds || []))] : []),
     ...(criteria.includeEventCohorts || []).map(({ eventId, cohort }) =>
-      collect(include, listIndexedPeopleByEventCohort(eventId, cohort, { idsOnly: true, limit: AUDIENCE_RESOLUTION_LIMIT }))),
+      collect(include, listIndexedPeopleByEventCohort(eventId, cohort, { idsOnly: true, limit: AUDIENCE_RESOLUTION_LIMIT, notAttendedEventIds }))),
     ...(criteria.excludeEventCohorts || []).map(({ eventId, cohort }) =>
-      collect(exclude, listIndexedPeopleByEventCohort(eventId, cohort, { idsOnly: true, limit: AUDIENCE_RESOLUTION_LIMIT }))),
+      collect(exclude, listIndexedPeopleByEventCohort(eventId, cohort, { idsOnly: true, limit: AUDIENCE_RESOLUTION_LIMIT, notAttendedEventIds: excludedNotAttendedEventIds }))),
   ]);
   const includeEventAnswers = criteria.includeEventAnswers || [];
   if (includeEventAnswers.length) {
     const matches = await prisma().$queryRaw<Array<{ personId: string }>>(Prisma.sql`
       SELECT DISTINCT guest.person_id AS "personId"
       FROM luma_event_guests AS guest
-      WHERE ${audienceEventAnswersWhereSql(includeEventAnswers, { questionMode: audienceAnswerQuestionMode("include") })}
+      WHERE ${audienceEventAnswersWhereSql(includeEventAnswers, { questionMode: audienceAnswerQuestionMode("include"), notAttendedEventIds })}
       LIMIT ${AUDIENCE_RESOLUTION_LIMIT + 1}
     `);
     if (matches.length > AUDIENCE_RESOLUTION_LIMIT) {
@@ -1310,16 +1322,16 @@ function indexedRegistrationAnswerChoicePredicateSql(item: Prisma.Sql, answer: s
   )`;
 }
 
-function audienceEventCohortsWhereSql(selections: Array<{ eventId: string; cohort: "attended" | "not_attended" | "registered" | "invited" }>) {
+function audienceEventCohortsWhereSql(selections: Array<{ eventId: string; cohort: "attended" | "not_attended" | "registered" | "invited" }>, notAttendedEventIds = notAttendedAudienceEventIds(selections)) {
   if (!selections.length) return Prisma.sql`FALSE`;
   return Prisma.sql`(${Prisma.join(selections.map(({ eventId, cohort }) => Prisma.sql`
-    (guest.event_id = ${eventId} AND ${indexedAudienceCohortPredicateSql(cohort)})
+    (guest.event_id = ${eventId} AND ${indexedAudienceCohortPredicateSql(cohort, notAttendedEventIds)})
   `), " OR ")})`;
 }
 
 function audienceEventAnswersWhereSql(
   selections: Array<{ eventId: string; cohort?: "attended" | "not_attended" | "registered" | "invited"; question: string; answer: string; answerKey: string }>,
-  { questionMode = "all" }: { questionMode?: "all" | "any" } = {},
+  { questionMode = "all", notAttendedEventIds = notAttendedAudienceEventIds(selections) }: { questionMode?: "all" | "any"; notAttendedEventIds?: string[] } = {},
 ) {
   if (!selections.length) return Prisma.sql`FALSE`;
   const eventGroups = new Map<string, {
@@ -1338,7 +1350,7 @@ function audienceEventAnswersWhereSql(
   });
   return Prisma.sql`(${Prisma.join([...eventGroups.values()].map(({ eventId, cohort, questions }) => Prisma.sql`
     (guest.event_id = ${eventId}
-      AND ${cohort ? indexedAudienceCohortPredicateSql(cohort) : Prisma.sql`TRUE`}
+      AND ${cohort ? indexedAudienceCohortPredicateSql(cohort, notAttendedEventIds) : Prisma.sql`TRUE`}
       AND (${Prisma.join([...questions.values()].map(({ question, answers }) => Prisma.sql`
         EXISTS (
           SELECT 1
@@ -1376,6 +1388,7 @@ export async function listIndexedAudiencePage(
   const excludeEventCohorts = criteria.excludeEventCohorts || [];
   const includeEventAnswers = criteria.includeEventAnswers || [];
   const excludeEventAnswers = criteria.excludeEventAnswers || [];
+  const notAttendedEventIds = notAttendedAudienceEventIds([...includeEventCohorts, ...includeEventAnswers]);
   const includePersonIds = criteria.includePersonIds || [];
   const excludePersonIds = criteria.excludePersonIds || [];
   const excludeExistingEventIds = criteria.excludeExistingEventIds || [];
@@ -1425,13 +1438,13 @@ export async function listIndexedAudiencePage(
 
       SELECT guest.person_id
       FROM luma_event_guests AS guest
-      WHERE ${audienceEventCohortsWhereSql(includeEventCohorts)}
+      WHERE ${audienceEventCohortsWhereSql(includeEventCohorts, notAttendedEventIds)}
 
       UNION
 
       SELECT guest.person_id
       FROM luma_event_guests AS guest
-      WHERE ${audienceEventAnswersWhereSql(includeEventAnswers, { questionMode: audienceAnswerQuestionMode("include") })}
+      WHERE ${audienceEventAnswersWhereSql(includeEventAnswers, { questionMode: audienceAnswerQuestionMode("include"), notAttendedEventIds })}
 
       UNION
 
@@ -1594,6 +1607,7 @@ export async function countIndexedAudience(criteria: IndexedAudienceCriteria) {
   const excludeEventCohorts = normalized.excludeEventCohorts || [];
   const includeEventAnswers = normalized.includeEventAnswers || [];
   const excludeEventAnswers = normalized.excludeEventAnswers || [];
+  const notAttendedEventIds = notAttendedAudienceEventIds([...includeEventCohorts, ...includeEventAnswers]);
   const includePersonIds = normalized.includePersonIds || [];
   const excludePersonIds = normalized.excludePersonIds || [];
   const excludeExistingEventIds = normalized.excludeExistingEventIds || [];
@@ -1628,13 +1642,13 @@ export async function countIndexedAudience(criteria: IndexedAudienceCriteria) {
 
       SELECT guest.person_id
       FROM luma_event_guests AS guest
-      WHERE ${audienceEventCohortsWhereSql(includeEventCohorts)}
+      WHERE ${audienceEventCohortsWhereSql(includeEventCohorts, notAttendedEventIds)}
 
       UNION
 
       SELECT guest.person_id
       FROM luma_event_guests AS guest
-      WHERE ${audienceEventAnswersWhereSql(includeEventAnswers, { questionMode: audienceAnswerQuestionMode("include") })}
+      WHERE ${audienceEventAnswersWhereSql(includeEventAnswers, { questionMode: audienceAnswerQuestionMode("include"), notAttendedEventIds })}
 
       UNION
 

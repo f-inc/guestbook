@@ -2411,11 +2411,15 @@
   }
 
   .invite-event-cohort-tabs button {
-    @apply rounded-md px-3 py-1.5 text-[10px] font-bold text-muted transition hover:text-ink;
+    @apply inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[10px] font-bold text-muted transition hover:text-ink;
   }
 
   .invite-event-cohort-tabs button.active {
     @apply bg-surface text-brand shadow-sm;
+  }
+
+  .invite-event-cohort-count {
+    @apply inline-flex min-w-4 items-center justify-center rounded-full bg-brand/10 px-1 py-0.5 text-[9px] leading-none tabular-nums text-brand;
   }
 
   .invite-event-search {
@@ -2916,6 +2920,10 @@
 
   .invite-directory-table tbody tr {
     @apply h-[72px];
+  }
+
+  .invite-directory-table tbody tr.invite-recipient-row {
+    @apply cursor-pointer transition-colors hover:bg-subtle focus-visible:bg-subtle focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-brand;
   }
 
   .invite-directory-table tbody tr.invite-directory-row-ineligible {

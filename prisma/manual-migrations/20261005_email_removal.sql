@@ -31,14 +31,14 @@ CREATE TABLE email_inactive (
   "inactiveAt" timestamptz NOT NULL DEFAULT now(),
   "jobId" text NOT NULL REFERENCES email_removal_jobs(id)
 );
-CREATE VIEW guestbook_person_email_addresses AS
+CREATE VIEW guestbook_person_email_addresses WITH (security_invoker = true) AS
  SELECT person_id, lower(trim(coalesce(email_lower,email))) AS email FROM luma_people
  WHERE nullif(trim(coalesce(email_lower,email)), '') IS NOT NULL
  UNION SELECT person_id, lower(trim(coalesce(email_lower,email))) FROM luma_event_guests
  WHERE nullif(trim(coalesce(email_lower,email)), '') IS NOT NULL
  UNION SELECT "personId", lower(trim("emailLower")) FROM luma_invite_tracking WHERE "personId" IS NOT NULL
  UNION SELECT "personId", lower(trim("emailLower")) FROM email_addresses WHERE "personId" IS NOT NULL;
-CREATE VIEW guestbook_inactive_people AS
+CREATE VIEW guestbook_inactive_people WITH (security_invoker = true) AS
  SELECT p.person_id FROM guestbook_person_email_addresses p
  LEFT JOIN email_inactive i ON i."emailLower" = p.email
  GROUP BY p.person_id HAVING count(*) FILTER (WHERE i."emailLower" IS NULL) = 0;

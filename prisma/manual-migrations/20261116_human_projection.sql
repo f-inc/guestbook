@@ -57,12 +57,12 @@ BEGIN
     metrics_derived_at=now()
   FROM luma_events current WHERE target.person_id=ANY(ids) AND current.event_id=target.event_id;
 END $$;
-CREATE VIEW guestbook_human_person_email_addresses AS
+CREATE VIEW guestbook_human_person_email_addresses WITH (security_invoker = true) AS
  SELECT address.person_id,address.email_lower AS email FROM guestbook_person_emails address JOIN guestbook_people human ON human.person_id=address.person_id WHERE human.merged_into_id IS NULL
  UNION SELECT person_id,lower(trim(email)) FROM guestbook_active_people WHERE nullif(trim(email),'') IS NOT NULL
  UNION SELECT COALESCE(identity.person_id,tracking."personId"),lower(trim(tracking."emailLower")) FROM luma_invite_tracking tracking
  LEFT JOIN guestbook_account_identities identity ON identity.account_id=tracking."personId" WHERE tracking."personId" IS NOT NULL;
-CREATE VIEW guestbook_human_inactive_people AS
+CREATE VIEW guestbook_human_inactive_people WITH (security_invoker = true) AS
  SELECT address.person_id FROM guestbook_human_person_email_addresses address
  LEFT JOIN email_inactive inactive ON inactive."emailLower"=address.email
  GROUP BY address.person_id HAVING COUNT(*) FILTER (WHERE inactive."emailLower" IS NULL)=0;

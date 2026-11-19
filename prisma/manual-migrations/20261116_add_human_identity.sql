@@ -73,7 +73,7 @@ ALTER TABLE guestbook_manual_tag_mutations ADD FOREIGN KEY(person_id) REFERENCES
   ADD FOREIGN KEY(assigned_event_id) REFERENCES luma_events(event_id) ON DELETE SET NULL ON UPDATE CASCADE;
 ALTER TABLE guestbook_automatic_tag_assignments ADD FOREIGN KEY(person_id) REFERENCES guestbook_people(person_id) ON DELETE CASCADE ON UPDATE CASCADE,
   ADD FOREIGN KEY(tag_id) REFERENCES guest_tags(id) ON DELETE CASCADE ON UPDATE CASCADE;
-CREATE VIEW guestbook_active_people AS SELECT * FROM guestbook_people WHERE merged_into_id IS NULL;
+CREATE VIEW guestbook_active_people WITH (security_invoker = true) AS SELECT * FROM guestbook_people WHERE merged_into_id IS NULL;
 UPDATE guestbook_people h SET
  manual_tags=(SELECT COALESCE(jsonb_agg(DISTINCT tag),'[]'::jsonb) FROM human_accounts a JOIN luma_people p ON p.person_id=a.account_id CROSS JOIN LATERAL jsonb_array_elements(p.manual_tags) tag WHERE a.human_id=h.person_id),
  tags=(SELECT COALESCE(jsonb_agg(DISTINCT tag),'[]'::jsonb) FROM human_accounts a JOIN luma_people p ON p.person_id=a.account_id CROSS JOIN LATERAL jsonb_array_elements(p.tags) tag WHERE a.human_id=h.person_id);

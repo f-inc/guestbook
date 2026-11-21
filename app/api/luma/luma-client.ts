@@ -1,16 +1,18 @@
 import { rateLimitBackoffMs } from "./rate-limit-retry";
 import {
   knownLumaEventCredential,
+  knownLumaEventAccessCredential,
   lumaApiKeys,
   lumaSessionTokens,
   rememberLumaEventCredential,
+  rememberLumaEventAccessCredential,
   type LumaApiKey,
   type LumaCredentialSource,
   type LumaSessionToken,
 } from "./api-keys";
 
 type AnyRecord = Record<string, any>;
-type HttpError = Error & { status?: number; code?: string };
+type HttpError = Error & { status?: number; code?: string; upstreamStatus?: number };
 type LogLevel = "info" | "error";
 type Logger = (requestId: string, event: string, details?: AnyRecord, level?: LogLevel) => Promise<void>;
 type CatalogFailure = { credentialName: string; status: number; message: string };
@@ -42,6 +44,7 @@ type PrivateRequestOptions = {
   params?: AnyRecord;
   body?: unknown;
   operation: string;
+  signal?: AbortSignal;
 };
 
 const LUMA_BASE_URL = "https://public-api.luma.com";
@@ -173,6 +176,7 @@ export function createLumaClient({
       },
       body: method === "POST" && options.body !== undefined ? JSON.stringify(options.body) : undefined,
       cache: "no-store",
+      ...(options.signal ? { signal: options.signal } : {}),
     });
     if (!response.ok) {
       await response.text();
@@ -187,6 +191,7 @@ export function createLumaClient({
         ? "Your Luma session token is missing, expired, or lacks access."
         : `Luma ${options.operation} failed (${response.status}).`, expired ? 403 : response.status);
       error.code = expired ? "LUMA_SESSION_INVALID" : "LUMA_PRIVATE_API_ERROR";
+      error.upstreamStatus = response.status;
       throw error;
     }
     await log(options.requestId, "private Luma fetch success", {
@@ -361,9 +366,79 @@ export function createLumaClient({
     return publicRequest(path, { ...options, apiKey });
   }
 
+  async function updateEventGuestStatus(options: {
+    requestId: string; eventId: string; guestId: string; status: string;
+    sendEmail: boolean; message: string | null;
+  }) {
+    const { eventId, requestId, guestId, status, sendEmail, message } = options;
+    const configured: LumaCredentialSource[] = [
+      ...lumaApiKeys().map((value): LumaCredentialSource => ({ type: "api-key", value })),
+      ...lumaSessionTokens().map((value): LumaCredentialSource => ({ type: "session-token", value })),
+    ];
+    const preferred = knownLumaEventAccessCredential(eventId, "status")
+      || knownLumaEventAccessCredential(eventId, "guests") || knownLumaEventCredential(eventId);
+    const candidates = preferred
+      ? [preferred, ...configured.filter((source) => source.type !== preferred.type || source.value.envName !== preferred.value.envName)]
+      : configured;
+    let lastError: HttpError | undefined;
+    for (const source of candidates) {
+      try {
+        if (source.type === "api-key") {
+          await publicRequest("/v1/events/guests/update-status", {
+            requestId, method: "POST", apiKey: source.value,
+            body: { event_id: eventId, guest_id: guestId, status, send_email: sendEmail, message },
+          });
+        } else {
+          // Match Luma's own guest manager, including its asynchronous task.
+          const signal = AbortSignal.timeout(15_000);
+          const result = await privatePost({
+            requestId, sessionToken: source.value, operation: "guest status update", signal,
+            path: "/event/admin/update-guests-statuses",
+            body: {
+              event_api_id: eventId, rsvp_api_ids: [guestId], approval_status: status,
+              suppress_email: !sendEmail,
+              custom_message: { type: "doc", content: (message || "").split("\n").map((text) => ({ type: "paragraph", ...(text ? { content: [{ type: "text", text }] } : {}) })) },
+              ...(status === "approved" ? { event_ticket_type_api_id: null } : { should_refund: false }),
+            },
+          });
+          // Once accepted, never replay a write with another credential, even
+          // when polling is denied or times out.
+          rememberLumaEventAccessCredential(eventId, source, "status");
+          await waitForGuestStatusTask(result?.task_id, source.value, requestId, signal);
+          return;
+        }
+        rememberLumaEventAccessCredential(eventId, source, "status");
+        return;
+      } catch (error: any) {
+        if (error.acceptedWrite || ![401, 403, 404].includes(error.upstreamStatus ?? error.status)) throw error;
+        lastError = error;
+        await log(requestId, "guest status credential denied; trying remaining credentials", {
+          eventId, credentialType: source.type, credentialName: source.value.envName, status: error.status,
+        });
+      }
+    }
+    throw lastError || httpError("No configured Luma credential can update this event's guests.", 403);
+  }
+
+  async function waitForGuestStatusTask(taskId: unknown, sessionToken: LumaSessionToken, requestId: string, signal: AbortSignal) {
+    if (!taskId) return;
+    try {
+      if (typeof taskId !== "string") throw httpError("Luma returned an invalid guest status task.", 502);
+      for (let attempt = 0; attempt < 20; attempt++) {
+        if (attempt) await wait(500);
+        const task = await privateGet({ requestId, sessionToken, operation: "guest status task", path: "/task/get-status", params: { task_id: taskId }, signal });
+        if (task?.status === "success") return;
+        if (task?.status === "failure") throw httpError("Luma could not complete the guest status update.", 502);
+      }
+      throw httpError("Luma is still processing the guest status update. Refresh guests before retrying.", 504);
+    } catch (error: any) {
+      error.acceptedWrite = true;
+      throw error;
+    }
+  }
+
   // Guest access is independent of public event visibility. Keep its verified
   // credential separate from the catalog credential (also used for writes).
-  const guestCredentials = new Map<string, { type: LumaCredentialSource["type"]; envName: string; expiresAt: number }>();
 
   async function fetchEventGuestsBounded(options: {
     requestId: string; eventId: string; pageSize: number;
@@ -374,11 +449,7 @@ export function createLumaClient({
       ...lumaApiKeys().map((value): LumaCredentialSource => ({ type: "api-key", value })),
       ...lumaSessionTokens().map((value): LumaCredentialSource => ({ type: "session-token", value })),
     ];
-    const cached = guestCredentials.get(eventId);
-    const verified = cached && cached.expiresAt > Date.now()
-      ? configured.find((source) => source.type === cached.type && source.value.envName === cached.envName)
-      : undefined;
-    const preferred = verified || knownLumaEventCredential(eventId);
+    const preferred = knownLumaEventAccessCredential(eventId, "guests") || knownLumaEventCredential(eventId);
     const candidates = preferred
       ? [preferred, ...configured.filter((source) => source.type !== preferred.type || source.value.envName !== preferred.value.envName)]
       : configured;
@@ -391,14 +462,11 @@ export function createLumaClient({
               params: { event_id: eventId, pagination_limit: String(pageSize), sort_column: "registered_at", sort_direction: "desc nulls last" },
             })
           : await fetchSessionGuestsBounded({ ...options, sessionToken: source.value });
-        guestCredentials.delete(eventId);
-        guestCredentials.set(eventId, { type: source.type, envName: source.value.envName, expiresAt: Date.now() + 6 * 60 * 60 * 1000 });
-        if (guestCredentials.size > 1000) guestCredentials.delete(guestCredentials.keys().next().value!);
+        rememberLumaEventAccessCredential(eventId, source, "guests");
         return result;
       } catch (error: any) {
         if (![401, 403, 404].includes(error.status)) throw error;
         lastError = error;
-        guestCredentials.delete(eventId);
         await log(requestId, "guest credential denied; trying remaining credentials", { eventId, credentialType: source.type, status: error.status });
       }
     }
@@ -449,6 +517,7 @@ export function createLumaClient({
     privatePost,
     publicRequest,
     publicRequestForEvent,
+    updateEventGuestStatus,
     resolveEventApiKey,
     resolveEventReadCredential,
   };

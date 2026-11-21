@@ -117,6 +117,21 @@ export function clearLumaEventCredentialCache() {
   eventCredentialStore().clear();
 }
 
+// Successful guest reads and writes prove more than public event visibility.
+// Keep these separate from catalog priority and scope them to the browser token.
+export function rememberLumaEventAccessCredential(eventId: string, source: LumaCredentialSource, capability: "guests" | "status") {
+  const key = JSON.stringify([capability, eventId]);
+  const now = Date.now();
+  const store = eventCredentialStore();
+  store.delete(key);
+  store.set(key, { type: source.type, envName: source.value.envName, order: source.value.order, expiresAt: now + EVENT_CREDENTIAL_CACHE_TTL_MS });
+  pruneCredentialStore(store, now);
+}
+
+export function knownLumaEventAccessCredential(eventId: string, capability: "guests" | "status") {
+  return knownLumaEventCredential(JSON.stringify([capability, eventId]));
+}
+
 export function lumaEventCredentialCacheSize() {
   return eventCredentialStore().size;
 }

@@ -86,8 +86,14 @@ fallback for server jobs, which cannot access browser storage.
 
 The browser sends the token only in a header to same-origin Luma API routes.
 It is never put in URLs, returned in status payloads, or stored in the database,
-logs, or notification storage. Server credential routing and response caches for
-browser-session requests are request-scoped. Catalog refreshes using a browser
+logs, or notification storage. Response caches remain request-scoped. Credential
+routing remembers event access for up to six hours, isolated by a digest of the
+browser token and bounded in memory; it stores credential names rather than tokens.
+Approve, Waitlist, and Decline (including bulk actions) prefer the credential that
+last updated or loaded that event's guests, then its catalog credential. Explicit
+access denials try remaining API keys and the active session. Validation errors,
+network failures, and server errors do not replay writes. Session updates wait for
+Luma's background task before reporting success. Catalog refreshes using a browser
 session do not archive other indexed events based on that account's visibility.
 
 Guestbook refreshes the lightweight Luma event catalog on app load and when the browser tab becomes active. For the selected event, it compares Luma's approved, pending, waitlist, invited, declined, and checked-in counts with the local snapshot before fetching guests.

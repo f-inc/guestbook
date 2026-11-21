@@ -68,6 +68,7 @@ const fetchEventsAcrossCredentials = lumaClient.fetchEventsAcrossCredentials;
 const fetchEventGuestsBounded = lumaClient.fetchEventGuestsBounded;
 const lumaFetch = lumaClient.publicRequest;
 const lumaFetchForEvent = lumaClient.publicRequestForEvent;
+const updateLumaEventGuestStatus = lumaClient.updateEventGuestStatus;
 const lumaPrivateGet = lumaClient.privateGet;
 const lumaPrivatePost = lumaClient.privatePost;
 const resolveLumaEventReadCredential = lumaClient.resolveEventReadCredential;
@@ -802,7 +803,8 @@ async function handlePOST(request: Request) {
       });
     }
 
-    if (body.action !== "updateGuestCheckIn") assertApiKey();
+    if (["updateGuestStatus", "bulkUpdateGuestStatus"].includes(body.action)) assertReadCredential();
+    else if (body.action !== "updateGuestCheckIn") assertApiKey();
     await debugLog(requestId, "POST /api/luma start", { action: body.action, eventId: body.eventId });
     requireLiveWriteConfirmation(body);
 
@@ -881,16 +883,9 @@ async function handlePOST(request: Request) {
         sendEmail: notification.sendEmail,
         hasMessage: Boolean(notification.message),
       });
-      await lumaFetchForEvent("/v1/events/guests/update-status", body.eventId, {
-        requestId,
-        method: "POST",
-        body: {
-          event_id: body.eventId,
-          guest_id: body.guestId,
-          status,
-          send_email: notification.sendEmail,
-          message: notification.message,
-        },
+      await updateLumaEventGuestStatus({
+        requestId, eventId: body.eventId, guestId: body.guestId, status,
+        sendEmail: notification.sendEmail, message: notification.message,
       });
       if (hasLumaDb()) {
         try {
@@ -960,16 +955,9 @@ async function handlePOST(request: Request) {
         if (index > 0 && requestDelayMs) await wait(requestDelayMs);
         const guestId = guestIds[index];
         try {
-          await lumaFetchForEvent("/v1/events/guests/update-status", body.eventId, {
-            requestId,
-            method: "POST",
-            body: {
-              event_id: body.eventId,
-              guest_id: guestId,
-              status: lumaStatus,
-              send_email: notification.sendEmail,
-              message: notification.message,
-            },
+          await updateLumaEventGuestStatus({
+            requestId, eventId: body.eventId, guestId, status: lumaStatus,
+            sendEmail: notification.sendEmail, message: notification.message,
           });
           updatedGuestIds.push(guestId);
           if (hasLumaDb()) {

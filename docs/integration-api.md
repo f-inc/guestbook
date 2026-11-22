@@ -80,6 +80,27 @@ recorded evidence. Incomplete/truncated/unsynced indexes return attendance=null.
 Key event restrictions apply before aggregate reads; no identities, emails or raw
 data are returned. Catalog and counts share a repeatable-read snapshot. Reads never
 refresh Luma or write indexes. Shorten the range on a 503 size-limit response.
+## GET /analytics/open-campus
+
+Requires `events:read` and `guests:read`. Returns counts only for indexed events
+whose titles contain the words “Open Campus”, within the key's event restrictions.
+Optional `period=all` (default) or `period=30d`. The 30-day view includes events
+starting within the trailing 30×24 hours through now, using the event date when
+its start timestamp is absent; future events are excluded. The response is `{ data: { registrations, accepted, checkedIn,
+eventCount, updatedAt }, source: "guestbook-index", complete: true }`.
+Alternatively use paired `from=YYYY-MM-DD&to=YYYY-MM-DD` without `period`.
+Custom ranges include both entire Pacific calendar days for event starts; date-only
+fallbacks use their stored calendar dates. DST boundaries are respected. Partial,
+invalid, reversed, duplicate or mixed preset/date queries return 400. Future events
+remain excluded.
+Totals sum event registrations, so one person attending two events counts twice.
+Accepted includes checked-in guests and no-shows. `updatedAt` is the oldest included
+guest sync, or null when no events match. Counts are read directly from the guest
+index; optional overview caches are not required. All matching events must have
+complete successful (or skipped-fresh) guest indexes; otherwise returns 503 rather
+than partial totals. At most 500 matching candidate events are supported.
+This read does not call Luma, refresh indexes, write data, or return guest identities.
+Refresh incomplete events explicitly in Guestbook.
 
 ## GET /events/{eventId}/guests
 
@@ -264,3 +285,8 @@ It returns aggregate `firstVisit`, `registered`, `accepted`, `checkedIn`, nullab
 `guestPass` (currently unavailable), chronological exclusions, and indexed-history
 coverage. No person identities are returned or accepted. See EVENT_METRICS.md for
 cohort definitions, bounded history reads, partial coverage and date semantics.
+Open Campus aggregates additionally return nullable `newPeople` with registration,
+accepted and checked-in count subsets. New means no earlier recorded event check-in
+before that event in the key's accessible indexed history; invitations are excluded
+from prior attendance. Scope applies to both selected events and prior history.
+This read does not refresh derived caches or Luma and returns no guest identities.

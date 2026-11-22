@@ -67,6 +67,19 @@ including inactive events (`catalogActive: false`). Returns explicit fields only
 `eventId`, `title`, `date`, `startsAt`, `endsAt`, `visibility`, `location`,
 `category`, `capacity`, `lumaUrl`, `catalogActive`, `syncedAt`, `syncState`.
 
+## GET /analytics/events
+
+Requires `events:read` and `guests:read`. Pass `from=YYYY-MM-DD&to=YYYY-MM-DD`
+(exclusive end, up to 366 days, Pacific event start dates). Returns `{ data: [...],
+source: "guestbook-index", complete: true }` with at most 500 timed indexed events.
+Each event has id, title, start, nullable end, saved category/location/capacity,
+catalogActive, and nullable attendance { registrations, accepted, checkedIn, updatedAt }.
+Counts follow the existing registered and accepted cohorts; check-ins require
+recorded evidence. Incomplete/truncated/unsynced indexes return attendance=null.
+`complete` certifies event range coverage, not successful guest sync for every event.
+Key event restrictions apply before aggregate reads; no identities, emails or raw
+data are returned. Catalog and counts share a repeatable-read snapshot. Reads never
+refresh Luma or write indexes. Shorten the range on a 503 size-limit response.
 ## GET /analytics/open-campus
 
 Requires `events:read` and `guests:read`. Returns counts only for indexed events
@@ -263,6 +276,15 @@ integration authentication cannot operate.
 Verification uses mocked database calls and never connects to the configured
 database. Run `npm test` and `npm run typecheck` locally.
 
+### Open Campus cohort funnel
+
+`POST /api/v1/analytics/open-campus-funnel` is read-only and requires `events:read`
+and `guests:read`. JSON: `{ "from": "2026-01-01", "to": "2027-01-01" }`
+with optional `category`, `status`, `location`; `to` is exclusive (1-366 days).
+It returns aggregate `firstVisit`, `registered`, `accepted`, `checkedIn`, nullable
+`guestPass` (currently unavailable), chronological exclusions, and indexed-history
+coverage. No person identities are returned or accepted. See EVENT_METRICS.md for
+cohort definitions, bounded history reads, partial coverage and date semantics.
 Open Campus aggregates additionally return nullable `newPeople` with registration,
 accepted and checked-in count subsets. New means no earlier recorded event check-in
 before that event in the key's accessible indexed history; invitations are excluded

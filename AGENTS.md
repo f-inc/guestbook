@@ -25,3 +25,15 @@
 On Haseab's BB machine, the shared registry is `~/.bb/dev-ports.json` and
 `~/.bb/bin/project-dev guestbook` uses the same assignment. These personal
 files are optional; collaborators can use the repository commands above.
+
+### Event metrics
+
+Staff Event metrics uses Guestbook’s read-only indexed aggregate API, not the campus
+calendar or live guest scans. Preserve scoped event access, complete-index disclosures,
+Pacific dates, filter-bound drilldowns and private/no-store responses. Missing counts
+and capacities are unavailable. Deploy Guestbook and backend first. See docs/EVENT_METRICS.md.
+
+The first-event Open Campus funnel uses unique indexed people and a first non-Open
+Campus check-in cohort, followed through later outcomes. Keep identity processing
+inside Guestbook, report coverage and chronological exclusions, and leave the
+guest-pass stage unavailable until cross-service recipient matching is enabled.

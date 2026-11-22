@@ -53,7 +53,7 @@ export async function openCampusAnalytics(request: Request, db?: ReturnType<type
       }
       if (!updatedAt || sync.lastGuestSyncAt < updatedAt) updatedAt = sync.lastGuestSyncAt;
     }
-    const totals = await readIndexedOpenCampusTotals(events.map(event => event.eventId), db);
+    const totals = await readIndexedOpenCampusTotals(events.map(event => event.eventId), db, key.eventIds);
     return json({ data: { ...totals, eventCount: events.length, updatedAt: updatedAt?.toISOString() ?? null }, source: "guestbook-index", complete: true });
   } catch (error) { return apiError(error); }
 }

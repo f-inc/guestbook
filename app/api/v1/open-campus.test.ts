@@ -12,7 +12,7 @@ function fixture() {
   const db: any = {
     integrationApiKey: { findUnique: async () => key },
     lumaEvent: { findMany: async (args: any) => { query = args; return [event, { ...event, eventId: "evt-other", title: "Open Campuses" }]; } },
-    $queryRaw: async (sql: any) => { reads.push(sql); return [{ registrations: 81, accepted: 23, checkedIn: 9 }]; },
+    $queryRaw: async (sql: any) => { reads.push(sql); return [{ registrations: 81, accepted: 23, checkedIn: 9, newRegistrations:40, newAccepted:12,newCheckedIn:5 }]; },
   };
   return { key, event, db, reads, query: () => query };
 }
@@ -21,7 +21,7 @@ test("Open Campus totals respect event access and read only authorized event cou
   const response = await openCampusAnalytics(request(), f.db);
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("cache-control"), "private, no-store");
-  assert.deepEqual((await response.json() as any).data, { registrations: 81, accepted: 23, checkedIn: 9, eventCount: 1, updatedAt: "2026-01-01T00:00:00.000Z" });
+  assert.deepEqual((await response.json() as any).data, { registrations: 81, accepted: 23, checkedIn: 9, newPeople:{registrations:40,accepted:12,checkedIn:5}, eventCount: 1, updatedAt: "2026-01-01T00:00:00.000Z" });
   assert.deepEqual(f.query().where.eventId, { in: ["evt-one"] });
   assert.equal(f.query().take, 501);
   assert.equal(f.reads.length, 1);
@@ -30,6 +30,10 @@ test("Open Campus totals respect event access and read only authorized event cou
   const sql = f.reads[0].strings.join("?");
   assert(sql.includes("COUNT(*) FILTER"));
   assert(!/UPDATE|INSERT|DELETE/.test(sql));
+  assert(sql.includes('earlier.person_id = guest.person_id'));
+  assert(sql.includes("earlier.checked_in_at IS NOT NULL OR earlier.status = 'checked_in'"));
+  assert(sql.includes('earlier.event_id IN'));
+  assert(!sql.includes('has_prior_event'));
 });
 test("Open Campus rejects missing scopes, bad queries, and incomplete indexes before counting", async () => {
   const f = fixture();
@@ -55,7 +59,7 @@ test("Open Campus distinguishes a complete empty report from an oversized report
   const f = fixture();
   f.db.lumaEvent.findMany = async () => [];
   const empty = await openCampusAnalytics(request(), f.db);
-  assert.deepEqual((await empty.json() as any).data, { registrations: 0, accepted: 0, checkedIn: 0, eventCount: 0, updatedAt: null });
+  assert.deepEqual((await empty.json() as any).data, { registrations: 0, accepted: 0, checkedIn: 0, newPeople:{registrations:0,accepted:0,checkedIn:0}, eventCount: 0, updatedAt: null });
   assert.equal(f.reads.length, 0);
   f.db.lumaEvent.findMany = async () => Array(501).fill(f.event);
   assert.equal((await openCampusAnalytics(request(), f.db)).status, 503);

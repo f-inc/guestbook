@@ -233,6 +233,21 @@ function indexedRegisteredGuestPredicateSql() {
   )`;
 }
 
+/** Read existing registrations without requiring or writing derived overview caches. */
+export async function readIndexedOpenCampusTotals(eventIds: string[], db = prisma()) {
+  if (!eventIds.length) return { registrations: 0, accepted: 0, checkedIn: 0 };
+  if (eventIds.length > 500) throw new Error("Too many Open Campus events.");
+  const rows = await db.$queryRaw<Array<{ registrations: number; accepted: number; checkedIn: number }>>(Prisma.sql`
+    SELECT
+      COUNT(*) FILTER (WHERE ${indexedRegisteredGuestPredicateSql()})::integer AS registrations,
+      COUNT(*) FILTER (WHERE guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)}))::integer AS accepted,
+      COUNT(*) FILTER (WHERE guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')::integer AS "checkedIn"
+    FROM luma_event_guests AS guest
+    WHERE guest.event_id IN (${Prisma.join(eventIds)})
+  `);
+  return rows[0];
+}
+
 // Keep counts, audience pages, sends, and answer rules on the same cohort predicate.
 export function indexedAudienceCohortPredicateSql(cohort: "attended" | "not_attended" | "registered" | "invited", notAttendedEventIds: string[] = []) {
   if (cohort === "attended") return Prisma.sql`(guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')`;

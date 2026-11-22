@@ -67,6 +67,28 @@ including inactive events (`catalogActive: false`). Returns explicit fields only
 `eventId`, `title`, `date`, `startsAt`, `endsAt`, `visibility`, `location`,
 `category`, `capacity`, `lumaUrl`, `catalogActive`, `syncedAt`, `syncState`.
 
+## GET /analytics/open-campus
+
+Requires `events:read` and `guests:read`. Returns counts only for indexed events
+whose titles contain the words “Open Campus”, within the key's event restrictions.
+Optional `period=all` (default) or `period=30d`. The 30-day view includes events
+starting within the trailing 30×24 hours through now, using the event date when
+its start timestamp is absent; future events are excluded. The response is `{ data: { registrations, accepted, checkedIn,
+eventCount, updatedAt }, source: "guestbook-index", complete: true }`.
+Alternatively use paired `from=YYYY-MM-DD&to=YYYY-MM-DD` without `period`.
+Custom ranges include both entire Pacific calendar days for event starts; date-only
+fallbacks use their stored calendar dates. DST boundaries are respected. Partial,
+invalid, reversed, duplicate or mixed preset/date queries return 400. Future events
+remain excluded.
+Totals sum event registrations, so one person attending two events counts twice.
+Accepted includes checked-in guests and no-shows. `updatedAt` is the oldest included
+guest sync, or null when no events match. Counts are read directly from the guest
+index; optional overview caches are not required. All matching events must have
+complete successful (or skipped-fresh) guest indexes; otherwise returns 503 rather
+than partial totals. At most 500 matching candidate events are supported.
+This read does not call Luma, refresh indexes, write data, or return guest identities.
+Refresh incomplete events explicitly in Guestbook.
+
 ## GET /events/{eventId}/guests
 
 Requires `guests:read`. Every request reads every Luma guest page for the selected event before applying

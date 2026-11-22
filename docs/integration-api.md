@@ -262,3 +262,9 @@ integration authentication cannot operate.
 
 Verification uses mocked database calls and never connects to the configured
 database. Run `npm test` and `npm run typecheck` locally.
+
+Open Campus aggregates additionally return nullable `newPeople` with registration,
+accepted and checked-in count subsets. New means no earlier recorded event check-in
+before that event in the key's accessible indexed history; invitations are excluded
+from prior attendance. Scope applies to both selected events and prior history.
+This read does not refresh derived caches or Luma and returns no guest identities.

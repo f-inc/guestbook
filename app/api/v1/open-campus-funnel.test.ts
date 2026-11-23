@@ -128,6 +128,7 @@ function fixture() {
   };
   let catalog = events.map((event) => ({ ...event, syncState }));
   const db = {
+    $executeRaw: async () => 0,
     integrationApiKey: {
       findUnique: async () => ({
         scopes,
@@ -140,6 +141,7 @@ function fixture() {
       reads++;
       assert.equal(options.isolationLevel, "RepeatableRead");
       return callback({
+        $executeRaw: async () => 0,
         lumaEvent: {
           findMany: async (args: any) => {
             assert.deepEqual(args.where.eventId.in, ["other", "repeat", "open"]);

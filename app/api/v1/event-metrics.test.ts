@@ -9,7 +9,7 @@ function fixture() {
   const captured:{where?:any;sql?:any;reads:number}={reads:0};
   const event=(eventId:string,complete=true)=>({eventId,title:"Workshop",startsAt:new Date("2026-01-02T20:00:00Z"),endsAt:new Date("2026-01-02T21:00:00Z"),location:"Hall",category:"Community",capacity:30,catalogActive:true,syncState:{lastGuestSyncAt:complete?new Date("2026-01-03T00:00:00Z"):null,lastStatus:complete?"success":"running",truncated:false}});
   let rows=[event("allowed-one"),event("allowed-incomplete",false),event("allowed-empty")];
-  const tx={lumaEvent:{findMany:async(args:any)=>{captured.where=args.where;return rows;}},$queryRaw:async(sql:any)=>{captured.sql=sql;return [{eventId:"allowed-one",registrations:20,accepted:15,checkedIn:10}];}};
+  const tx={$executeRaw:async()=>0,lumaEvent:{findMany:async(args:any)=>{captured.where=args.where;return rows;}},$queryRaw:async(sql:any)=>{captured.sql=sql;return [{eventId:"allowed-one",registrations:20,accepted:15,checkedIn:10}];}};
   const db={integrationApiKey:{findUnique:async()=>({id:"key",scopes,eventIds:["allowed-one","allowed-incomplete","allowed-empty"],revokedAt,expiresAt:null})},$transaction:async(callback:any,options:any)=>{assert.equal(options.isolationLevel,"RepeatableRead");captured.reads++;return callback(tx);}};
   return {db:db as any,captured,setScopes:(value:string[])=>{scopes=value;},revoke:()=>{revokedAt=new Date();},setRows:(value:any[])=>{rows=value;},event};
 }

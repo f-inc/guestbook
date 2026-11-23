@@ -1,3 +1,4 @@
+import { readIndexedSnapshot } from "../../../luma/read-snapshot";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../../luma/db";
 import { GUEST_ACCEPTED_STATUSES, GUEST_REGISTERED_STATUSES } from "../../../luma/guest-query";
@@ -16,7 +17,7 @@ export async function eventAnalytics(request: Request, db?: ReturnType<typeof pr
     for (const name of params.keys()) if (!["from", "to"].includes(name) || params.getAll(name).length !== 1) fail("Invalid query parameters.");
     const from = params.get("from"), to = params.get("to");
     if (!validDate(from) || !validDate(to) || Date.parse(to) <= Date.parse(from) || Date.parse(to) - Date.parse(from) > 366 * 86400000) fail("Choose valid dates spanning up to one year; to is exclusive.");
-    const data = await db.$transaction(async (tx: Prisma.TransactionClient) => {
+    const data = await readIndexedSnapshot(db, async (tx: Prisma.TransactionClient) => {
       const rows = await tx.lumaEvent.findMany({
         where: { ...(key.eventIds.length ? { eventId: { in: key.eventIds } } : {}), startsAt: { gte: new Date(`${from}T00:00:00Z`), lt: new Date(Date.parse(to) + 86400000) } },
         orderBy: { eventId: "asc" }, take: 501,
@@ -46,7 +47,7 @@ export async function eventAnalytics(request: Request, db?: ReturnType<typeof pr
           updatedAt: event.syncState!.lastGuestSyncAt!.toISOString(),
         } : null,
       }));
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+    });
     return json({ data, source: "guestbook-index", complete: true });
   } catch (error) { return apiError(error); }
 }

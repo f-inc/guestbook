@@ -150,3 +150,5 @@ identity merging, persistence or relaxed event-date/milestone rules is introduce
 IRL funnel Guest Pass conversion accepts the same bounded private recipient tokens as Open Campus metrics. Match only valid, chronological check-ins inside the first-non-Open-Campus-visit cohort after all nested stages and filters; never reuse the independent Open Campus total. History before September 20, 2026 and missing matching stay unavailable. Aggregate responses never export private memberships or tokens.
 
 IRL Guest Pass means approved pass ownership among the already-narrowed checked-in people, including confirmed incoming recipients. Do not add campus-start or pass-issuance timing restrictions at this final stage. Keep earlier funnel stages unchanged.
+
+Metrics snapshots run as database-enforced read-only repeatable-read transactions with bounded waits. Preserve human identity routing, but bypass the human projection writer advisory lock for these reads so an ongoing sync cannot block reports. Keep writer locking unchanged.

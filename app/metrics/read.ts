@@ -1,3 +1,4 @@
+import { readIndexedSnapshot } from "../api/luma/read-snapshot";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../api/luma/db";
 import { GUEST_ACCEPTED_STATUSES, GUEST_REGISTERED_STATUSES } from "../api/luma/guest-query";
@@ -79,7 +80,7 @@ export function parseDrilldown(params: URLSearchParams) {
   return { stage, query, eventIds: ids("event"), historyScope: ids("history"), page, expected };
 }
 export async function readMetricPeople(input: ReturnType<typeof parseDrilldown>, db = prisma()) {
-  return db.$transaction(
+  return readIndexedSnapshot(db,
     async (tx: Prisma.TransactionClient) => {
       let members: { personId: string; eventId: string }[] = [];
       const titles = new Map<string, string>();
@@ -143,6 +144,5 @@ export async function readMetricPeople(input: ReturnType<typeof parseDrilldown>,
         })),
       };
     },
-    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 15000 },
   );
 }

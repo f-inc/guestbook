@@ -82,7 +82,7 @@ export async function openCampusFunnel(
           },
         };
       },
-      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 15000 },
     );
     return json({ data, source: "guestbook-index", asOf: now.toISOString() });
   } catch (error) {

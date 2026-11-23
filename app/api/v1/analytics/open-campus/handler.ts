@@ -86,7 +86,7 @@ export async function openCampusAnalytics(request: Request, db?: ReturnType<type
       const history = await loadFunnelHistory(tx, key.eventIds);
       return evaluateRecipientMatches(history.events, history.guests, events.map(event => event.eventId), matching!.recipients,
         request.headers.get("authorization")!.slice(7), matching!.nonce, now);
-    }, { isolationLevel: "RepeatableRead" }) : undefined;
+    }, { isolationLevel: "RepeatableRead", timeout: 15000 }) : undefined;
     const drilldownLinks: Record<string, string> = {};
     const filters = { registrations: "registered", accepted: "accepted", checkedIn: "checked_in" };
     const newFilters = { registrations: "new_attendee_registered", accepted: "new_attendee_accepted", checkedIn: "new_attendee_checked_in" };

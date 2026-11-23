@@ -39,39 +39,39 @@ Deployment order: Guestbook aggregate endpoint, Campus backend, frontend. No dat
 migration. Pin the actual released backend SHA in frontend release requirements
 before publishing. Configure the server integration key privately.
 
-## First event to Open Campus conversion
+## Event visitors to Open Campus conversion
 
-The staff-only `GET /api/events/metrics/open-campus-funnel` reads the aggregate-only
-Guestbook `POST /api/v1/analytics/open-campus-funnel`. Requests contain only the
-report date range (exclusive `to`) and optional category/status/location filters;
-responses contain counts and coverage, no guest identities or matching tokens.
-Guestbook requires events:read plus guests:read and scopes the entire history to
-the integration key before reading guests. This is an idempotent read, not a write.
+The staff-only `GET /api/events/metrics/open-campus-funnel` reads Guestbook’s
+read-only `POST /api/v1/analytics/open-campus-funnel`. The date range uses exclusive
+`to`, Pacific dates and optional event category/status/location filters. Covered
+ranges can include bounded private recipient tokens; responses contain only counts
+and coverage. Preserve integration scopes and private/no-store staff responses.
 
-The baseline is unique connected indexed person/normalized-email identities whose
-first timestamped check-in in accessible history is at a non-Open Campus event.
-The first-check-in Pacific date selects the cohort; filters apply to that first
-event. Earlier history is retained to avoid treating returning people as new.
-Later outcomes are followed through the current snapshot, beyond the selected
-cohort dates. Open Campus is identified by the saved title's whole-word phrase.
-Registrations require a recorded registration timestamp after the first visit.
-Acceptance requires accepted/check-in state or historical approval evidence; known
-approval dates must follow registration. Check-in must follow registration and
-known approval at the same Open Campus event. Every stage counts each person once.
+The cohort is unique indexed person/normalized-email identities with a timestamped
+check-in at any non-Open Campus event during the selected period, including people
+who have attended before. Filters apply to that qualifying visit, not their first-ever
+visit. Multiple qualifying visits count once. The earliest qualifying in-period visit
+anchors the later Open Campus journey, including outcomes after the selected dates.
 
-Status-only check-ins without timestamps exclude the person rather than inventing
-a first-visit date. Read limits are 2,000 accessible events and 100,000 relevant
-guest rows (check-ins plus Open Campus registrations); exceeding them fails closed.
-A repeatable-read snapshot preserves event/guest consistency. Incomplete event
-indexes make the cohort provisional: missing earlier visits can change membership,
-while missing later records can change conversion. Restricted keys explicitly
-limit the meaning of first visit. This is observed history, not proof of first-ever
-physical attendance or causal attribution. Counts differ from repeat attendance
-in the registration-to-attendance chart.
+Advance registration and approval are allowed for a later Open Campus event.
+Recorded Open Campus attendance after the qualifying event visit establishes
+registration and acceptance even if signup/approval timestamps are missing or out
+of order. The Open Campus checked-in stage requires an actual timestamped check-in
+after that qualifying visit. An earlier Open Campus visit alone never qualifies.
+Each stage counts each person once and uses the same membership as its drilldown.
+The legacy API key `firstVisit` now represents these event visitors.
 
-The fifth stage, received an Open Campus guest pass, is currently null and visibly
-unavailable. Cross-service recipient matching is not enabled. It must not be
-substituted with team counts, current team membership, or zero.
+Status-only check-ins do not invent visit times or exclude other known qualifying
+visits. Reads remain bounded to 2,000 accessible events and 100,000 relevant guest
+rows; exceeding limits fails closed. Incomplete indexes and restricted key scopes
+are disclosed; counts represent observed indexed visits, not causal attribution.
+
+The fifth stage directly checks approved Guest Pass ownership among the nested
+Open Campus checked-in cohort, using private email/full-name tokens. Confirmed
+incoming pass holders count; no pass-start or issuance-order restriction applies.
+It remains unavailable before September 20, 2026 or when matching cannot complete;
+never substitute team counts, current membership, the separate Open Campus total,
+or zero. Guestbook performs all cohort and chronological matching read-only.
 
 ## Guestbook metric drill-downs
 
@@ -85,7 +85,7 @@ Links carry dates, filters, expected count and explicit complete event IDs for t
 first three attendance stages. Those lists contain event records, including repeat
 people across events. Cohort-stage links carry the accessible history scope and
 reuse the exact unique-person evaluator used by aggregate counts. Date filtering
-continues to select first-visit cohorts, with later Open Campus outcomes followed
+continues to select event-visitor cohorts, with later Open Campus outcomes followed
 through the current snapshot. Missing guest-pass metrics have no link.
 
 The list is rendered only after Guestbook session authentication, reads indexed
@@ -115,24 +115,23 @@ per request. Never log, persist or return submitted tokens or recipient identiti
 
 Matching connects exact normalized indexed email aliases to unique people inside
 Guestbook. A selected Open Campus timestamped check-in must precede the recipient
-milestone; newcomers reuse the native hasPriorEvent=false flag. Missing flags never establish
-newcomers. Reads are capped at 1,000 recipients, 128 KiB streamed
+milestone; newcomers have no earlier recorded event check-in. Earlier invitations and
+registrations do not disqualify newcomers. Reads are capped at 1,000 recipients, 128 KiB streamed
 payload, 2,000 scoped history events and 100,000 indexed relevant guest rows.
 Restricted or incomplete history, ambiguous names and untimestamped visits
 limit matching. No live scans, index refreshes, writes or migrations occur.
 
 Open Campus metrics reuse getIndexedMultiEventStats in read-only mode, rather than
 a separate event-record aggregation. Select only catalogActive Open Campus events
-and exclude upcoming events. Counts are unique people, with newRegistrations,
-firstRegisters and newFaces using Guestbook’s stored hasPriorEvent flag (earlier
-invitations and registrations count as prior history). No cache-refresh writes
+and exclude upcoming events. Counts are unique people. New overlays and recipient subsets exclude only earlier
+recorded event check-ins, including earlier Open Campus visits. No cache-refresh writes
 are permitted from the aggregate API.
 
 Open Campus responses include six native workspace drilldownLinks selecting exact
 event IDs, event_view=all, tab=overview and existing guest_status filters: registered,
-accepted, checked_in, first_registers, accepted_first_registers and new_faces.
+accepted, checked_in, new_attendee_registered, new_attendee_accepted and new_attendee_checked_in.
 The chart and native table use unique-person totals. Existing /metrics IRL journey
-links remain unchanged. Recipient New splits use the same hasPriorEvent flag.
+links remain unchanged. Recipient New splits use the same attendance-history definition.
 
 Private Open Campus recipient membership returns one request-local index per matched
 Guestbook identity, preserving total/New subset counts without exporting Guestbook
@@ -147,3 +146,7 @@ HMAC name tokens cross services. A fallback must identify exactly one qualifying
 Guestbook identity and be unique among Campus OS recipients; ambiguous matches
 are excluded. Email matches take priority; no fuzzy or first-name-only matching,
 identity merging, persistence or relaxed event-date/milestone rules is introduced.
+
+IRL funnel Guest Pass conversion accepts the same bounded private recipient tokens as Open Campus metrics. Match only valid, chronological check-ins inside the first-non-Open-Campus-visit cohort after all nested stages and filters; never reuse the independent Open Campus total. History before September 20, 2026 and missing matching stay unavailable. Aggregate responses never export private memberships or tokens.
+
+IRL Guest Pass means approved pass ownership among the already-narrowed checked-in people, including confirmed incoming recipients. Do not add campus-start or pass-issuance timing restrictions at this final stage. Keep earlier funnel stages unchanged.

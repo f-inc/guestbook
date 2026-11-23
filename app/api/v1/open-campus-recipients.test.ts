@@ -29,7 +29,7 @@ test("unknown first-visit timestamps never imply a new face", () => {
   const guests = [guest("p", "old", "p@example.test", 1), guest("p", "oc", "p@example.test", 10)];
   guests[0].checkedInAt = null as any;
   delete (guests[1] as any).hasPriorEvent;
-  assert.deepEqual(matchRecipients(events, guests, ["oc"], [recipient("p@example.test")], secret, nonce, now), { people: 1, newPeople: null });
+  assert.deepEqual(matchRecipients(events, guests, ["oc"], [recipient("p@example.test")], secret, nonce, now), { people: 1, newPeople: 0 });
 });
 test("POST authorizes before body/history and validates a bounded opaque payload", async () => {
   let historyReads = 0;
@@ -58,16 +58,16 @@ test("POST authorizes before body/history and validates a bounded opaque payload
 });
 
 
-test("a prior invitation excludes recipients from New even without a prior check-in", () => {
+test("a prior invitation or registration does not exclude a recipient from New", () => {
   const row = guest("p", "oc", "p@example.test", 10);
   row.hasPriorEvent = true;
-  assert.deepEqual(matchRecipients([event("oc", "Open Campus", 10)], [row], ["oc"], [recipient("p@example.test")], secret, nonce, now), { people: 1, newPeople: 0 });
+  assert.deepEqual(matchRecipients([event("oc", "Open Campus", 10)], [row], ["oc"], [recipient("p@example.test")], secret, nonce, now), { people: 1, newPeople: 1 });
 });
 
 
 test("private recipient indices identify the exact deduplicated roster and New subset", () => {
-  const events = [event("oc", "Open Campus", 10)];
-  const rows = [guest("new", "oc", "new@example.test", 10), guest("return", "oc", "return@example.test", 10)];
+  const events = [event("old", "Community", 1), event("oc", "Open Campus", 10)];
+  const rows = [guest("new", "oc", "new@example.test", 10), guest("return", "oc", "return@example.test", 10), guest("return", "old", "return@example.test", 1)];
   rows[1].hasPriorEvent = true;
   const recipients = [recipient("missing@example.test"), recipient("new@example.test"), recipient("return@example.test"), recipient("new@example.test")];
   assert.deepEqual(evaluateRecipientMatches(events, rows, ["oc"], recipients, secret, nonce, now), { people: 2, newPeople: 1, matches: [{ recipientIndex: 1, isNew: true }, { recipientIndex: 2, isNew: false }] });

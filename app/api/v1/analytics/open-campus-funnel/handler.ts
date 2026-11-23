@@ -1,3 +1,4 @@
+import { isRecipientMatching } from "../open-campus/recipients";
 import { loadFunnelHistory } from "./history";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../../luma/db";
@@ -27,7 +28,7 @@ export async function openCampusFunnel(
       typeof input !== "object" ||
       Array.isArray(input) ||
       Object.keys(input).some(
-        (name) => !["from", "to", "category", "location", "status"].includes(name),
+        (name) => !["from", "to", "category", "location", "status", "matching"].includes(name),
       )
     )
       fail("Invalid funnel request.");
@@ -54,6 +55,10 @@ export async function openCampusFunnel(
       !["held", "ongoing", "upcoming", "unknown"].includes(input.status as string)
     )
       fail("Invalid funnel status.");
+    if (input.matching !== undefined && (!isRecipientMatching(input.matching, now) ||
+        Buffer.byteLength(JSON.stringify(input.matching)) > 131072)) fail("Invalid recipient matching payload.");
+    const matching = isRecipientMatching(input.matching, now) && (input.from as string) >= "2026-09-20"
+      ? { ...input.matching, secret: request.headers.get("authorization")!.slice(7) } : undefined;
     const data = await db.$transaction(
       async (tx: Prisma.TransactionClient) => {
         const { events, guests } = await loadFunnelHistory(tx, key.eventIds);
@@ -64,7 +69,7 @@ export async function openCampusFunnel(
             !event.syncState.truncated,
         );
         return {
-          ...buildOpenCampusFunnel(events, guests, input as FunnelQuery, now),
+          ...buildOpenCampusFunnel(events, guests, input as FunnelQuery, now, matching),
           historyScope: key.eventIds,
           coverage: {
             events: events.length,

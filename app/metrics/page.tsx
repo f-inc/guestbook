@@ -54,7 +54,7 @@ export default async function MetricsPeople({
         </p>
         {!repeats && (
           <p>
-            People whose first recorded visit was a non-Open Campus event in these dates, followed
+            People who checked into a non-Open Campus event in these dates, including returning visitors, followed
             through later Open Campus outcomes. Available indexed history can be incomplete.
           </p>
         )}

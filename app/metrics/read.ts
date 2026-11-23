@@ -11,10 +11,10 @@ export const stageLabels: Record<string, string> = {
   registrations: "Event registrations",
   accepted: "Accepted event registrations",
   checkedIn: "Recorded event check-ins",
-  firstVisit: "First non-Open Campus visits",
-  ocRegistered: "Open Campus registrations after first visit",
-  ocAccepted: "Open Campus acceptances after first visit",
-  ocCheckedIn: "Open Campus check-ins after first visit",
+  firstVisit: "Non-Open Campus event visitors",
+  ocRegistered: "Open Campus registrations after event visit",
+  ocAccepted: "Open Campus acceptances after event visit",
+  ocCheckedIn: "Open Campus check-ins after event visit",
 };
 export function parseDrilldown(params: URLSearchParams) {
   const allowed = [

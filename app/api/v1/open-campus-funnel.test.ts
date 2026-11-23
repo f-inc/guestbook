@@ -35,16 +35,17 @@ const later = (person: string, extra: Partial<FunnelGuest> = {}) =>
     checkedInAt: date("2026-02-05"),
     ...extra,
   });
-const events = [event("other"), event("repeat"), event("open", "Community: Open Campus")];
+const events = [event("other"), event("repeat"), { ...event("open", "Community: Open Campus"), startsAt: date("2026-02-05"), endsAt: date("2026-02-05") }, event("open-earlier", "Open Campus")];
 
-test("cohort deduplicates visits and email aliases, excludes Open Campus first visits and follows later outcomes outside date range", () => {
+test("cohort deduplicates visits and email aliases, includes returning visitors and follows later outcomes outside date range", () => {
   const guests = [
     row("other", "one"),
     row("repeat", "one", { checkedInAt: date("2026-01-03") }),
     later("one"),
     row("other", "duplicate", { emailLower: " ONE@example.test " }),
     later("duplicate", { emailLower: "one@example.test" }),
-    row("open", "open-first"),
+    row("open-earlier", "open-first"),
+    later("open-first"),
     row("other", "open-first", { checkedInAt: date("2026-01-03") }),
     row("other", "registered"),
     later("registered", { approvedAt: null, checkedInAt: null, status: "waitlisted" }),
@@ -53,17 +54,17 @@ test("cohort deduplicates visits and email aliases, excludes Open Campus first v
   ];
   const result = buildOpenCampusFunnel(events, guests, query, now);
   assert.deepEqual(result, {
-    firstVisit: 3,
-    registered: 3,
-    accepted: 2,
-    checkedIn: 1,
+    firstVisit: 4,
+    registered: 4,
+    accepted: 3,
+    checkedIn: 2,
     guestPass: null,
     excludedMissingCheckInTime: 0,
     checkedInWithoutMatchableEmail: 0,
   });
   assert(!JSON.stringify(result).includes("example.test"));
 });
-test("requires a later registration and same-event ordered check-in; missing first-check-in times are excluded", () => {
+test("advance registration and sync timestamp order do not exclude later recorded attendance; missing visit times stay unknown", () => {
   const guests = [
     row("other", "early"),
     later("early", { registeredAt: date("2025-12-31") }),
@@ -76,9 +77,9 @@ test("requires a later registration and same-event ordered check-in; missing fir
   ];
   assert.deepEqual(buildOpenCampusFunnel(events, guests, query, now), {
     firstVisit: 3,
-    registered: 2,
-    accepted: 2,
-    checkedIn: 1,
+    registered: 3,
+    accepted: 3,
+    checkedIn: 3,
     guestPass: null,
     excludedMissingCheckInTime: 1,
     checkedInWithoutMatchableEmail: 1,
@@ -221,4 +222,44 @@ test("drill-down membership is exactly the same cohort at every stage", () => {
     ["one"],
   );
   assert(!JSON.stringify(buildOpenCampusFunnel(events, guests, query, now)).includes("personId"));
+});
+
+
+test("Guest Pass directly checks ownership within the nested IRL checked-in cohort", async () => {
+  const { recipientToken, recipientNameToken } = await import("./analytics/open-campus/recipients");
+  const snapshotNow = new Date("2026-11-23T12:00:00Z"), nonce = "b".repeat(64);
+  const q = { from: "2026-09-20", to: "2026-10-01", location: "Hall" };
+  const first = (id: string) => row("other", id, { checkedInAt: date("2026-09-22"), registeredAt: date("2026-09-21") });
+  const oc = (id: string) => row("open", id, { registeredAt: date("2026-10-02"), approvedAt: date("2026-10-03"), checkedInAt: date("2026-10-04"), person: { name: "Taylor Example" } });
+  const guests = [first("cohort"), oc("cohort"), oc("open-first"), first("no-approval"), oc("no-approval")];
+  guests[4].checkedInAt = date("2026-09-21"); // Open Campus attendance precedes the qualifying event visit.
+  const recipient = (email: string, receivedAt = date("2026-10-10").toISOString()) => ({ token: recipientToken(email, token, nonce), receivedAt });
+  const matching = { nonce, secret: token, recipients: [recipient("cohort@example.test"), recipient("open-first@example.test"), recipient("no-approval@example.test")] };
+  const result = buildOpenCampusFunnel(events, guests, q, snapshotNow, matching);
+  assert.equal(result.checkedIn, 1);
+  assert.equal(result.guestPass, 1);
+  assert.equal(buildOpenCampusFunnel(events, guests, q, snapshotNow, { ...matching, recipients: [recipient("cohort@example.test", date("2026-10-01").toISOString())] }).guestPass, 1);
+  assert.equal(buildOpenCampusFunnel(events, guests, { ...q, location: "Different hall" }, snapshotNow, matching).guestPass, 0);
+  assert.equal(buildOpenCampusFunnel(events, guests, { ...q, from: "2026-09-19" }, snapshotNow, matching).guestPass, null);
+  const changed = { ...recipient("changed@example.test"), nameTokens: [recipientNameToken("Taylor Example", token, nonce)!] };
+  assert.equal(buildOpenCampusFunnel(events, guests, q, snapshotNow, { ...matching, recipients: [changed] }).guestPass, 1);
+  assert.equal(buildOpenCampusFunnel(events, guests, q, snapshotNow).guestPass, null);
+});
+
+test("IRL matching rejects raw names, invalid tokens and extra identity fields before history reads", async () => {
+  const f = fixture();
+  for (const matching of [{ nonce: "b".repeat(64), recipients: [{ token: "raw@example.test", receivedAt: now.toISOString() }] }, { nonce: "b".repeat(64), recipients: [], email: "raw@example.test" }]) {
+    assert.equal((await openCampusFunnel(request({ ...query, matching }), f.db, now)).status, 400);
+  }
+  assert.equal(f.getReads(), 0);
+});
+
+
+test("returning visitors qualify on any in-period event, with filters applied to that visit", () => {
+  const catalog = [event("old"), { ...event("current"), location: "New hall" }, events[2]];
+  const guests = [row("old", "returning", { checkedInAt: date("2025-12-01") }), row("current", "returning"), later("returning", { registeredAt: date("2025-12-15"), approvedAt: date("2025-12-16") })];
+  const result = buildOpenCampusFunnel(catalog, guests, { ...query, location: "New hall" }, now);
+  assert.equal(result.firstVisit, 1); assert.equal(result.registered, 1); assert.equal(result.accepted, 1); assert.equal(result.checkedIn, 1);
+  const priorOnly = [row("old", "prior", { checkedInAt: date("2025-12-01") }), later("prior")];
+  assert.equal(buildOpenCampusFunnel(catalog, priorOnly, query, now).firstVisit, 0);
 });

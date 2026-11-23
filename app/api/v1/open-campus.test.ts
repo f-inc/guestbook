@@ -25,12 +25,15 @@ test("Open Campus totals respect event access and read only authorized event cou
   assert.deepEqual(await totals(response), { registrations: 81, accepted: 23, checkedIn: 9, newPeople:{registrations:40,accepted:12,checkedIn:5}, eventCount: 1, updatedAt: "2026-01-01T00:00:00.000Z" });
   assert.deepEqual(f.query().where.eventId, { in: ["evt-one"] });
   assert.equal(f.query().take, 501);
-  assert.equal(f.reads.length, 2);
+  assert.equal(f.reads.length, 3);
   assert(f.reads[0].values.includes("evt-one"));
   assert(!f.reads[0].values.includes("evt-other"));
   const sql = f.reads[0].strings.join("?");
   assert(sql.includes("COUNT(DISTINCT guest.person_id) FILTER"));
   assert(sql.includes("NOT guest.has_prior_event"));
+  const newcomerSql = f.reads[2].strings.join("?");
+  assert(newcomerSql.includes("previous_guest.checked_in_at"));
+  assert(!newcomerSql.includes("has_prior_event"));
   assert(!/UPDATE|INSERT|DELETE/.test(sql));
   assert.equal(f.query().where.catalogActive, true);
 });
@@ -52,7 +55,7 @@ test("complete indexes need no overview cache, including valid skipped-fresh syn
   const f = fixture();
   f.event.syncState.lastStatus = "skipped_fresh";
   assert.equal((await openCampusAnalytics(request(), f.db)).status, 200);
-  assert.equal(f.reads.length, 2);
+  assert.equal(f.reads.length, 3);
 });
 test("Open Campus distinguishes a complete empty report from an oversized report", async () => {
   const f = fixture();
@@ -117,7 +120,7 @@ test("Open Campus links open the native workspace with exact events and status f
   const response = await openCampusAnalytics(request("?from=2026-10-01&to=2026-11-22"), f.db, new Date("2026-11-23"));
   const links = (await response.json() as any).data.drilldownLinks;
   assert.equal(Object.keys(links).length, 6);
-  const expected: Record<string, string> = { registrations: "registered", newRegistrations: "first_registers", accepted: "accepted", newAccepted: "accepted_first_registers", checkedIn: "checked_in", newCheckedIn: "new_faces" };
+  const expected: Record<string, string> = { registrations: "registered", newRegistrations: "new_attendee_registered", accepted: "accepted", newAccepted: "new_attendee_accepted", checkedIn: "checked_in", newCheckedIn: "new_attendee_checked_in" };
   for (const [name, path] of Object.entries(links)) {
     const url = new URL(String(path), "https://guestbook.test");
     assert.equal(url.pathname, "/");

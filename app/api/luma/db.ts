@@ -1,3 +1,4 @@
+import { newEventAttendeeSql } from "./new-event-attendee";
 import { humanClient, humanIdentityEnabled } from "./human-mode";
 import { projectSourceAccounts, projectHumans, resolveHumanIds } from "./human-store";
 import { aggregateMergedHistory } from "./merge-history";
@@ -256,8 +257,15 @@ export async function readIndexedOpenCampusTotals(eventIds: string[], db = prism
   const result = await getIndexedMultiEventStats(eventIds, { db, refreshMissing: false });
   if (!result) return empty;
   const stats = result.stats;
+  const [newCounts] = await db.$queryRaw<any[]>(Prisma.sql`
+    SELECT COUNT(DISTINCT guest.person_id) FILTER (WHERE ${indexedRegisteredGuestPredicateSql()})::int AS "newRegistrations",
+      COUNT(DISTINCT guest.person_id) FILTER (WHERE guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)}))::int AS "firstRegisters",
+      COUNT(DISTINCT guest.person_id) FILTER (WHERE guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')::int AS "newFaces"
+    FROM luma_event_guests guest
+    WHERE guest.event_id IN (${Prisma.join(eventIds)}) AND ${newEventAttendeeSql()}
+  `);
   return { registrations: stats.registered, accepted: stats.accepted, checkedIn: stats.checkedIn,
-    newPeople: { registrations: stats.newRegistrations, accepted: stats.firstRegisters, checkedIn: stats.newFaces } };
+    newPeople: { registrations: Number(newCounts?.newRegistrations ?? 0), accepted: Number(newCounts?.firstRegisters ?? 0), checkedIn: Number(newCounts?.newFaces ?? 0) } };
 }
 
 // Keep counts, audience pages, sends, and answer rules on the same cohort predicate.
@@ -2600,6 +2608,12 @@ function appendIndexedStatusRules(
 }
 
 function indexedMultiEventStatusPredicateSql(filter: GuestFilter): Prisma.Sql {
+  if (filter.startsWith("new_attendee_")) {
+    const status = filter === "new_attendee_registered" ? indexedRegisteredGuestPredicateSql()
+      : filter === "new_attendee_accepted" ? Prisma.sql`guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)})`
+      : Prisma.sql`(guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')`;
+    return Prisma.sql`(${status} AND ${newEventAttendeeSql()})`;
+  }
   if (["first_registers", "accepted_first_registers", "new_faces"].includes(filter)) {
     const cohort = filter === "new_faces"
       ? Prisma.sql`guest.status = 'checked_in'`
@@ -2632,6 +2646,12 @@ function indexedEventStatusPredicateSql(
   eventId: string,
   eventBoundary: { startsAt?: Date | null; date?: Date | null } | null,
 ): Prisma.Sql {
+  if (filter.startsWith("new_attendee_")) {
+    const status = filter === "new_attendee_registered" ? indexedRegisteredGuestPredicateSql()
+      : filter === "new_attendee_accepted" ? Prisma.sql`guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)})`
+      : Prisma.sql`(guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')`;
+    return Prisma.sql`(${status} AND ${newEventAttendeeSql()})`;
+  }
   if (["first_registers", "accepted_first_registers", "new_faces"].includes(filter)) {
     const cohort = filter === "new_faces"
       ? Prisma.sql`guest.status = 'checked_in'`

@@ -83,7 +83,6 @@ async function handleGET(request: Request) {
 
   try {
     requireGuestbookKey(request);
-    assertReadCredential();
     const url = new URL(request.url);
     const eventId = url.searchParams.get("event_id");
     const tracePersonId = url.searchParams.get("trace_person_id");
@@ -217,14 +216,6 @@ async function handleGET(request: Request) {
       if (!forceRefresh && hasLumaDb()) {
         try {
           const traceCacheKey = indexedTraceCacheKey(tracePersonId, traceEmail);
-          const cachedTrace = readCache(traceCacheKey);
-          if (cachedTrace) {
-            await debugLog(requestId, "trace person cache hit", {
-              recordCount: cachedTrace.records?.length || 0,
-              cacheExpiresAt: cachedTrace.cacheExpiresAt,
-            });
-            return Response.json({ ...await enrichTrace(cachedTrace), requestId });
-          }
           const indexStartedAt = Date.now();
           const indexedTrace = await getIndexedTrace({
             tracePersonId,
@@ -239,9 +230,11 @@ async function handleGET(request: Request) {
           return Response.json({ ...await enrichTrace(indexedTrace), requestId });
         } catch (error) {
           await debugLog(requestId, "trace person index skipped", { status: error.status || 500, message: error.message }, "error");
+          throw Object.assign(new Error("The activity index is unavailable."), { status: 503 });
         }
       }
 
+      if (!forceRefresh && !hasLumaDb()) throw Object.assign(new Error("The activity index is unavailable."), { status: 503 });
       const payload = await tracePersonActivity({
         requestId,
         tracePersonId,
@@ -323,75 +316,16 @@ async function handleGET(request: Request) {
         ? safeInt("LUMA_EVENT_SYNC_MAX_GUEST_PAGES", 1000, 1, 1000)
         : safeInt("LUMA_MAX_GUEST_PAGES_PER_EVENT", 3, 1, 10);
 
-      // The To Decide view depends on the local operator-decision marker, which
-      // is intentionally not present in Luma's remote guest payload cache.
-      const cached = forceRefresh || guestQuery.filter === "to_decide" || requiresIndexedPage ? null : readCache(cacheKey);
-      if (cached) {
-        const filteredPayload = filterGuestPayload(cached, guestQuery);
-        if (eventSwitchDiagnosticId) {
-          await debugLog(requestId, `${EVENT_SWITCH_DIAGNOSTICS_PREFIX}.server_guest_cache`, {
-            diagnosticId: eventSwitchDiagnosticId,
-            eventId,
-            guestCount: filteredPayload.guests.length,
-            durationMs: Date.now() - startedAt,
-          });
-        }
-        await debugLog(requestId, "event guests cache hit", {
-          eventId,
-          guestCount: filteredPayload.guests.length,
-          filter: guestQuery.filter,
-          searchLength: guestQuery.search.length,
-          cacheExpiresAt: cached.cacheExpiresAt,
-          durationMs: Date.now() - startedAt,
-        });
-        return Response.json({ ...filteredPayload, cached: true, snapshotReady: true, requestId });
-      }
-
-      if (!forceRefresh && hasLumaDb()) {
-        try {
-          const indexStartedAt = Date.now();
-          const diagnostic = createEventSwitchDiagnosticCollector(eventSwitchDiagnosticId, prioritizePage || requiresIndexedPage ? "overview.db" : "snapshot.db");
-          const indexedResult = prioritizePage || requiresIndexedPage
-            ? await loadIndexedGuestPage(eventId, guestQuery, diagnostic.report, knownEventBoundary)
-            : await loadIndexedGuestPayload(eventId, guestQuery, cacheKey, {
-                diagnosticReporter: diagnostic.report,
-                knownEventBoundary,
-              });
-          if (indexedResult) {
-            const { payload: indexedPayload, snapshotCached } = indexedResult;
-            if (eventSwitchDiagnosticId) {
-              await debugLog(requestId, `${EVENT_SWITCH_DIAGNOSTICS_PREFIX}.server_guests`, {
-                diagnosticId: eventSwitchDiagnosticId,
-                eventId,
-                prioritizePage,
-                phases: diagnostic.phases,
-                durationMs: Date.now() - indexStartedAt,
-              });
-            }
-            await debugLog(requestId, "event guests index hit", {
-              eventId,
-              guestCount: indexedPayload.guests.length,
-              totalGuestCount: indexedPayload.stats?.total ?? null,
-              filter: guestQuery.filter,
-              searchLength: guestQuery.search.length,
-              cursor: guestQuery.cursor,
-              includeSummary: guestQuery.includeSummary !== false,
-              prioritizePage,
-              snapshotCached,
-              durationMs: Date.now() - indexStartedAt,
-            });
-            return Response.json({ ...indexedPayload, snapshotReady: snapshotCached, requestId });
-          }
-          await debugLog(requestId, "event guests index empty", { eventId });
-        } catch (error) {
-          await debugLog(requestId, "event guests index skipped", { eventId, status: error.status || 500, message: error.message }, "error");
-          if (guestQuery.tagScope === "ever") {
-            return Response.json({ error: "Unable to load historical manual tag matches.", requestId }, { status: error.status || 500 });
-          }
-          if (guestQuery.latestTagId) {
-            return Response.json({ error: "Unable to load the latest-tag attendee group.", requestId }, { status: error.status || 500 });
-          }
-        }
+      // Routine reads are database-only. A webhook for one person is not proof
+      // that historical guests have been backfilled; disclose that separately.
+      if (!forceRefresh && url.searchParams.get("source") !== "live") {
+        if (!hasLumaDb()) throw Object.assign(new Error("The event index is unavailable."), { status: 503 });
+        const result = await listIndexedEventGuests(eventId, guestQuery, undefined, knownEventBoundary);
+        const sync = await prisma().lumaEventSyncState.findUnique({ where: { eventId } });
+        const { indexHasGuests, ...payload } = result;
+        const incomplete = !sync?.lastGuestSyncAt || sync.truncated;
+        return Response.json({ ...payload, indexed: true, indexIncomplete: incomplete,
+          truncated: incomplete, snapshotReady: indexHasGuests, requestId }, { headers: { "cache-control": "private, no-store" } });
       }
 
       await debugLog(requestId, "event guests cache miss", { eventId, pageSize, maxEntries, maxPages, forceRefresh });
@@ -518,16 +452,17 @@ async function handleGET(request: Request) {
     if (!forceRefresh && !refreshEventsOnly && hasLumaDb() && url.searchParams.get("source") !== "live") {
       try {
         const indexedEvents = await listIndexedEvents({ limit: indexedEventLimit });
-        if (indexedEvents.events.length) {
-          await debugLog(requestId, "events index hit", { eventCount: indexedEvents.events.length, indexedEventLimit });
-          return Response.json({ ...indexedEvents, requestId });
-        }
-        await debugLog(requestId, "events index empty", {});
+        await debugLog(requestId, "events index hit", { eventCount: indexedEvents.events.length, indexedEventLimit });
+        return Response.json({ ...indexedEvents, requestId }, { headers: { "cache-control": "private, no-store" } });
       } catch (error) {
         await debugLog(requestId, "events index skipped", { status: error.status || 500, message: error.message }, "error");
+        throw Object.assign(new Error("The event index is unavailable."), { status: 503 });
       }
     }
 
+    if (!forceRefresh && !refreshEventsOnly && url.searchParams.get("source") !== "live") {
+      throw Object.assign(new Error("The event index is unavailable."), { status: 503 });
+    }
     const cachedEvents = forceRefresh || refreshEventsOnly ? null : readCache("events");
     if (cachedEvents) {
       await debugLog(requestId, "events cache hit", { eventCount: cachedEvents.events?.length || 0, cacheExpiresAt: cachedEvents.cacheExpiresAt });

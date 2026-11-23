@@ -74,6 +74,21 @@ let audienceSuperTagGroupPromise: Promise<AudienceSuperTagGroup[]> | null = null
 let audienceEventCountCache: { expiresAt: number; counts: AudienceEventCount[] } | null = null;
 let audienceEventCountPromise: Promise<AudienceEventCount[]> | null = null;
 const audienceResolutionCache = new Map<string, { expiresAt: number; personIds: string[] }>();
+let audienceWebhookRevision = "";
+
+// Request-time revision checks keep serverless instances coherent even if they
+// were suspended when a webhook's NOTIFY was sent. This never queries Luma.
+async function refreshAudienceWebhookRevision() {
+  const rows = await prisma().$queryRaw<Array<{ revision: string }>>`
+    SELECT updated_at::text AS revision FROM luma_webhook_deliveries
+    WHERE status = 'processed' ORDER BY updated_at DESC LIMIT 1`;
+  const revision = rows[0]?.revision || "";
+  if (revision !== audienceWebhookRevision) {
+    audienceWebhookRevision = revision;
+    invalidateIndexedAudienceCaches();
+  }
+  return revision;
+}
 
 function invalidateAudienceTagGroupCache() {
   audienceTagGroupCache = null;
@@ -932,6 +947,7 @@ export async function searchIndexedPeopleByName(search: string, { limit = 20, of
 }
 
 export async function listIndexedAudienceTagGroups() {
+  const revision = await refreshAudienceWebhookRevision();
   if (audienceTagGroupCache && audienceTagGroupCache.expiresAt > Date.now()) return audienceTagGroupCache.groups;
   if (audienceTagGroupPromise) return audienceTagGroupPromise;
   audienceTagGroupPromise = prisma().$queryRaw<AudienceTagGroup[]>(Prisma.sql`
@@ -973,15 +989,16 @@ export async function listIndexedAudienceTagGroups() {
     ORDER BY tag_counts.count DESC, definition.name ASC
     LIMIT 500
   `).then((groups) => {
-    audienceTagGroupCache = { expiresAt: Date.now() + AUDIENCE_TAG_GROUP_CACHE_MS, groups };
+    if (revision === audienceWebhookRevision) audienceTagGroupCache = { expiresAt: Date.now() + AUDIENCE_TAG_GROUP_CACHE_MS, groups };
     return groups;
   }).finally(() => {
-    audienceTagGroupPromise = null;
+    if (revision === audienceWebhookRevision) audienceTagGroupPromise = null;
   });
   return audienceTagGroupPromise;
 }
 
 export async function listIndexedAudienceSuperTagGroups() {
+  const revision = await refreshAudienceWebhookRevision();
   if (audienceSuperTagGroupCache && audienceSuperTagGroupCache.expiresAt > Date.now()) return audienceSuperTagGroupCache.groups;
   if (audienceSuperTagGroupPromise) return audienceSuperTagGroupPromise;
   audienceSuperTagGroupPromise = prisma().$queryRaw<AudienceSuperTagGroup[]>(Prisma.sql`
@@ -1047,10 +1064,10 @@ export async function listIndexedAudienceSuperTagGroups() {
     LEFT JOIN grouped_rules ON grouped_rules.super_tag_id = super_tag.id
     ORDER BY member_counts.count DESC NULLS LAST, super_tag.name
   `).then((groups) => {
-    audienceSuperTagGroupCache = { expiresAt: Date.now() + AUDIENCE_TAG_GROUP_CACHE_MS, groups };
+    if (revision === audienceWebhookRevision) audienceSuperTagGroupCache = { expiresAt: Date.now() + AUDIENCE_TAG_GROUP_CACHE_MS, groups };
     return groups;
   }).finally(() => {
-    audienceSuperTagGroupPromise = null;
+    if (revision === audienceWebhookRevision) audienceSuperTagGroupPromise = null;
   });
   return audienceSuperTagGroupPromise;
 }
@@ -1237,8 +1254,9 @@ export async function resolveIndexedAudiencePersonIds(
   rawCriteria: IndexedAudienceCriteria,
   { useCache = true } = {},
 ) {
+  const revision = await refreshAudienceWebhookRevision();
   const criteria = await humanAudienceCriteria(rawCriteria);
-  const cacheKey = JSON.stringify(criteria);
+  const cacheKey = JSON.stringify([revision, criteria]);
   const cached = audienceResolutionCache.get(cacheKey);
   if (!emailRemovalEnabled() && useCache && cached && cached.expiresAt > Date.now()) return cached.personIds;
   const notAttendedEventIds = notAttendedAudienceEventIds([...(criteria.includeEventCohorts || []), ...(criteria.includeEventAnswers || [])]);
@@ -1800,6 +1818,7 @@ export async function listIndexedAudienceInviteRecipients(criteria: IndexedAudie
 }
 
 export async function listIndexedEventCohortCounts() {
+  const revision = await refreshAudienceWebhookRevision();
   if (audienceEventCountCache && audienceEventCountCache.expiresAt > Date.now()) return audienceEventCountCache.counts;
   if (audienceEventCountPromise) return audienceEventCountPromise;
   audienceEventCountPromise = prisma().$queryRaw<AudienceEventCount[]>(Prisma.sql`
@@ -1812,10 +1831,10 @@ export async function listIndexedEventCohortCounts() {
     FROM luma_event_guests AS guest
     GROUP BY guest.event_id
   `).then((counts) => {
-    audienceEventCountCache = { expiresAt: Date.now() + AUDIENCE_EVENT_COUNT_CACHE_MS, counts };
+    if (revision === audienceWebhookRevision) audienceEventCountCache = { expiresAt: Date.now() + AUDIENCE_EVENT_COUNT_CACHE_MS, counts };
     return counts;
   }).finally(() => {
-    audienceEventCountPromise = null;
+    if (revision === audienceWebhookRevision) audienceEventCountPromise = null;
   });
   return audienceEventCountPromise;
 }

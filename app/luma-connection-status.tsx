@@ -53,7 +53,6 @@ export function LumaConnectionStatus({ request }: { request: (input: string, ini
     try { setNotifications(readLumaNotifications(window.localStorage.getItem(LUMA_NOTIFICATIONS_STORAGE_KEY))); } catch {}
     void check();
     const refreshIfVisible = () => { if (document.visibilityState === "visible") void check(); };
-    const interval = window.setInterval(refreshIfVisible, 60_000);
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape" && panelRef.current?.open) {
         panelRef.current.open = false;
@@ -63,13 +62,10 @@ export function LumaConnectionStatus({ request }: { request: (input: string, ini
     const onPointer = (event: PointerEvent) => {
       if (panelRef.current && !panelRef.current.contains(event.target as Node)) panelRef.current.open = false;
     };
-    window.addEventListener("focus", refreshIfVisible);
     window.addEventListener(LUMA_SESSION_UPDATED_EVENT, refreshIfVisible);
     document.addEventListener("keydown", onKey);
     document.addEventListener("pointerdown", onPointer);
     return () => {
-      window.clearInterval(interval);
-      window.removeEventListener("focus", refreshIfVisible);
       window.removeEventListener(LUMA_SESSION_UPDATED_EVENT, refreshIfVisible);
       document.removeEventListener("keydown", onKey);
       document.removeEventListener("pointerdown", onPointer);

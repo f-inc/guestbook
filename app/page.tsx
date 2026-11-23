@@ -1,5 +1,6 @@
 "use client";
 
+import { subscribeToLiveUpdates } from "./live-updates";
 import { audienceCohortLabel, audienceAnswerCount, isNoShowAudienceGuest } from "./audience-cohort";
 
 import { AudienceVerification } from "./email-verification-ui";
@@ -128,7 +129,6 @@ const EVENT_PAGE_SIZE = 10;
 const EVENT_SCROLL_THRESHOLD = 96;
 const GUEST_PAGE_SIZE = 25;
 const GUEST_SEARCH_DEBOUNCE_MS = 250;
-const ACTIVE_GUEST_REFRESH_INTERVAL_MS = 60_000;
 const QUESTION_RESPONSE_BATCH_SIZE = 10;
 const EVENT_FEEDBACK_REQUEST_BATCH_SIZE = 50;
 const MAX_GUEST_NOTE_LENGTH = 20_000;
@@ -350,7 +350,6 @@ export default function Home() {
   const eventCatalogRefreshInFlightRef = useRef(false);
   const lastEventCatalogRefreshAtRef = useRef(0);
   const activeEventCountCheckInFlightRef = useRef(false);
-  const reconcileActiveEventCountsRef = useRef<() => void>(() => {});
   const eventListRef = useRef(null);
   const eventStartRef = useRef(null);
   const eventEndRef = useRef(null);
@@ -994,7 +993,7 @@ export default function Home() {
     if (!workspaceUrlReady || sessionStatus !== "ready" || !guestbookKey) return;
     let cancelled: boolean = false;
     loadLumaEvents({ cancelled: () => cancelled }).then(() => {
-      if (!cancelled) void refreshLumaEventCatalog({ reason: "load" });
+      // Further changes arrive through the live stream.
     });
     return () => {
       cancelled = true;
@@ -1003,18 +1002,9 @@ export default function Home() {
 
   useEffect(() => {
     if (sessionStatus !== "ready" || !guestbookKey) return;
-    const refreshIfVisible = () => {
-      if (document.visibilityState === "visible") void refreshLumaEventCatalog({ reason: "tab_active" });
-    };
-    document.addEventListener("visibilitychange", refreshIfVisible);
-    window.addEventListener("focus", refreshIfVisible);
     const refreshAfterSessionUpdate = () => { void refreshLumaEventCatalog({ reason: "session_updated", force: true }); };
     window.addEventListener(LUMA_SESSION_UPDATED_EVENT, refreshAfterSessionUpdate);
-    return () => {
-      document.removeEventListener("visibilitychange", refreshIfVisible);
-      window.removeEventListener("focus", refreshIfVisible);
-      window.removeEventListener(LUMA_SESSION_UPDATED_EVENT, refreshAfterSessionUpdate);
-    };
+    return () => window.removeEventListener(LUMA_SESSION_UPDATED_EVENT, refreshAfterSessionUpdate);
   }, [sessionStatus, guestbookKey]);
 
   useEffect(() => {
@@ -1031,9 +1021,6 @@ export default function Home() {
   const selectedEvent = getEvent(state, state.selectedEventId);
   const selectedEvents = selectedWorkspaceEvents(state);
   const selectedEventIdsKey = selectedEvents.map((event) => event.id).join("\u0000");
-  const selectedEventCountReadinessKey = selectedEvents
-    .map((event) => `${event.id}:${eventHeaderStatsReady(event) ? "ready" : "pending"}`)
-    .join("\u0000");
   const multiEventStatsKey = [...selectedEvents].map((event) => event.id).sort().join("\u0000");
   const multiEventMode = selectedEvents.length > 1;
   const uniqueWorkspaceStats = multiEventMode ? multiEventStatsByKey[multiEventStatsKey] || null : null;
@@ -1874,7 +1861,7 @@ export default function Home() {
       if (latestTagLabel) params.set("guest_latest_tag_label", latestTagLabel);
     }
     if (nextCursor) params.set("guest_cursor", nextCursor);
-    if (!force && event.guestStats) params.set("guest_summary", "0");
+    // Indexed reads include current summary counts after webhook changes.
     if (priority && !force) params.set("guest_mode", "page");
     if (force) params.set("refresh", "1");
     // EVENT_SWITCH_DIAGNOSTICS: only the active event navigation receives the correlation parameter.
@@ -2004,21 +1991,7 @@ export default function Home() {
       if (!force) activeEventCountCheckInFlightRef.current = false;
     }
   };
-  reconcileActiveEventCountsRef.current = () => void reconcileActiveEventCounts();
 
-  useEffect(() => {
-    if (sessionStatus !== "ready" || !guestbookKey || !selectedEventIdsKey) return;
-    const checkWhenActive = () => {
-      if (document.visibilityState === "visible") reconcileActiveEventCountsRef.current();
-    };
-    checkWhenActive();
-    document.addEventListener("visibilitychange", checkWhenActive);
-    window.addEventListener("focus", checkWhenActive);
-    return () => {
-      document.removeEventListener("visibilitychange", checkWhenActive);
-      window.removeEventListener("focus", checkWhenActive);
-    };
-  }, [sessionStatus, guestbookKey, selectedEventIdsKey, selectedEventCountReadinessKey]);
 
   const performSelectedEventSync = async (eventIds: string[]) => {
     const requestedEventIds = [...new Set(eventIds.filter(Boolean))];
@@ -2344,47 +2317,63 @@ export default function Home() {
     });
   }, [sessionStatus, selectedEventIdsKey, activeEventTab, guestStatusFilterKey, debouncedGuestSearch, guestTagFilterKey, guestLatestTagFilterKey, state.filters.guestHasNotes, state.filters.guestAttendedGreaterThan, guestAnswerFilterKey, guestSortField, guestDateSortDirection]);
 
+  const liveRefreshRef = useRef<() => Promise<void>>(async () => {});
+  const liveViewRefreshRef = useRef<() => Promise<void>>(async () => {});
+  const [liveUpdateStatus, setLiveUpdateStatus] = useState("connecting");
+  liveRefreshRef.current = async () => {
+    // Every read here is indexed. Reconnects recover missed notifications without
+    // querying Luma. Existing filters remain in force; pagination restarts safely.
+    const response = await apiFetch("/api/luma", { cache: "no-store" });
+    const catalog = await response.json();
+    if (!response.ok) throw new Error("Unable to load updated events.");
+    setState((current) => mergeLumaEventCatalogState(current, catalog));
+    await liveViewRefreshRef.current();
+  };
+  liveViewRefreshRef.current = async () => {
+    setActivityTraces({});
+    invalidateMultiEventStats();
+    universalPeopleSearchCacheRef.current.clear();
+    setGuestPageTarget(1);
+    if (eventDirectoryOpen) await loadEventDirectory({ force: true });
+    if (activeEventTab === "overview") {
+      if (multiEventMode) await loadMultiEventGuests();
+      else for (const event of selectedEvents) {
+        if (event.source === "luma") await loadEventGuests(event.id, { silent: true });
+      }
+    }
+    for (const event of selectedEvents) {
+      if (["analytics", "invite"].includes(activeEventTab)) await loadEventAnalytics(event.id);
+    }
+  };
   useEffect(() => {
-    if (
-      sessionStatus !== "ready"
-      || !guestbookKey
-      || activeEventTab !== "overview"
-      || multiEventMode
-      || selectedEvents.length !== 1
-      || selectedEvents[0].source !== "luma"
-      || selectedEventLoadingGuests
-      || selectedEventSyncing
-      || guestPageTarget !== 1
-      || loadedGuestPage !== 1
-    ) return;
-
-    const eventId = selectedEvents[0].id;
-    const refreshVisibleGuestPage = () => {
-      if (document.visibilityState !== "visible") return;
-      void loadEventGuests(eventId, { force: true, silent: true });
+    if (sessionStatus !== "ready" || !guestbookKey) return;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let running = false;
+    let dirty = false;
+    const refresh = async () => {
+      if (controller.signal.aborted || document.visibilityState !== "visible") return;
+      if (running) { dirty = true; return; }
+      running = true;
+      try {
+        do { dirty = false; await liveRefreshRef.current(); }
+        while (dirty && !controller.signal.aborted);
+      } catch { if (!controller.signal.aborted) setLiveUpdateStatus("unavailable"); }
+      finally { running = false; }
     };
-    const interval = window.setInterval(refreshVisibleGuestPage, ACTIVE_GUEST_REFRESH_INTERVAL_MS);
-    return () => window.clearInterval(interval);
-  }, [
-    sessionStatus,
-    guestbookKey,
-    activeEventTab,
-    multiEventMode,
-    selectedEventIdsKey,
-    selectedEventLoadingGuests,
-    selectedEventSyncing,
-    guestStatusFilterKey,
-    debouncedGuestSearch,
-    guestTagFilterKey,
-    guestLatestTagFilterKey,
-    state.filters.guestHasNotes,
-    state.filters.guestAttendedGreaterThan,
-    guestAnswerFilterKey,
-    guestSortField,
-    guestDateSortDirection,
-    guestPageTarget,
-    loadedGuestPage,
-  ]);
+    const visible = () => { if (dirty && document.visibilityState === "visible") void refresh(); };
+    document.addEventListener("visibilitychange", visible);
+    void subscribeToLiveUpdates((url, init) => apiFetch(url, init), (type) => {
+      if (controller.signal.aborted) return;
+      if (type === "ready") setLiveUpdateStatus("connected");
+      if (["disconnected", "unavailable", "unauthorized"].includes(type)) setLiveUpdateStatus("unavailable");
+      if (type !== "ready" && type !== "change") return;
+      dirty = true;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => void refresh(), 150);
+    }, controller.signal);
+    return () => { controller.abort(); if (timer) clearTimeout(timer); document.removeEventListener("visibilitychange", visible); };
+  }, [sessionStatus, guestbookKey]);
 
   useEffect(() => {
     if (sessionStatus !== "ready" || activeEventTab !== "overview") return;
@@ -4116,7 +4105,8 @@ export default function Home() {
         </button>
         <div className="topbar-actions">
           <a className="button" href="/merge">Merge station</a>
-          <LumaConnectionStatus request={apiFetch} />
+          <span role="status" className="muted" title="Changes are delivered through a live connection.">{liveUpdateStatus === "connected" ? "Live updates" : liveUpdateStatus === "connecting" ? "Connecting live updates…" : "Live updates disconnected — reconnecting…"}</span>
+            <LumaConnectionStatus request={apiFetch} />
           <WorkspaceSettings onOpenTags={openTagSettings} request={apiFetch} />
           <button className="button primary" type="button" onClick={() => setEventDraft(blankEventDraft())}>
             <Plus size={17} aria-hidden="true" />
@@ -4373,6 +4363,9 @@ export default function Home() {
                   <p className="eyebrow">
                     {multiEventMode ? `${formatEventSelectionRange(selectedEvents)} · Combined workspace` : `${selectedEvent.category} - ${formatDate(selectedEvent.date)}`}
                   </p>
+                  {selectedEvents.some((event) => event.indexIncomplete) ? (
+                    <p role="status">Historical guest coverage is incomplete. New changes arrive live; use Sync event to recover missing history.</p>
+                  ) : null}
                   <div className="event-title-row">
                     <h2>{multiEventMode ? `${selectedEvents.length} events` : selectedEvent.title}</h2>
                     {multiEventMode ? (
@@ -10498,6 +10491,7 @@ function mergeLumaGuests(current, lumaData, { append = false, preserveView = fal
           guests,
           guestsLoaded: true,
           guestLoadTruncated: preserveView ? event.guestLoadTruncated : lumaData.truncated,
+          indexIncomplete: lumaData.indexIncomplete ?? event.indexIncomplete,
           guestStats: lumaData.stats || event.guestStats,
           guestAnalyticsQuestions: lumaData.analyticsQuestions || event.guestAnalyticsQuestions || [],
           guestAnalyticsAllQuestions: lumaData.analyticsAllQuestions || event.guestAnalyticsAllQuestions || [],
@@ -10638,7 +10632,7 @@ function mergeIndexedEventState(existing, incoming) {
     "guests",
     "guestsLoaded",
     "guestLoadTruncated",
-    "guestStats",
+    "indexIncomplete",
     "guestAnalyticsQuestions",
     "guestAnalyticsAllQuestions",
     "guestTagDistribution",

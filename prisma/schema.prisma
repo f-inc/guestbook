@@ -269,6 +269,9 @@ model LumaWebhookDelivery {
   eventId       String?   @map("event_id")
   guestId       String?   @map("guest_id")
   payloadSha256 String    @map("payload_sha256")
+  payload       Json?
+  secretName    String?   @map("secret_name")
+  nextAttemptAt DateTime? @map("next_attempt_at") @db.Timestamptz(6)
   status        String
   attempts      Int       @default(1)
   receivedAt    DateTime  @default(now()) @map("received_at") @db.Timestamptz(6)

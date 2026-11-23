@@ -3,7 +3,9 @@ import { lumaEventDate } from "../event-date";
 
 type AnyRecord = Record<string, any>;
 
-export const LUMA_GUEST_WEBHOOK_TYPES = new Set(["guest.registered", "guest.updated"]);
+export const LUMA_GUEST_WEBHOOK_TYPES = new Set(["guest.registered", "guest.updated", "guest.refunded"]);
+export const LUMA_EVENT_WEBHOOK_TYPES = new Set(["event.created", "event.updated", "event.canceled", "calendar.event.added"]);
+export const LUMA_WEBHOOK_TYPES = [...LUMA_GUEST_WEBHOOK_TYPES, ...LUMA_EVENT_WEBHOOK_TYPES, "calendar.person.unsubscribed"];
 export const DEFAULT_LUMA_WEBHOOK_TOLERANCE_SECONDS = 300;
 export const MAX_LUMA_WEBHOOK_BODY_BYTES = 1_000_000;
 
@@ -170,7 +172,7 @@ export function normalizeLumaWebhookGuest(data: AnyRecord, _now = new Date()) {
   };
 }
 
-function normalizeWebhookEvent(event: AnyRecord) {
+export function normalizeWebhookEvent(event: AnyRecord) {
   const address = event.geo_address_json || {};
   const location = [address.address, address.full_address, address.city, address.region, address.country]
     .map((value) => stringValue(value))
@@ -189,7 +191,7 @@ function normalizeWebhookEvent(event: AnyRecord) {
     lumaUrl: stringValue(event.url),
     imageUrl: stringValue(event.cover_url),
     description: stringValue(event.description, event.description_md),
-    cancelled: false,
+    cancelled: ["canceled", "cancelled"].includes(event.status),
     guests: [],
     guestsLoaded: false,
     source: "luma",

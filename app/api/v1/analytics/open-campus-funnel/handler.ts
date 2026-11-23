@@ -1,3 +1,4 @@
+import { readIndexedSnapshot } from "../../../luma/read-snapshot";
 import { isRecipientMatching } from "../open-campus/recipients";
 import { loadFunnelHistory } from "./history";
 import { Prisma } from "@prisma/client";
@@ -59,7 +60,7 @@ export async function openCampusFunnel(
         Buffer.byteLength(JSON.stringify(input.matching)) > 131072)) fail("Invalid recipient matching payload.");
     const matching = isRecipientMatching(input.matching, now) && (input.from as string) >= "2026-09-20"
       ? { ...input.matching, secret: request.headers.get("authorization")!.slice(7) } : undefined;
-    const data = await db.$transaction(
+    const data = await readIndexedSnapshot(db,
       async (tx: Prisma.TransactionClient) => {
         const { events, guests } = await loadFunnelHistory(tx, key.eventIds);
         const complete = events.filter(
@@ -82,7 +83,6 @@ export async function openCampusFunnel(
           },
         };
       },
-      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 15000 },
     );
     return json({ data, source: "guestbook-index", asOf: now.toISOString() });
   } catch (error) {

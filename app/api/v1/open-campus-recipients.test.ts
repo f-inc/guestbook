@@ -37,7 +37,7 @@ test("POST authorizes before body/history and validates a bounded opaque payload
     integrationApiKey: { findUnique: async () => ({ scopes: ["events:read", "guests:read"], eventIds: ["oc"], revokedAt: null, expiresAt: null }) },
     lumaEvent: { findMany: async () => [{ ...event("oc", "Open Campus", 10), syncState: { lastGuestSyncAt: now, lastStatus: "success", truncated: false } }] },
     $queryRaw: async (sql: any) => sql.strings.join("").includes("attendee_tags") ? [] : [{ registered: 1, accepted: 1, checkedIn: 1, newRegistrations: 1, firstRegisters: 1, newFaces: 1 }],
-    $transaction: async (callback: any) => { historyReads++; return callback({
+    $transaction: async (callback: any, options: any) => { assert.equal(options.timeout, 15000); historyReads++; return callback({
       lumaEvent: { findMany: async (query: any) => { assert.deepEqual(query.where.eventId.in, ["oc"]); return [event("oc", "Open Campus", 10)]; } },
       lumaEventGuest: { findMany: async () => [guest("p", "oc", "p@example.test", 10)] },
     }); },

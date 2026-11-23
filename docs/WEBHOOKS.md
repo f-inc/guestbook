@@ -44,6 +44,8 @@ not proof that historical guest coverage is complete; the UI discloses this.
    connection for the same database as `DB_URL`. LISTEN cannot use transaction
    pooling. Port 6543 / `pgbouncer=true` is rejected; verify custom pool endpoints.
    `DB_URL` keeps its normal pooling; a session URL is accepted as listener fallback.
+   Supply the database provider's trusted PEM certificate in `DB_NOTIFY_CA_CERT`
+   for certificate and hostname verification on private-CA database connections.
 3. Deploy the web app and a **persistent, supervised** process running
    `npm run webhooks:worker` from the same release. The worker needs both database
    settings, matching identity mode, paired `LUMA_API_KEY[_N]` credentials and

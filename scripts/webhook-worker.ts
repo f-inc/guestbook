@@ -23,11 +23,9 @@ async function main() {
   lock.on("error", () => { process.exitCode = 1; stop(); });
   lock.on("end", () => { if (!stopping) { process.exitCode = 1; stop(); } });
   await lock.connect();
-  const result = await lock.query("SELECT pg_try_advisory_lock(821157032) AS owned");
-  if (!result.rows[0].owned) {
-    await lock.end();
-    throw new Error("Another webhook worker owns this database. Run one supervised worker.");
-  }
+  // Rolling replacements wait for the old process to release ownership. The
+  // database grants this lock without a polling loop or duplicate projections.
+  await lock.query("SELECT pg_advisory_lock(821157032)");
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
   const wake = async () => {

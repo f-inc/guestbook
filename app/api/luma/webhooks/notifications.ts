@@ -17,7 +17,16 @@ export function notificationDatabaseUrl(env: Record<string, string | undefined> 
 }
 
 export function notificationClient() {
-  return new Client({ connectionString: notificationDatabaseUrl(), connectionTimeoutMillis: 10_000,
+  let connectionString = notificationDatabaseUrl();
+  const ca = process.env.DB_NOTIFY_CA_CERT;
+  if (ca) {
+    const url = new URL(connectionString);
+    // pg's URL SSL options override its explicit SSL object. Use the supplied
+    // trust anchor with hostname/certificate verification kept mandatory.
+    for (const key of ["sslmode", "sslrootcert", "sslcert", "sslkey"]) url.searchParams.delete(key);
+    connectionString = url.toString();
+  }
+  return new Client({ connectionString, ...(ca ? { ssl: { ca, rejectUnauthorized: true } } : {}), connectionTimeoutMillis: 10_000,
     keepAlive: true, application_name: "guestbook-notifications" });
 }
 

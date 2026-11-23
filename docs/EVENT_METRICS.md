@@ -96,6 +96,13 @@ fail closed. Links show the current index, not an immutable historical export: w
 the current count differs from the chart's expected count, the page discloses this
 and asks users to refresh metrics. A new Guestbook hostname may require sign-in.
 
+## Campus people-list view
+
+Campus reuses the standalone metric people read through `GET /api/metrics`,
+authenticated with the existing server-only Guestbook workspace key. It accepts
+the same query as `/metrics`, preserves bounded database reads and pagination,
+and responds with private/no-store JSON. Deploy this endpoint before the Campus
+bridge/frontend. Existing standalone routes and integration-key APIs are unchanged.
 ### Open Campus recipient matching
 
 POST /api/v1/analytics/open-campus accepts a bounded nonce and list of HMAC-SHA256

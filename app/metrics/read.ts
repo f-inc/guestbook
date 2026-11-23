@@ -38,7 +38,7 @@ export function parseDrilldown(params: URLSearchParams) {
   )
     throw Error("Invalid metric link.");
   const stage = params.get("stage") ?? "";
-  if (!stageLabels[stage]) throw Error("Unknown metric stage.");
+  if (!Object.hasOwn(stageLabels, stage)) throw Error("Unknown metric stage.");
   const from = params.get("from") ?? "",
     to = params.get("to") ?? "";
   const valid = (s: string) =>

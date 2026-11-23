@@ -134,6 +134,9 @@ const EVENT_FEEDBACK_REQUEST_BATCH_SIZE = 50;
 const MAX_GUEST_NOTE_LENGTH = 20_000;
 const EVENT_CATALOG_REFRESH_COOLDOWN_MS = 5 * 60_000;
 const guestFilterOptions = [
+  { value: "new_attendee_registered", label: "New attendees: registered", color: "#316c86" },
+  { value: "new_attendee_accepted", label: "New attendees: accepted", color: "#047857" },
+  { value: "new_attendee_checked_in", label: "New attendees: checked in", color: "#1d4f47" },
   { value: "all", label: "All guests", color: "#706f69" },
   { value: "to_decide", label: "To Decide", color: "#9a6418" },
   { value: "checked_in", label: "Checked in", color: "#1d4f47" },

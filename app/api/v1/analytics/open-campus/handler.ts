@@ -89,7 +89,7 @@ export async function openCampusAnalytics(request: Request, db?: ReturnType<type
     }, { isolationLevel: "RepeatableRead" }) : undefined;
     const drilldownLinks: Record<string, string> = {};
     const filters = { registrations: "registered", accepted: "accepted", checkedIn: "checked_in" };
-    const newFilters = { registrations: "first_registers", accepted: "accepted_first_registers", checkedIn: "new_faces" };
+    const newFilters = { registrations: "new_attendee_registered", accepted: "new_attendee_accepted", checkedIn: "new_attendee_checked_in" };
     for (const stage of ["registrations", "accepted", "checkedIn"] as const) {
       for (const newOnly of [false, true]) {
         const total = newOnly ? totals.newPeople?.[stage] : totals[stage];

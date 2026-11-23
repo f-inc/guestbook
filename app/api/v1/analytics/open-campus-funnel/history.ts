@@ -1,3 +1,4 @@
+import { GUEST_REGISTERED_STATUSES } from "../../../luma/guest-query";
 import { Prisma } from "@prisma/client";
 import { fail } from "../../shared";
 export async function loadFunnelHistory(tx: Prisma.TransactionClient, historyScope: string[]) {
@@ -11,6 +12,7 @@ export async function loadFunnelHistory(tx: Prisma.TransactionClient, historySco
       location: true,
       category: true,
       startsAt: true,
+      date: true,
       endsAt: true,
       syncState: { select: { lastGuestSyncAt: true, lastStatus: true, truncated: true } },
     },
@@ -30,7 +32,11 @@ export async function loadFunnelHistory(tx: Prisma.TransactionClient, historySco
                   .filter((event) => /\bopen\s+campus\b/i.test(event.title))
                   .map((event) => event.eventId),
               },
-              registeredAt: { not: null },
+              OR: [
+                { registeredAt: { not: null } },
+                { approvedAt: { not: null } },
+                { status: { in: GUEST_REGISTERED_STATUSES } },
+              ],
             },
           ],
         },

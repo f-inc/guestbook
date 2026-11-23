@@ -33,10 +33,7 @@ calendar or live guest scans. Preserve scoped event access, complete-index discl
 Pacific dates, filter-bound drilldowns and private/no-store responses. Missing counts
 and capacities are unavailable. Deploy Guestbook and backend first. See docs/EVENT_METRICS.md.
 
-The first-event Open Campus funnel uses unique indexed people and a first non-Open
-Campus check-in cohort, followed through later outcomes. Keep identity processing
-inside Guestbook, report coverage and chronological exclusions, and leave the
-guest-pass stage unavailable until cross-service recipient matching is enabled.
+The IRL Open Campus funnel follows unique non-Open Campus event attendees in the selected period, including returning visitors, through later Open Campus attendance. Use private recipient matching for approved Guest Pass ownership within that exact cohort. Preserve indexed coverage and historical cutoff disclosures.
 
 Open Campus Guest Pass conversion supports explicitly authorized server-only
 recipient matching: accept per-request HMAC email tokens, keep exact alias joining
@@ -44,3 +41,11 @@ inside Guestbook and return counts only. Preserve event-key scoping, chronology,
 bounded payload/history reads, and no token/identity logging or persistence.
 
 Open Campus recipient matching may fall back from email to an unambiguous normalized full name, using rotating domain-separated HMAC tokens. Preserve email priority, unique recipient/name ownership, timestamped check-ins and milestone chronology. Reject ambiguous, fuzzy and first-name-only matches; never persist identity links from this read.
+
+IRL funnel Guest Pass conversion accepts the same bounded private recipient tokens as Open Campus metrics. Match only valid, chronological check-ins inside the in-period non-Open-Campus attendee cohort after all nested stages and filters; never reuse the independent Open Campus total. History before September 20, 2026 and missing matching stay unavailable. Aggregate responses never export private memberships or tokens.
+
+IRL Guest Pass means approved pass ownership among the already-narrowed checked-in people, including confirmed incoming recipients. Do not add campus-start or pass-issuance timing restrictions at this final stage. Keep earlier funnel stages unchanged.
+
+IRL event-visitor cohort includes every unique non-Open Campus attendee in the selected period, including returning visitors. Filters apply to the qualifying visit. Do not require first-ever visits or signup after the visit: allow advance registration for later Open Campus events. The actual later Open Campus check-in is decisive. Legacy firstVisit fields represent event visitors; keep chart, API and drilldowns aligned.
+
+Open Campus New overlays and recipient subsets mean no earlier recorded event check-in, not no earlier invitation or registration. Preserve attendance-based native Guestbook drilldowns.

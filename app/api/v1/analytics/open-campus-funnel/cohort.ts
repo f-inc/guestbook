@@ -9,6 +9,8 @@ export type FunnelEvent = {
   endsAt: Date | null;
 };
 export type FunnelGuest = {
+  person?: { name: string };
+  hasPriorEvent?: boolean;
   eventId: string;
   personId: string;
   emailLower: string | null;

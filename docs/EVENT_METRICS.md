@@ -103,3 +103,47 @@ authenticated with the existing server-only Guestbook workspace key. It accepts
 the same query as `/metrics`, preserves bounded database reads and pagination,
 and responds with private/no-store JSON. Deploy this endpoint before the Campus
 bridge/frontend. Existing standalone routes and integration-key APIs are unchanged.
+### Open Campus recipient matching
+
+POST /api/v1/analytics/open-campus accepts a bounded nonce and list of HMAC-SHA256
+recipient tokens with receivedAt timestamps. It requires the existing events:read
+and guests:read scopes, honors event restrictions, rejects raw email input, and
+returns guestPassMatches counts plus private request-local recipientIndex/isNew
+membership entries to the authenticated integration.
+The integration key keys domain-separated tokens and a fresh nonce rotates them
+per request. Never log, persist or return submitted tokens or recipient identities.
+
+Matching connects exact normalized indexed email aliases to unique people inside
+Guestbook. A selected Open Campus timestamped check-in must precede the recipient
+milestone; newcomers reuse the native hasPriorEvent=false flag. Missing flags never establish
+newcomers. Reads are capped at 1,000 recipients, 128 KiB streamed
+payload, 2,000 scoped history events and 100,000 indexed relevant guest rows.
+Restricted or incomplete history, ambiguous names and untimestamped visits
+limit matching. No live scans, index refreshes, writes or migrations occur.
+
+Open Campus metrics reuse getIndexedMultiEventStats in read-only mode, rather than
+a separate event-record aggregation. Select only catalogActive Open Campus events
+and exclude upcoming events. Counts are unique people, with newRegistrations,
+firstRegisters and newFaces using Guestbook’s stored hasPriorEvent flag (earlier
+invitations and registrations count as prior history). No cache-refresh writes
+are permitted from the aggregate API.
+
+Open Campus responses include six native workspace drilldownLinks selecting exact
+event IDs, event_view=all, tab=overview and existing guest_status filters: registered,
+accepted, checked_in, first_registers, accepted_first_registers and new_faces.
+The chart and native table use unique-person totals. Existing /metrics IRL journey
+links remain unchanged. Recipient New splits use the same hasPriorEvent flag.
+
+Private Open Campus recipient membership returns one request-local index per matched
+Guestbook identity, preserving total/New subset counts without exporting Guestbook
+person IDs, names, raw emails or HMAC tokens. Campus OS uses those indices only on
+the server to render its separately authorized native recipient cohort. The normal
+metrics response exposed by Campus OS strips all membership indices.
+
+Recipient matching falls back to normalized full names when email has no qualifying
+check-in. Names use NFKC, case folding and collapsed whitespace, require at least
+two words and exclude email-shaped values. Only request-scoped domain-separated
+HMAC name tokens cross services. A fallback must identify exactly one qualifying
+Guestbook identity and be unique among Campus OS recipients; ambiguous matches
+are excluded. Email matches take priority; no fuzzy or first-name-only matching,
+identity merging, persistence or relaxed event-date/milestone rules is introduced.

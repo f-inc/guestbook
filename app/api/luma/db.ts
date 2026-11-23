@@ -248,37 +248,16 @@ function indexedRegisteredGuestPredicateSql() {
   )`;
 }
 
-/** Read existing registrations without requiring or writing derived overview caches. */
-export async function readIndexedOpenCampusTotals(eventIds: string[], db = prisma(), historyEventIds: string[] = []) {
+/** Use the same unique-person aggregate as Guestbook's combined workspace, without cache writes. */
+export async function readIndexedOpenCampusTotals(eventIds: string[], db = prisma()) {
   const empty = { registrations: 0, accepted: 0, checkedIn: 0, newPeople: { registrations: 0, accepted: 0, checkedIn: 0 } };
   if (!eventIds.length) return empty;
   if (eventIds.length > 500) throw new Error("Too many Open Campus events.");
-  // Read-only observed attendance history. Invitations never make a person returning.
-  const firstVisit = Prisma.sql`NOT EXISTS (
-    SELECT 1 FROM luma_event_guests AS earlier
-    JOIN luma_events AS earlier_event ON earlier_event.event_id = earlier.event_id
-    WHERE earlier.person_id = guest.person_id AND earlier.event_id <> guest.event_id
-      ${historyEventIds.length ? Prisma.sql`AND earlier.event_id IN (${Prisma.join(historyEventIds)})` : Prisma.empty}
-      AND (earlier.checked_in_at IS NOT NULL OR earlier.status = 'checked_in')
-      AND COALESCE(earlier.checked_in_at, earlier_event.starts_at, earlier_event.date::timestamp AT TIME ZONE 'UTC')
-        < COALESCE(current_event.starts_at, current_event.date::timestamp AT TIME ZONE 'UTC')
-  )`;
-  const rows = await db.$queryRaw<Array<{ registrations: number; accepted: number; checkedIn: number; newRegistrations: number; newAccepted: number; newCheckedIn: number }>>(Prisma.sql`
-    SELECT
-      COUNT(*) FILTER (WHERE ${indexedRegisteredGuestPredicateSql()})::integer AS registrations,
-      COUNT(*) FILTER (WHERE guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)}))::integer AS accepted,
-      COUNT(*) FILTER (WHERE guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in')::integer AS "checkedIn",
-      COUNT(*) FILTER (WHERE ${indexedRegisteredGuestPredicateSql()} AND ${firstVisit})::integer AS "newRegistrations",
-      COUNT(*) FILTER (WHERE guest.status IN (${Prisma.join(GUEST_ACCEPTED_STATUSES)}) AND ${firstVisit})::integer AS "newAccepted",
-      COUNT(*) FILTER (WHERE (guest.checked_in_at IS NOT NULL OR guest.status = 'checked_in') AND ${firstVisit})::integer AS "newCheckedIn"
-    FROM luma_event_guests AS guest
-    JOIN luma_events AS current_event ON current_event.event_id = guest.event_id
-    WHERE guest.event_id IN (${Prisma.join(eventIds)})
-  `);
-  const row = rows[0];
-  if (!row) return empty;
-  return { registrations:row.registrations,accepted:row.accepted,checkedIn:row.checkedIn,
-    newPeople: row.newRegistrations === undefined ? null : { registrations:row.newRegistrations,accepted:row.newAccepted,checkedIn:row.newCheckedIn } };
+  const result = await getIndexedMultiEventStats(eventIds, { db, refreshMissing: false });
+  if (!result) return empty;
+  const stats = result.stats;
+  return { registrations: stats.registered, accepted: stats.accepted, checkedIn: stats.checkedIn,
+    newPeople: { registrations: stats.newRegistrations, accepted: stats.firstRegisters, checkedIn: stats.newFaces } };
 }
 
 // Keep counts, audience pages, sends, and answer rules on the same cohort predicate.
@@ -2956,11 +2935,11 @@ export async function getIndexedEventAnalytics(
   };
 }
 
-export async function getIndexedMultiEventStats(eventIds: string[]) {
+export async function getIndexedMultiEventStats(eventIds: string[], options: { db?: PrismaClient; refreshMissing?: boolean } = {}) {
   const boundedEventIds = [...new Set(eventIds.filter(Boolean))].slice(0, MAX_SELECTED_EVENT_IDS);
   if (!boundedEventIds.length) return null;
-  const db = prisma();
-  const uncachedEvents = await db.lumaEvent.findMany({
+  const db = options.db ?? prisma();
+  const uncachedEvents = options.refreshMissing === false ? [] : await db.lumaEvent.findMany({
     where: {
       eventId: { in: boundedEventIds },
       overviewStatsUpdatedAt: null,

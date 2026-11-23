@@ -39,11 +39,13 @@ export async function loadFunnelHistory(tx: Prisma.TransactionClient, historySco
         select: {
           eventId: true,
           personId: true,
+          person: { select: { name: true } },
           emailLower: true,
           registeredAt: true,
           approvedAt: true,
           checkedInAt: true,
           status: true,
+          hasPriorEvent: true,
         },
       })
     : [];

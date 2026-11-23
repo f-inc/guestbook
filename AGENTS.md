@@ -37,3 +37,10 @@ The first-event Open Campus funnel uses unique indexed people and a first non-Op
 Campus check-in cohort, followed through later outcomes. Keep identity processing
 inside Guestbook, report coverage and chronological exclusions, and leave the
 guest-pass stage unavailable until cross-service recipient matching is enabled.
+
+Open Campus Guest Pass conversion supports explicitly authorized server-only
+recipient matching: accept per-request HMAC email tokens, keep exact alias joining
+inside Guestbook and return counts only. Preserve event-key scoping, chronology,
+bounded payload/history reads, and no token/identity logging or persistence.
+
+Open Campus recipient matching may fall back from email to an unambiguous normalized full name, using rotating domain-separated HMAC tokens. Preserve email priority, unique recipient/name ownership, timestamped check-ins and milestone chronology. Reject ambiguous, fuzzy and first-name-only matches; never persist identity links from this read.

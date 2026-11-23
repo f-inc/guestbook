@@ -1,3 +1,5 @@
+import { loadFunnelHistory } from "../open-campus-funnel/history";
+import { evaluateRecipientMatches, type Recipient } from "./recipients";
 import { prisma, readIndexedOpenCampusTotals } from "../../../luma/db";
 import { apiError, authorize, fail, json } from "../../shared";
 
@@ -7,6 +9,28 @@ export async function openCampusAnalytics(request: Request, db?: ReturnType<type
     db ??= prisma();
     const key = await authorize(request, "events:read", db);
     if (!key.scopes.includes("guests:read")) fail("This API key requires guests:read.", 403);
+    let matching: { nonce: string; recipients: Recipient[] } | null = null;
+    if (request.method === "POST") {
+      if (!request.headers.get("content-type")?.startsWith("application/json")) fail("JSON required.", 415);
+      const reader = request.body?.getReader();
+      if (!reader) fail("Recipient payload required.");
+      const chunks: Uint8Array[] = []; let size = 0;
+      while (true) {
+        const { done, value } = await reader.read(); if (done) break;
+        size += value.byteLength;
+        if (size > 131072) { await reader.cancel(); fail("Recipient payload too large.", 413); }
+        chunks.push(value);
+      }
+      let body: any;
+      try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { fail("Invalid recipient payload."); }
+      if (!body || Object.keys(body).some(name => !["nonce", "recipients"].includes(name)) ||
+          typeof body.nonce !== "string" || !/^[a-f0-9]{64}$/.test(body.nonce) || !Array.isArray(body.recipients) || body.recipients.length > 1000 ||
+          body.recipients.some((r: any) => !r || Object.keys(r).some(name => !["token", "nameTokens", "receivedAt"].includes(name)) ||
+            (r.nameTokens !== undefined && (!Array.isArray(r.nameTokens) || r.nameTokens.length > 2 || r.nameTokens.some((token: unknown) => typeof token !== "string" || !/^[a-f0-9]{64}$/.test(token)))) ||
+            typeof r.token !== "string" || !/^[a-f0-9]{64}$/.test(r.token) || typeof r.receivedAt !== "string" ||
+            !Number.isFinite(Date.parse(r.receivedAt)) || new Date(r.receivedAt).toISOString() !== r.receivedAt || Date.parse(r.receivedAt) > now.getTime())) fail("Invalid recipient payload.");
+      matching = body;
+    }
     const params = new URL(request.url).searchParams;
     if ([...params.keys()].some(name => !["period", "from", "to"].includes(name)) ||
         ["period", "from", "to"].some(name => params.getAll(name).length > 1)) fail("Invalid analytics query.");
@@ -26,6 +50,7 @@ export async function openCampusAnalytics(request: Request, db?: ReturnType<type
     const end = custom ? pacificMidnight(nextDay(to!)) : now;
     const candidates = await db.lumaEvent.findMany({
       where: {
+        catalogActive: true,
         title: { contains: "open campus", mode: "insensitive" },
         ...(key.eventIds.length ? { eventId: { in: key.eventIds } } : {}),
         ...(custom ? { OR: [
@@ -35,7 +60,10 @@ export async function openCampusAnalytics(request: Request, db?: ReturnType<type
         ] } : period === "30d" ? { OR: [
           { startsAt: { gte: since, lte: now } },
           { startsAt: null, date: { gte: since, lte: now } },
-        ] } : {}),
+        ] } : { OR: [
+          { startsAt: { lte: now } },
+          { startsAt: null, date: { lte: now } },
+        ] }),
       },
       take: 501,
       select: {
@@ -53,8 +81,25 @@ export async function openCampusAnalytics(request: Request, db?: ReturnType<type
       }
       if (!updatedAt || sync.lastGuestSyncAt < updatedAt) updatedAt = sync.lastGuestSyncAt;
     }
-    const totals = await readIndexedOpenCampusTotals(events.map(event => event.eventId), db, key.eventIds);
-    return json({ data: { ...totals, eventCount: events.length, updatedAt: updatedAt?.toISOString() ?? null }, source: "guestbook-index", complete: true });
+    const totals = await readIndexedOpenCampusTotals(events.map(event => event.eventId), db);
+    const guestPassMatches = matching ? await db.$transaction(async tx => {
+      const history = await loadFunnelHistory(tx, key.eventIds);
+      return evaluateRecipientMatches(history.events, history.guests, events.map(event => event.eventId), matching!.recipients,
+        request.headers.get("authorization")!.slice(7), matching!.nonce, now);
+    }, { isolationLevel: "RepeatableRead" }) : undefined;
+    const drilldownLinks: Record<string, string> = {};
+    const filters = { registrations: "registered", accepted: "accepted", checkedIn: "checked_in" };
+    const newFilters = { registrations: "first_registers", accepted: "accepted_first_registers", checkedIn: "new_faces" };
+    for (const stage of ["registrations", "accepted", "checkedIn"] as const) {
+      for (const newOnly of [false, true]) {
+        const total = newOnly ? totals.newPeople?.[stage] : totals[stage];
+        if (total === null || total === undefined || !events.length) continue;
+        const params = new URLSearchParams({ event_view: "all", tab: "overview", guest_status: newOnly ? newFilters[stage] : filters[stage] });
+        for (const event of events) params.append("event", event.eventId);
+        drilldownLinks[newOnly ? `new${stage[0].toUpperCase()}${stage.slice(1)}` : stage] = `/?${params}`;
+      }
+    }
+    return json({ data: { ...totals, drilldownLinks, ...(guestPassMatches ? { guestPassMatches } : {}), eventCount: events.length, updatedAt: updatedAt?.toISOString() ?? null }, source: "guestbook-index", complete: true });
   } catch (error) { return apiError(error); }
 }
 

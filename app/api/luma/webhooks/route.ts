@@ -1,188 +1,81 @@
+import { requireGuestbookKey } from "../../session-auth";
+import { createHash } from "node:crypto";
+import { prisma, hasLumaDb } from "../db";
 import { optOutFromWebhook } from "../tracking-policy";
-import { appendFile, mkdir } from "node:fs/promises";
-import nodePath from "node:path";
-import {
-  prisma,
-  claimLumaWebhookDelivery,
-  finishLumaWebhookDelivery,
-  hasLumaDb,
-  invalidateIndexedAudienceCaches,
-  recordLumaWebhookState,
-  refreshIndexedEventOverviewStats,
-  runAutomaticTagClassifier,
-  upsertNormalizedLumaSnapshot,
-} from "../db";
-import {
-  lumaWebhookSecrets,
-  MAX_LUMA_WEBHOOK_BODY_BYTES,
-  normalizeLumaWebhookGuest,
-  parseLumaGuestWebhook,
-  verifyLumaWebhook,
-} from "./webhook";
+import { enqueueWebhook } from "./inbox";
+import { parseWebhookEnvelope } from "./envelope";
+import { logWebhook } from "./diagnostics";
+import { lumaWebhookSecrets, MAX_LUMA_WEBHOOK_BODY_BYTES, verifyLumaWebhook } from "./webhook";
 
 export const runtime = "nodejs";
 
-type HttpError = Error & { status?: number };
-const DEFAULT_DEBUG_LOG_PATH = nodePath.join(process.cwd(), ".debug", "luma-api.log");
-const CACHE_KEY = "__guestbookLumaCache";
-
 export async function POST(request: Request) {
-  const startedAt = Date.now();
-  const webhookId = request.headers.get("webhook-id")?.trim() || "";
-  const requestId = webhookId ? `luma-webhook-${webhookId.slice(0, 80)}` : `luma-webhook-${Date.now().toString(36)}`;
-  let claimed = false;
-
+  const requestId = `luma-webhook-${crypto.randomUUID()}`;
   try {
-    const contentLength = Number(request.headers.get("content-length"));
-    if (Number.isFinite(contentLength) && contentLength > MAX_LUMA_WEBHOOK_BODY_BYTES) {
-      throw httpError("Webhook body is too large.", 413);
-    }
-    if (!webhookId || webhookId.length > 255 || /[\r\n]/.test(webhookId)) {
-      throw httpError("A valid Webhook-Id header is required.", 400);
-    }
-    if (!hasLumaDb()) throw httpError("Luma webhooks require DB_URL.", 503);
-
-    const secrets = lumaWebhookSecrets();
-    if (!secrets.length) throw httpError("Luma webhooks require LUMA_WEBHOOK_SECRET.", 503);
-
-    const rawBody = await request.text();
-    if (Buffer.byteLength(rawBody, "utf8") > MAX_LUMA_WEBHOOK_BODY_BYTES) {
-      throw httpError("Webhook body is too large.", 413);
-    }
-    const verification = verifyLumaWebhook({
-      rawBody,
+    const webhookId = request.headers.get("webhook-id")?.trim() || "";
+    if (!/^[a-z0-9_-]{1,255}$/i.test(webhookId)) throw httpError("A valid Webhook-Id header is required.", 400);
+    if (!hasLumaDb() || !lumaWebhookSecrets().length) throw httpError("Webhook configuration is unavailable.", 503);
+    const rawBody = await boundedWebhookBody(request);
+    const verification = verifyLumaWebhook({ rawBody,
       signatureHeader: request.headers.get("webhook-signature"),
       timestampHeader: request.headers.get("webhook-timestamp")?.trim() || null,
-      secrets,
-      toleranceSeconds: webhookToleranceSeconds(),
+      secrets: lumaWebhookSecrets(),
+      toleranceSeconds: Math.min(3600, Math.max(60, Number(process.env.LUMA_WEBHOOK_TOLERANCE_SECONDS) || 300)),
     });
-    if (!verification.ok) {
-      await webhookLog(requestId, "signature rejected", { reason: verification.reason });
-      throw httpError("Invalid Luma webhook signature.", 401);
-    }
-
-    const optOut = optOutFromWebhook(JSON.parse(rawBody), verification.secretName);
-    if (optOut) {
-      // Upsert is idempotent. Do not turn a generic opt-out into a spam report.
-      await prisma().lumaCalendarOptOut.upsert({where: {calendarId_emailLower: optOut}, create: optOut, update: {}});
-      await webhookLog(requestId, "calendar opt-out recorded", {calendarId: optOut.calendarId});
-      return json({ok: true, webhookId});
-    }
-    const parsed = parseLumaGuestWebhook(rawBody);
-    if (!parsed.supported) {
-      await webhookLog(requestId, "event ignored", { webhookType: parsed.type, durationMs: Date.now() - startedAt });
-      return json({ ok: true, ignored: true, webhookId, type: parsed.type });
-    }
-
-    const claim = await claimLumaWebhookDelivery({
-      webhookId,
-      webhookType: parsed.type,
-      eventId: parsed.eventId,
-      guestId: parsed.guestId,
-      payloadSha256: parsed.payloadSha256,
-    });
-    if (!claim.claimed) {
-      await webhookLog(requestId, "duplicate acknowledged", {
-        webhookType: parsed.type,
-        eventId: parsed.eventId,
-        attempt: claim.attempt,
-        durationMs: Date.now() - startedAt,
-      });
-      return json({ ok: true, duplicate: true, webhookId });
-    }
-    claimed = true;
-
-    const normalized = normalizeLumaWebhookGuest(parsed.data);
-    await upsertNormalizedLumaSnapshot({
-      rawEvent: normalized.rawEvent,
-      event: normalized.event,
-      guests: [normalized.guest],
-      rawGuests: [normalized.rawGuest],
-    });
-    if (parsed.data.approval_status !== "invited") {
-
-      await prisma().lumaInviteTracking.updateMany({
-        where: {eventId: parsed.eventId, personId: parsed.personId, status: {in: ["sent", "delivered", "opened", "clicked"]}, checkedAt: {not: null}, nextCheckAt: {not: null}},
-        data: {nextCheckAt: null, priority: 0},
-      });
-    }
-    await refreshIndexedEventOverviewStats([parsed.eventId]);
-    const automaticTags = await runAutomaticTagClassifier({ personIds: [parsed.personId] });
-    await recordLumaWebhookState({ eventId: parsed.eventId, webhookId });
-    invalidateIndexedAudienceCaches();
-    clearWebhookCaches({
-      eventId: parsed.eventId,
-      personId: parsed.personId,
-      email: normalized.guest.person.email,
-    });
-    await finishLumaWebhookDelivery(webhookId);
-
-    await webhookLog(requestId, "guest reconciled", {
-      webhookType: parsed.type,
-      eventId: parsed.eventId,
-      attempt: claim.attempt,
-      checkedIn: Boolean(normalized.guest.checkedInAt),
-      automaticTagMode: automaticTags.mode,
-      automaticTagChanges: automaticTags.changedCount,
-      durationMs: Date.now() - startedAt,
-    });
-    return json({
-      ok: true,
-      webhookId,
-      eventId: parsed.eventId,
-      guestId: parsed.guestId,
-      reconciled: true,
-    });
+    if (!verification.ok) throw httpError("Invalid Luma webhook signature.", 401);
+    const envelope = parseWebhookEnvelope(rawBody);
+    if (!envelope.supported) return json({ ok: true, ignored: true, type: envelope.type, requestId });
+    // Validate secret-to-calendar scope before durably accepting opt-outs.
+    optOutFromWebhook(envelope.payload, verification.secretName);
+    const result = await enqueueWebhook(webhookId, envelope, verification.secretName);
+    await logWebhook("queued", { requestId, type: envelope.type, duplicate: result.duplicate });
+    // Acceptance means durably queued, not yet projected into the guest index.
+    return json({ ok: true, queued: true, ...result, requestId }, 202);
   } catch (error: any) {
-    if (claimed) await finishLumaWebhookDelivery(webhookId, error).catch(() => {});
-    const status = Number(error?.status) || 500;
-    await webhookLog(requestId, "processing error", {
-      status,
-      message: safeErrorMessage(error),
-      durationMs: Date.now() - startedAt,
-    });
-    return json({ ok: false, error: status >= 500 ? "Unable to process Luma webhook." : error.message, webhookId }, status);
+    const status = Number(error?.status) || 503;
+    await logWebhook("rejected", { requestId, status });
+    return json({ ok: false, error: status >= 500 ? "Unable to accept Luma webhook." : error.message, requestId }, status);
   }
 }
 
-function clearWebhookCaches({ eventId, personId, email }: { eventId: string; personId: string; email: string }) {
-  const cache = (globalThis as typeof globalThis & { [CACHE_KEY]?: Map<string, unknown> })[CACHE_KEY];
-  if (!cache) return;
-  cache.delete("events");
-  cache.delete(`event-guests:v3:${eventId}`);
-  cache.delete(`event-guests:v2:${eventId}`);
-  cache.delete(`event-guests:${eventId}`);
-  const normalizedPersonId = personId.trim().toLowerCase();
-  const normalizedEmail = email.trim().toLowerCase();
-  cache.delete(`trace-person:${normalizedPersonId || "no-id"}:${normalizedEmail || "no-email"}`);
-  cache.delete(`trace-person:${normalizedPersonId || "no-id"}:no-email`);
-  cache.delete(`trace-person:no-id:${normalizedEmail || "no-email"}`);
+export async function GET(request: Request) {
+  try {
+    requireGuestbookKey(request);
+    const summary = await prisma().$queryRaw<Array<{ status: string; count: number; oldest: Date; newest: Date }>>`
+      SELECT status, COUNT(*)::int AS count, MIN(received_at) AS oldest, MAX(received_at) AS newest
+      FROM luma_webhook_deliveries GROUP BY status`;
+    const workers = await prisma().$queryRaw<Array<{ active: boolean }>>`
+      SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND classid = 0 AND objid = 821157032 AND granted) AS active`;
+    const target = new URL(process.env.DB_URL!);
+    const databaseFingerprint = createHash("sha256").update(JSON.stringify([target.hostname, target.pathname, target.username])).digest("hex");
+    return json({ configured: lumaWebhookSecrets().length > 0, workerActive: workers[0]?.active || false, deliveries: summary, databaseFingerprint });
+  } catch (error: any) {
+    return json({ error: "Webhook status unavailable." }, Number(error?.status) || 503);
+  }
 }
 
-function webhookToleranceSeconds() {
-  const configured = Number(process.env.LUMA_WEBHOOK_TOLERANCE_SECONDS);
-  return Number.isFinite(configured) ? Math.min(3600, Math.max(60, Math.floor(configured))) : 300;
+export async function boundedWebhookBody(request: Request) {
+  if (Number(request.headers.get("content-length")) > MAX_LUMA_WEBHOOK_BODY_BYTES) throw httpError("Webhook body is too large.", 413);
+  const reader = request.body?.getReader();
+  if (!reader) throw httpError("Webhook body is required.", 400);
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      bytes += chunk.value.byteLength;
+      if (bytes > MAX_LUMA_WEBHOOK_BODY_BYTES) {
+        await reader.cancel();
+        throw httpError("Webhook body is too large.", 413);
+      }
+      chunks.push(chunk.value);
+    }
+  } finally { reader.releaseLock(); }
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 function json(body: unknown, status = 200) {
   return Response.json(body, { status, headers: { "cache-control": "private, no-store" } });
 }
-
-function httpError(message: string, status: number) {
-  return Object.assign(new Error(message), { status }) as HttpError;
-}
-
-function safeErrorMessage(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.replace(/[\r\n]+/g, " ").slice(0, 500);
-}
-
-async function webhookLog(requestId: string, event: string, details: Record<string, unknown>) {
-  try {
-    const path = process.env.GUESTBOOK_DEBUG_LOG_PATH || DEFAULT_DEBUG_LOG_PATH;
-    await mkdir(nodePath.dirname(path), { recursive: true });
-    await appendFile(path, `${JSON.stringify({ timestamp: new Date().toISOString(), requestId, event: `webhook ${event}`, ...details })}\n`, "utf8");
-  } catch {
-    // Diagnostics must never change webhook acknowledgement behavior.
-  }
-}
+function httpError(message: string, status: number) { return Object.assign(new Error(message), { status }); }

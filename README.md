@@ -41,11 +41,15 @@ GUESTBOOK_SYNC_SECRET=replace_with_random_sync_secret
 LUMA_WEBHOOK_SECRET=whsec_secret_from_luma
 ```
 
-Create a Luma webhook in Calendar Settings → Developer that sends `guest.registered`
-and `guest.updated` events to `https://your-guestbook.example/api/luma/webhooks`.
+Create a Luma webhook in Calendar Settings → Developer that sends guest and event
+changes to `https://your-guestbook.example/api/luma/webhooks`.
 Use `LUMA_WEBHOOK_SECRET_2`, `LUMA_WEBHOOK_SECRET_3`, and so on when multiple
-calendar webhooks use different signing secrets. Webhook delivery updates one guest
-at a time; `/api/luma/sync` remains the bounded recovery and consistency scan.
+calendar webhooks use different signing secrets. Deliveries are durably queued;
+`npm run webhooks:worker` reconciles affected resources and pushes changes to open
+browsers. Set `DB_NOTIFY_URL` to a session-mode connection for the same database on
+both services. `/api/luma/sync` remains bounded manual recovery. Follow the
+[webhook cutover runbook](docs/WEBHOOKS.md), including the separately authorized
+inbox migration, before switching production.
 
 Guestbook merges and deduplicates managed events from every configured API key and signed-in session token. API-key access is preferred when both credential types can access the same event; session-only events use Luma's bounded signed-in manager endpoints for event details and guest loading.
 
@@ -70,8 +74,7 @@ Open `http://localhost:3030`.
 The header's notification bell shows a badge for unresolved Luma session issues.
 Notifications persist in browser storage across reloads and cannot be dismissed;
 they clear when a successful check confirms resolution. Opening the panel does
-not clear its badge. Checks run on load, window focus, and every minute while
-visible. **Check again** lets you verify a fix immediately. Temporary outages keep
+not clear its badge. Checks run on load and after a session update. **Check again** lets you verify a fix immediately. Temporary outages keep
 existing session warnings. Each check reads one future event per server session,
 with a 10-second timeout; it does not fetch guests, sync events, or access the
 database. Calendar API keys are not validated by this check. A connected session
@@ -96,7 +99,11 @@ network failures, and server errors do not replay writes. Session updates wait f
 Luma's background task before reporting success. Catalog refreshes using a browser
 session do not archive other indexed events based on that account's visibility.
 
-Guestbook refreshes the lightweight Luma event catalog on app load and when the browser tab becomes active. For the selected event, it compares Luma's approved, pending, waitlist, invited, declined, and checked-in counts with the local snapshot before fetching guests.
+Guestbook reads indexed events and guests on load. Webhook-driven server-sent
+events update open browsers without timed guest refreshes or focus-triggered Luma
+count/catalog checks. Reconnects reload indexed state only. Explicit refresh/sync
+controls remain available for bounded recovery and profile-only changes that Luma
+does not notify. See [webhook coverage and setup](docs/WEBHOOKS.md).
 
 The former hourly full-sync Worker is archived. The `/api/luma/sync` endpoint remains available as a deliberate recovery or backfill command:
 

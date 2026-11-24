@@ -49,3 +49,13 @@ IRL Guest Pass means approved pass ownership among the already-narrowed checked-
 IRL event-visitor cohort includes every unique non-Open Campus attendee in the selected period, including returning visitors. Filters apply to the qualifying visit. Do not require first-ever visits or signup after the visit: allow advance registration for later Open Campus events. The actual later Open Campus check-in is decisive. Legacy firstVisit fields represent event visitors; keep chart, API and drilldowns aligned.
 
 Open Campus New overlays and recipient subsets mean no earlier recorded event check-in, not no earlier invitation or registration. Preserve attendance-based native Guestbook drilldowns.
+
+### Campus database namespace
+
+The shared Campus destination uses the private `guestbook` schema while retaining
+existing table names and IDs. Keep `schema=guestbook` consistent on all application
+and worker database URLs; the notification connection must reach the same database.
+The destination schema is owned by Campus Supabase migrations. Never schema-push
+this project into the shared database. Keep the original database authoritative
+until concurrent changes are reconciled and the receiver, projection worker and
+all other writers switch together. See docs/WEBHOOKS.md.

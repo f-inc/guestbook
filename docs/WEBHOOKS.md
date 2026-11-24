@@ -99,3 +99,21 @@ deduplication, claims, retries, crash recovery, current-state reconciliation,
 cancellation, database-only reads and authenticated SSE. It never uses application
 credentials. Requires `initdb` and `pg_ctl`. Unit tests cover fragmented SSE and
 shared listener lifecycle. No production fixtures are created.
+
+## Shared Campus database compatibility
+
+The receiver and workers can retain the existing webhook URL and subscription
+secrets while connecting to a dedicated `guestbook` namespace in the Campus
+database. Set `schema=guestbook` on `DB_URL` and every `DB_RUNTIME_URL`; retain the
+same schema on all web and worker deployments. `DB_NOTIFY_URL` must connect to
+the same database through a direct/session connection. LISTEN is database-wide,
+so its client strips Prisma's schema parameter without changing where projections
+are written.
+
+Create the destination through Campus's versioned Supabase migration, not
+`prisma db push` against the shared database. Copy and reconcile all records,
+pending inbox payloads, retries, sequence positions and provider evidence before
+switching writers. An initial snapshot alone cannot include changes committed
+after it started. Keep one authoritative writer database and one projection-worker
+owner through cutover. After the first destination write, a connection-only
+rollback can lose data and must not be used without reconciliation.

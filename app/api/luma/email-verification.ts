@@ -24,7 +24,7 @@ const community = () => Prisma.sql`
   )${humanIdentityEnabled() ? Prisma.sql`, canonical_addresses AS (
     SELECT address.email,COALESCE(identity.person_id,human.merged_into_id,address."personId") AS "personId",address.name
     FROM addresses address LEFT JOIN guestbook_account_identities identity ON identity.account_id=address."personId"
-    LEFT JOIN (SELECT person_id,merged_into_id FROM public."guestbook_people") human ON human.person_id=address."personId"
+    LEFT JOIN (SELECT person_id,merged_into_id FROM "guestbook_people") human ON human.person_id=address."personId"
   )` : Prisma.empty}, community AS (
     SELECT email, ${humanIdentityEnabled() ? Prisma.sql`CASE WHEN COUNT(DISTINCT "personId")=1 THEN MIN("personId") ELSE NULL END` : Prisma.sql`min("personId")`} AS "personId", min(name) AS name FROM ${Prisma.raw(humanIdentityEnabled()?'canonical_addresses':'addresses')}
     WHERE email IS NOT NULL AND email <> '' GROUP BY email

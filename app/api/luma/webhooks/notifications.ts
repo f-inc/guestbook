@@ -16,9 +16,9 @@ export function notificationDatabaseUrl(env: Record<string, string | undefined> 
   return url.toString();
 }
 
-export function notificationClient() {
-  let connectionString = notificationDatabaseUrl();
-  const ca = process.env.DB_NOTIFY_CA_CERT;
+export function notificationClient(env: Record<string, string | undefined> = process.env) {
+  let connectionString = notificationDatabaseUrl(env);
+  const ca = env.DB_NOTIFY_CA_CERT;
   if (ca) {
     const url = new URL(connectionString);
     // pg's URL SSL options override its explicit SSL object. Use the supplied

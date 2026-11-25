@@ -30,6 +30,10 @@ try {
   try { await schema.query(migration); await schema.query(migration); } finally { await schema.end(); }
   const result = spawnSync(process.execPath, ["--import", "tsx", "--test", "app/api/luma/webhooks-inbox.integration.ts"], { env, stdio: "inherit" });
   process.exitCode = result.status ?? 1;
+  if (process.exitCode === 0) {
+    const handoff = spawnSync(process.execPath, ["--import", "tsx", "--test", "app/api/luma/database-handoff.integration.ts"], { env, stdio: "inherit" });
+    process.exitCode = handoff.status ?? 1;
+  }
 } finally {
   if (started) execFileSync("pg_ctl", ["-D", data, "-m", "fast", "-w", "stop"], { stdio: "pipe" });
   rmSync(root, { recursive: true, force: true });

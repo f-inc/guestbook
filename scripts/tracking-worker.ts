@@ -1,3 +1,4 @@
+import { withDatabaseHandoff, disconnectDatabaseHandoff } from "../app/api/luma/database-handoff";
 import { loadEnvConfig } from "@next/env";
 loadEnvConfig(process.cwd());
 // A separate supervised process keeps queued work moving when no browser is open.
@@ -5,10 +6,8 @@ async function main() {
   const { runRemovalBatch } = await import("../app/api/luma/email-removal");
   const { runVerificationTick } = await import("../app/api/luma/email-verification");
   const { runTrackingBatch } = await import("../app/api/luma/tracking-queue");
-  const { serverTrackingSession } = await import(
-    "../app/api/luma/tracking-session"
-  );
-  const { prisma } = await import("../app/api/luma/db");
+  const { serverTrackingSession } = await import("../app/api/luma/tracking-session");
+  const { disconnectDatabaseClients } = await import("../app/api/luma/db");
   let stopping = false;
   process.on("SIGTERM", () => {
     stopping = true;
@@ -19,21 +18,23 @@ async function main() {
   while (!stopping) {
     {
       try {
-        await runRemovalBatch();
-        await runVerificationTick();
-        const token = await serverTrackingSession();
-        if (!token) {
-          await new Promise((resolve) => setTimeout(resolve, 5000));
-          continue;
-        }
-        const result = await runTrackingBatch(token, crypto.randomUUID());
-        if (result.checked)
-          console.log(
-            JSON.stringify({
-              event: "tracking batch",
-              checked: result.checked,
-            }),
-          );
+        await withDatabaseHandoff(async () => {
+          await runRemovalBatch();
+          await runVerificationTick();
+          const token = await serverTrackingSession();
+          if (!token) {
+            await new Promise((resolve) => setTimeout(resolve, 5000));
+            return;
+          }
+          const result = await runTrackingBatch(token, crypto.randomUUID());
+          if (result.checked)
+            console.log(
+              JSON.stringify({
+                event: "tracking batch",
+                checked: result.checked,
+              }),
+            );
+        });
       } catch (e: any) {
         console.error(
           JSON.stringify({
@@ -45,6 +46,7 @@ async function main() {
     }
     await new Promise((resolve) => setTimeout(resolve, 5000));
   }
-  await prisma().$disconnect();
+  await disconnectDatabaseClients();
+  await disconnectDatabaseHandoff();
 }
 void main();

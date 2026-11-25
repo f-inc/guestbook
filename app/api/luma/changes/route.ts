@@ -1,3 +1,4 @@
+import { handoffHandler } from "../database-handoff";
 import { requireGuestbookKey } from "../../session-auth";
 import { databaseNotifications, CHANGE_CHANNEL, notificationDatabaseUrl } from "../webhooks/notifications";
 
@@ -5,7 +6,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
-export async function GET(request: Request) {
+async function handleGET(request: Request) {
   try {
     requireGuestbookKey(request);
     notificationDatabaseUrl();
@@ -58,3 +59,5 @@ export async function GET(request: Request) {
   });
   return new Response(body, { headers: { "content-type": "text/event-stream", "cache-control": "private, no-store, no-transform", "x-accel-buffering": "no" } });
 }
+
+export const GET = handoffHandler(handleGET);

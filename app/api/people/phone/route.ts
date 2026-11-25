@@ -1,3 +1,4 @@
+import { handoffHandler } from "../../luma/database-handoff";
 import { hasLumaDb, updateIndexedPersonPhoneNumber } from "../../luma/db";
 import { normalizePersonPhoneNumber } from "../../luma/person-phone";
 import { requireGuestbookKey } from "../../session-auth";
@@ -6,7 +7,7 @@ type HttpError = Error & { status?: number };
 
 export const runtime = "nodejs";
 
-export async function PATCH(request: Request) {
+async function handlePATCH(request: Request) {
   try {
     requireGuestbookKey(request);
     if (!hasLumaDb()) throw httpError(503, "Phone updates require DB_URL to be configured.");
@@ -43,3 +44,5 @@ function clearEventGuestCaches() {
     if (key.startsWith("event-guests:")) cache.delete(key);
   }
 }
+
+export const PATCH = handoffHandler(handlePATCH);

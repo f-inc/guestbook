@@ -1,3 +1,4 @@
+import { handoffHandler } from "../luma/database-handoff";
 import {
   appendIndexedPersonComment,
   deleteIndexedPersonComment,
@@ -12,7 +13,7 @@ type HttpError = Error & { code?: string; status?: number };
 
 export const runtime = "nodejs";
 
-export async function GET(request: Request) {
+async function handleGET(request: Request) {
   try {
     requireGuestbookKey(request);
     requireDatabase();
@@ -25,7 +26,7 @@ export async function GET(request: Request) {
   }
 }
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   try {
     requireGuestbookKey(request);
     requireDatabase();
@@ -50,7 +51,7 @@ export async function POST(request: Request) {
   }
 }
 
-export async function PATCH(request: Request) {
+async function handlePATCH(request: Request) {
   try {
     requireGuestbookKey(request);
     requireDatabase();
@@ -72,7 +73,7 @@ export async function PATCH(request: Request) {
   }
 }
 
-export async function DELETE(request: Request) {
+async function handleDELETE(request: Request) {
   try {
     requireGuestbookKey(request);
     requireDatabase();
@@ -146,3 +147,11 @@ function errorResponse(error: HttpError, action: "load" | "save" | "edit" | "del
     : error.message;
   return Response.json({ error: message }, { status });
 }
+
+export const GET = handoffHandler(handleGET);
+
+export const POST = handoffHandler(handlePOST);
+
+export const PATCH = handoffHandler(handlePATCH);
+
+export const DELETE = handoffHandler(handleDELETE);

@@ -1,3 +1,4 @@
+import { handoffHandler } from "../database-handoff";
 import { getIndexedPersonAvatarSource, updateIndexedPersonAvatar } from "../db";
 import { avatarSource } from "../../../avatar-order";
 import { requireGuestbookKey } from "../../session-auth";
@@ -9,7 +10,7 @@ const missCache = new Map();
 const MISS_TTL_MS = 6 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 5000;
 
-export async function GET(request: Request) {
+async function handleGET(request: Request) {
   try {
     requireGuestbookKey(request);
   } catch (error: any) {
@@ -194,3 +195,5 @@ function isUsefulAvatarUrl(value) {
     return false;
   }
 }
+
+export const GET = handoffHandler(handleGET);

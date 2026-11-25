@@ -1,3 +1,4 @@
+import { handoffHandler } from "../../luma/database-handoff";
 import type { MergeSignal } from "../../luma/merge-matching";
 import { invalidateIndexedAudienceCaches } from "../../luma/db";
 import { requireGuestbookKey } from "../../session-auth";
@@ -12,7 +13,7 @@ function failure(error: unknown) {
   const status = (error as { status?: number })?.status || 500;
   return Response.json({ error: status === 500 ? "Unable to load or update person merges." : (error as Error).message }, { status });
 }
-export async function GET(request: Request) {
+async function handleGET(request: Request) {
   try {
     requireGuestbookKey(request);
     const ids = new URL(request.url).searchParams.getAll("personId");
@@ -22,7 +23,7 @@ export async function GET(request: Request) {
     return Response.json(ids.length ? await preview(ids.map(identifier)) : await station(undefined, signals.length ? signals as MergeSignal[] : undefined), { headers: { "Cache-Control": "no-store" } });
   } catch (error) { return failure(error); }
 }
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   try {
     requireGuestbookKey(request);
     const body = await request.json() as Record<string, unknown>;
@@ -34,7 +35,7 @@ export async function POST(request: Request) {
     return Response.json(result);
   } catch (error) { return failure(error); }
 }
-export async function DELETE(request: Request) {
+async function handleDELETE(request: Request) {
   try {
     requireGuestbookKey(request);
     const body = await request.json() as Record<string, unknown>;
@@ -49,3 +50,9 @@ function clearCaches() {
   const cache = (globalThis as typeof globalThis & { __guestbookLumaCache?: Map<string, unknown> }).__guestbookLumaCache;
   cache?.clear();
 }
+
+export const GET = handoffHandler(handleGET);
+
+export const POST = handoffHandler(handlePOST);
+
+export const DELETE = handoffHandler(handleDELETE);

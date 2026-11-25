@@ -117,3 +117,29 @@ switching writers. An initial snapshot alone cannot include changes committed
 after it started. Keep one authoritative writer database and one projection-worker
 owner through cutover. After the first destination write, a connection-only
 rollback can lose data and must not be used without reconciliation.
+
+## Coordinated database handoff
+
+`DB_HANDOFF_ENABLED=true` opts requests and provider job cycles into a shared
+source-database advisory gate. Configure `DB_HANDOFF_MIGRATION_ID` and both private
+`DB_DESTINATION_URL` / `DB_DESTINATION_RUNTIME_URL` connections (`schema=guestbook`)
+first. The source control identity must match, and destination routing requires
+its verified, activated copy marker. With the flag omitted, existing routing is
+unchanged. Never enable it before the source capture/fence is installed.
+
+The final controller takes the exclusive gate, waits for in-flight operations,
+locks source tables against writes, reconciles captured keys and sequences, and
+verifies every row. New requests wait at the gate, then select the committed
+destination. Callback failures never trigger automatic provider retries. Jobs
+started with `after()` acquire their own gate; they cannot inherit an expired
+request scope. Source triggers reject writes after handoff. Truncation is blocked
+while capture is installed.
+
+Keep the existing notification connections and worker ownership during rolling
+preparation. Destination webhook acceptance relays a wakeup through the source
+coordinator, and the worker relays index changes there until listener settings
+are finalized. Do not run independent source/destination projection workers.
+After the verified handoff, replace web/worker database and notification settings
+with the destination connections and remove the handoff flag through a controlled
+rollout. Retain the old source and private journal as recovery evidence; changing
+URLs back after destination writes begin is not a rollback.

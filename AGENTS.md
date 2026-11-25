@@ -59,3 +59,9 @@ The destination schema is owned by Campus Supabase migrations. Never schema-push
 this project into the shared database. Keep the original database authoritative
 until concurrent changes are reconciled and the receiver, projection worker and
 all other writers switch together. See docs/WEBHOOKS.md.
+
+All API handlers and provider job cycles participate in the optional database
+handoff gate. Keep new entry points wrapped; detached jobs require a fresh scope.
+Never retry provider callbacks because a gate/database transaction failed.
+The source capture/fence and destination activation provenance are part of the
+cutover contract; see docs/WEBHOOKS.md.

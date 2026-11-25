@@ -1,3 +1,4 @@
+import { handoffHandler } from "../luma/database-handoff";
 import { createIndexedTagDefinition, hasLumaDb, listIndexedEventGuestMutationTargets, listIndexedTagDefinitions, mutateIndexedPeopleTags, mutateIndexedPersonTag, updateIndexedTagDefinition } from "../luma/db";
 import { requireGuestbookKey } from "../session-auth";
 import { MAX_ALL_MATCHING_TAG_MUTATIONS, MAX_ALL_MATCHING_TAG_PEOPLE, parseBulkManualTagMutation, parseManualTagMutation } from "./manual-tag-mutation";
@@ -6,7 +7,7 @@ type HttpError = Error & { code?: string; status?: number };
 
 export const runtime = "nodejs";
 
-export async function GET(request: Request) {
+async function handleGET(request: Request) {
   try {
     requireGuestbookKey(request);
     requireDatabase();
@@ -16,7 +17,7 @@ export async function GET(request: Request) {
   }
 }
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   try {
     requireGuestbookKey(request);
     requireDatabase();
@@ -29,7 +30,7 @@ export async function POST(request: Request) {
   }
 }
 
-export async function PUT(request: Request) {
+async function handlePUT(request: Request) {
   try {
     requireGuestbookKey(request);
     requireDatabase();
@@ -42,7 +43,7 @@ export async function PUT(request: Request) {
   }
 }
 
-export async function PATCH(request: Request) {
+async function handlePATCH(request: Request) {
   try {
     requireGuestbookKey(request);
     requireDatabase();
@@ -130,3 +131,11 @@ function errorResponse(error: HttpError) {
   const message = status === 500 ? "Unable to update guest tags." : error.message;
   return Response.json({ error: message }, { status });
 }
+
+export const GET = handoffHandler(handleGET);
+
+export const POST = handoffHandler(handlePOST);
+
+export const PUT = handoffHandler(handlePUT);
+
+export const PATCH = handoffHandler(handlePATCH);

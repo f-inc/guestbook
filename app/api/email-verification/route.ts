@@ -1,14 +1,14 @@
+import { handoffHandler, handoffAfter as after } from "../luma/database-handoff";
 import { prisma } from "../luma/db";
 import { verificationAudience, verificationHistory, verificationBatchHistory } from "../luma/email-verification";
 import { emailableCredits } from "../luma/emailable-client";
-import { after } from "next/server";
 import { requireGuestbookKey } from "../session-auth";
 import { resumeVerification, runVerificationTick, startVerification, verificationOverview } from "../luma/email-verification";
 export const runtime = "nodejs";
 function failure(error: any) {
   return Response.json({ error: error.publicMessage ? error.message : error.status === 401 ? "Please unlock Guestbook." : "Unable to load or start email verification. Check server configuration and try again." }, { status: error.status || 500 });
 }
-export async function GET(request: Request) {
+async function handleGET(request: Request) {
   try {
     requireGuestbookKey(request);
     const params = new URL(request.url).searchParams;
@@ -28,7 +28,7 @@ export async function GET(request: Request) {
     return Response.json(await verificationOverview((params.get("q") || "").slice(0, 120), params.get("filter") || "issues", offset));
   } catch (error) { return failure(error); }
 }
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   try {
     requireGuestbookKey(request);
     const { action, maxEmails, criteria, eventIds: requestedEvents } = await request.json() as any;
@@ -54,3 +54,7 @@ export async function POST(request: Request) {
     return Response.json({ ok: true });
   } catch (error) { return failure(error); }
 }
+
+export const GET = handoffHandler(handleGET);
+
+export const POST = handoffHandler(handlePOST);

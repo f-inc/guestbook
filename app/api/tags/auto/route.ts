@@ -1,3 +1,4 @@
+import { handoffHandler } from "../../luma/database-handoff";
 import { getAutomaticTagStatus, hasLumaDb, runAutomaticTagClassifier } from "../../luma/db";
 import { requireGuestbookKey } from "../../session-auth";
 
@@ -5,7 +6,7 @@ type HttpError = Error & { status?: number };
 
 export const runtime = "nodejs";
 
-export async function GET(request: Request) {
+async function handleGET(request: Request) {
   try {
     requireGuestbookKey(request);
     requireDatabase();
@@ -15,7 +16,7 @@ export async function GET(request: Request) {
   }
 }
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   try {
     requireGuestbookKey(request);
     requireDatabase();
@@ -56,3 +57,7 @@ function clearEventGuestCaches() {
 function errorResponse(error: HttpError) {
   return Response.json({ ok: false, error: error.message || "Unable to update automatic tags." }, { status: error.status || 500 });
 }
+
+export const GET = handoffHandler(handleGET);
+
+export const POST = handoffHandler(handlePOST);

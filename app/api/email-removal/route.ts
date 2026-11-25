@@ -1,4 +1,4 @@
-import { after } from "next/server";
+import { handoffHandler, handoffAfter as after } from "../luma/database-handoff";
 import { requireGuestbookKey } from "../session-auth";
 import { prisma } from "../luma/db";
 import { removalCsv } from "../luma/email-removal-csv";
@@ -6,7 +6,7 @@ import { removalCanPreview, removalCanConfirm } from "../luma/email-removal-poli
 import { confirmRemoval, previewRemoval, removalCalendars, removalStatus, requireRemovalEnabled, retryFailedRemoval, runRemovalBatch } from "../luma/email-removal";
 export const runtime = "nodejs";
 const failure = (e: any) => Response.json({ error: e.publicMessage ? e.message : e.status === 401 ? "Please unlock Guestbook." : "Unable to process removals. Saved progress is retained." }, { status: e.status || 500 });
-export async function GET(request: Request) {
+async function handleGET(request: Request) {
   try {
     requireGuestbookKey(request);
     const p = new URL(request.url).searchParams;
@@ -25,7 +25,7 @@ export async function GET(request: Request) {
     return Response.json({ configured: true, canConfirm:removalCanConfirm(), ...await removalStatus(p.get("job") || undefined, Math.max(0, Math.min(50000, Math.floor(Number(p.get("offset")) || 0)))) });
   } catch(e) { return failure(e); }
 }
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   try {
     requireGuestbookKey(request); requireRemovalEnabled();
     const input = await request.json() as any;
@@ -37,3 +37,7 @@ export async function POST(request: Request) {
     return Response.json({ok:true});
   } catch(e) { return failure(e); }
 }
+
+export const GET = handoffHandler(handleGET);
+
+export const POST = handoffHandler(handlePOST);

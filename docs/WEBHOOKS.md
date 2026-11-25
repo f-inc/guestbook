@@ -28,6 +28,11 @@ The worker fetches only the notified event and, for guest updates, one guest by 
 using the API key paired with the signing secret. Reading current state makes
 delayed deliveries safe. One advisory lock serializes worker projections.
 
+The provider subscription must request every supported type above, including
+`guest.refunded`; implementing a handler does not enable its Luma subscription.
+Unrelated ticket, subscriber and pending-submission events are acknowledged and
+ignored. They do not create inbox rows or send messages.
+
 Luma does not notify profile-only name/email/avatar edits or direct Stripe refunds.
 Session-only events outside subscribed calendars are outside this pipeline. Use
 explicit bounded recovery for these cases and historical backfills. A webhook is
@@ -100,6 +105,33 @@ cancellation, database-only reads and authenticated SSE. It never uses applicati
 credentials. Requires `initdb` and `pg_ctl`. Unit tests cover fragmented SSE and
 shared listener lifecycle. No production fixtures are created.
 
+The additional scenario suite covers all supported signed envelopes, approval
+states, check-in reversals, changed multi-select answers, re-registration, refunds,
+event edits, cancellation tombstones, calendar-key isolation, invalid bodies,
+ignored types, rate limits and retry recovery. It asserts that provider requests
+only read the notified resources and that existing notes survive projection.
+
+To repeat the same scenarios against Campus's actual schema and restricted
+runtime role, supply its versioned migration files explicitly:
+
+```sh
+npm run test:webhooks -- \
+  --campus-schema "$CAMPUS_GUESTBOOK_SCHEMA_SQL" \
+  --runtime-role "$CAMPUS_GUESTBOOK_RUNTIME_ROLE_SQL"
+```
+
+This also runs both legacy and human identities in a separate disposable
+database, verifies public decoy tables remain untouched, and tests the startup
+schema after `RESET ALL`. The runner removes inherited database and provider
+settings; migration files are applied only after verifying the temporary cluster.
+
+For live checks, inspect active subscriptions and their event-type coverage,
+verify the signing-secret/calendar pairing without displaying secrets, and compare
+recent processed examples with read-only provider resource lookups. Signed
+unsupported-type probes can verify the public receiver without inserting inbox
+rows. Use isolated data for cancellation, opt-out and malformed-delivery cases;
+never manufacture real attendee changes to test those paths.
+
 ## Shared Campus database compatibility
 
 The receiver and workers can retain the existing webhook URL and subscription
@@ -109,6 +141,12 @@ same schema on all web and worker deployments. `DB_NOTIFY_URL` must connect to
 the same database through a direct/session connection. LISTEN is database-wide,
 so its client strips Prisma's schema parameter without changing where projections
 are written.
+
+Transaction-pooled request connections additionally use the PostgreSQL startup
+option `-c search_path=guestbook,pg_catalog` (URL-encoded in the `options`
+parameter). This keeps unqualified SQL in the intended namespace after pooled
+session resets; Prisma's schema parameter alone is not a substitute. Notification
+listeners continue to use the separate session connection.
 
 Create the destination through Campus's versioned Supabase migration, not
 `prisma db push` against the shared database. Copy and reconcile all records,

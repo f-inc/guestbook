@@ -1,3 +1,4 @@
+import { withDatabaseHandoff } from "./database-handoff";
 import { runRemovalBatch } from "./email-removal";
 import { runVerificationTick } from "./email-verification";
 import { runTrackingBatch } from "./tracking-queue";
@@ -13,16 +14,17 @@ export function startTrackingBackground() {
     if (state.busy) return;
     state.busy = true;
     try {
-      await runRemovalBatch();
-      await runVerificationTick();
-      const token = await serverTrackingSession();
-      if (!token) return;
-      await runTrackingBatch(token, crypto.randomUUID());
+      await withDatabaseHandoff(async () => {
+        await runRemovalBatch();
+        await runVerificationTick();
+        const token = await serverTrackingSession();
+        if (!token) return;
+        await runTrackingBatch(token, crypto.randomUUID());
+      });
       state.lastError = "";
     } catch (error: any) {
       const code = error.code || "TRACKING_ERROR";
-      if (state.lastError !== code)
-        console.warn(`[invitation tracking] ${code}`);
+      if (state.lastError !== code) console.warn(`[invitation tracking] ${code}`);
       state.lastError = code;
     } finally {
       state.busy = false;
@@ -43,9 +45,13 @@ export function startRemovalBackground() {
   const timer = setInterval(async () => {
     if (state.busy) return;
     state.busy = true;
-    try { await runRemovalBatch(); }
-    catch { console.warn("[email removal] Worker paused; saved claims will be recovered."); }
-    finally { state.busy = false; }
+    try {
+      await withDatabaseHandoff(() => runRemovalBatch());
+    } catch {
+      console.warn("[email removal] Worker paused; saved claims will be recovered.");
+    } finally {
+      state.busy = false;
+    }
   }, 10000);
   timer.unref();
 }

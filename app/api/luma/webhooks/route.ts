@@ -1,3 +1,4 @@
+import { handoffHandler, databaseEndpoint } from "../database-handoff";
 import { requireGuestbookKey } from "../../session-auth";
 import { createHash } from "node:crypto";
 import { prisma, hasLumaDb } from "../db";
@@ -9,7 +10,7 @@ import { lumaWebhookSecrets, MAX_LUMA_WEBHOOK_BODY_BYTES, verifyLumaWebhook } fr
 
 export const runtime = "nodejs";
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   const requestId = `luma-webhook-${crypto.randomUUID()}`;
   try {
     const webhookId = request.headers.get("webhook-id")?.trim() || "";
@@ -38,7 +39,7 @@ export async function POST(request: Request) {
   }
 }
 
-export async function GET(request: Request) {
+async function handleGET(request: Request) {
   try {
     requireGuestbookKey(request);
     const summary = await prisma().$queryRaw<Array<{ status: string; count: number; oldest: Date; newest: Date }>>`
@@ -46,9 +47,10 @@ export async function GET(request: Request) {
       FROM luma_webhook_deliveries GROUP BY status`;
     const workers = await prisma().$queryRaw<Array<{ active: boolean }>>`
       SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND classid = 0 AND objid = 821157032 AND granted) AS active`;
-    const target = new URL(process.env.DB_URL!);
-    const databaseFingerprint = createHash("sha256").update(JSON.stringify([target.hostname, target.pathname, target.username])).digest("hex");
-    return json({ configured: lumaWebhookSecrets().length > 0, workerActive: workers[0]?.active || false, deliveries: summary, databaseFingerprint });
+    const [identity] = await prisma().$queryRaw<Array<{ schema: string; database: string }>>`SELECT current_schema() AS schema,current_database() AS database`;
+    const target = new URL(databaseEndpoint(true)!);
+    const databaseFingerprint = createHash("sha256").update(JSON.stringify([target.hostname, identity.database, target.username, identity.schema])).digest("hex");
+    return json({ configured: lumaWebhookSecrets().length > 0, workerActive: workers[0]?.active || false, deliveries: summary, databaseFingerprint, databaseSchema: identity.schema });
   } catch (error: any) {
     return json({ error: "Webhook status unavailable." }, Number(error?.status) || 503);
   }
@@ -79,3 +81,7 @@ function json(body: unknown, status = 200) {
   return Response.json(body, { status, headers: { "cache-control": "private, no-store" } });
 }
 function httpError(message: string, status: number) { return Object.assign(new Error(message), { status }); }
+
+export const POST = handoffHandler(handlePOST, "inbox");
+
+export const GET = handoffHandler(handleGET);

@@ -1,3 +1,4 @@
+import { handoffHandler } from "../database-handoff";
 import { requireGuestbookKey } from "../../session-auth";
 import { lumaConnectionStatus } from "../connection-status";
 import { withBrowserLumaSession } from "../browser-session";
@@ -5,7 +6,7 @@ import { withBrowserLumaSession } from "../browser-session";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET(request: Request) {
+async function handleGET(request: Request) {
   const headers = { "cache-control": "private, no-store" };
   try {
     requireGuestbookKey(request);
@@ -14,3 +15,5 @@ export async function GET(request: Request) {
   }
   return withBrowserLumaSession(request, async () => Response.json(await lumaConnectionStatus(), { headers }));
 }
+
+export const GET = handoffHandler(handleGET);

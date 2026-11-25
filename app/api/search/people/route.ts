@@ -1,3 +1,4 @@
+import { handoffHandler } from "../../luma/database-handoff";
 import { hasLumaDb, searchIndexedPeople, searchIndexedPeopleByName } from "../../luma/db";
 import { requireGuestbookKey } from "../../session-auth";
 import { parsePeopleSearchQuery } from "./query";
@@ -6,7 +7,7 @@ type HttpError = Error & { status?: number };
 
 export const runtime = "nodejs";
 
-export async function GET(request: Request) {
+async function handleGET(request: Request) {
   try {
     requireGuestbookKey(request);
     if (!hasLumaDb()) {
@@ -46,3 +47,5 @@ export async function GET(request: Request) {
     );
   }
 }
+
+export const GET = handoffHandler(handleGET);

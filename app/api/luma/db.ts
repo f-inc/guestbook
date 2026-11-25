@@ -1,3 +1,4 @@
+import { databaseEndpoint, databaseHandoffDestination } from "./database-handoff";
 import { newEventAttendeeSql } from "./new-event-attendee";
 import { humanClient, humanIdentityEnabled } from "./human-mode";
 import { projectSourceAccounts, projectHumans, resolveHumanIds } from "./human-store";
@@ -5349,7 +5350,8 @@ export function sourcePrisma() {
     throw error;
   }
 
-  if (!globalThis[PRISMA_KEY]) {
+  const clientKey = PRISMA_KEY + (databaseHandoffDestination() ? "Destination" : "");
+  if (!globalThis[clientKey]) {
     for (const legacyKey of LEGACY_PRISMA_KEYS) {
       const legacyClient = globalThis[legacyKey];
       if (legacyClient?.$disconnect) void legacyClient.$disconnect().catch(() => {});
@@ -5359,10 +5361,10 @@ export function sourcePrisma() {
     const connectionLimit = safeInt("DB_CONNECTION_LIMIT", 2, 1, 10);
     const poolTimeoutSeconds = safeInt("DB_POOL_TIMEOUT_SECONDS", 20, 1, 60);
     const preferSupabaseTransactionPooler = process.env.DB_RUNTIME_POOL_MODE !== "session";
-    globalThis[PRISMA_KEY] = new PrismaClient({
+    globalThis[clientKey] = new PrismaClient({
       datasources: {
         db: {
-          url: databaseUrlWithPoolLimits(process.env.DB_RUNTIME_URL || process.env.DB_URL, {
+          url: databaseUrlWithPoolLimits(databaseEndpoint(true), {
             connectionLimit,
             poolTimeoutSeconds,
             preferSupabaseTransactionPooler,
@@ -5371,9 +5373,15 @@ export function sourcePrisma() {
       },
     });
   }
-  return globalThis[PRISMA_KEY];
+  return globalThis[clientKey];
 }
 
+export async function disconnectDatabaseClients() {
+  await Promise.all([PRISMA_KEY, PRISMA_KEY + "Destination"].map(async (key) => {
+    await globalThis[key]?.$disconnect();
+    delete globalThis[key];
+  }));
+}
 export function prisma() { return humanClient(sourcePrisma()); }
 
 async function upsertEvent(tx, event, rawEvent = {}) {

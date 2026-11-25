@@ -1,3 +1,4 @@
+import { handoffHandler } from "../luma/database-handoff";
 import { lumaIssueResult, recordLumaIssue } from "../luma/email-policy";
 import { groupedEmailIssues } from "../luma/email-issues";
 import { requestBulkRefresh } from "../luma/tracking-bulk";
@@ -62,7 +63,7 @@ function failure(error: any, requestId: string) {
     { status: error.status || 500 },
   );
 }
-export async function GET(request: Request) {
+async function handleGET(request: Request) {
   const requestId = randomUUID();
   try {
     requireGuestbookKey(request);
@@ -228,7 +229,7 @@ export async function GET(request: Request) {
     return failure(error, requestId);
   }
 }
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   const requestId = randomUUID();
   try {
     requireGuestbookKey(request);
@@ -313,3 +314,7 @@ export async function POST(request: Request) {
     return failure(error, requestId);
   }
 }
+
+export const GET = handoffHandler(handleGET);
+
+export const POST = handoffHandler(handlePOST);

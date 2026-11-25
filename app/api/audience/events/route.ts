@@ -1,3 +1,4 @@
+import { handoffHandler } from "../../luma/database-handoff";
 import { getIndexedEventAnalytics, hasLumaDb, listIndexedEventCohortCounts, listIndexedPeopleByEventCohort } from "../../luma/db";
 import { requireGuestbookKey } from "../../session-auth";
 
@@ -5,7 +6,7 @@ type HttpError = Error & { status?: number };
 
 export const runtime = "nodejs";
 
-export async function GET(request: Request) {
+async function handleGET(request: Request) {
   try {
     requireGuestbookKey(request);
     if (!hasLumaDb()) return Response.json({ error: "Event audiences require DB_URL." }, { status: 503 });
@@ -44,3 +45,5 @@ export async function GET(request: Request) {
     return Response.json({ error: httpError.status ? httpError.message : "Unable to load event audience." }, { status: httpError.status || 500 });
   }
 }
+
+export const GET = handoffHandler(handleGET);

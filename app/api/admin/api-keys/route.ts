@@ -1,3 +1,4 @@
+import { handoffHandler } from "../../luma/database-handoff";
 import { prisma } from "../../luma/db";
 import { requireGuestbookKey } from "../../session-auth";
 import { apiError, fail, generateKey, json, keySelect, SCOPES } from "../../v1/shared";
@@ -10,13 +11,13 @@ function admin(request: Request, mutation = false) {
   if (mutation && !request.headers.get("x-guestbook-key")) fail("Guestbook admin key header is required.", 401);
   requireGuestbookKey(request);
 }
-export async function GET(request: Request) {
+async function handleGET(request: Request) {
   try {
     admin(request);
     return json({ data: await prisma().integrationApiKey.findMany({ select: keySelect, orderBy: { createdAt: "desc" } }) });
   } catch (error) { return apiError(error); }
 }
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   try {
     admin(request, true);
     if (Number(request.headers.get("content-length")) > 8192) fail("Request too large.", 413);
@@ -37,7 +38,7 @@ export async function POST(request: Request) {
     return json({ data: key, secret }, 201);
   } catch (error) { return apiError(error); }
 }
-export async function DELETE(request: Request) {
+async function handleDELETE(request: Request) {
   try {
     admin(request, true);
     const id = new URL(request.url).searchParams.get("id");
@@ -46,3 +47,9 @@ export async function DELETE(request: Request) {
     return json({ revoked: result.count > 0 });
   } catch (error) { return apiError(error); }
 }
+
+export const GET = handoffHandler(handleGET);
+
+export const POST = handoffHandler(handlePOST);
+
+export const DELETE = handoffHandler(handleDELETE);

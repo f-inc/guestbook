@@ -1,3 +1,4 @@
+import { handoffHandler } from "../luma/database-handoff";
 import { hasLumaDb, listIndexedSuperTags, syncIndexedSuperTags } from "../luma/db";
 import { requireGuestbookKey } from "../session-auth";
 
@@ -5,7 +6,7 @@ type HttpError = Error & { status?: number };
 
 export const runtime = "nodejs";
 
-export async function GET(request: Request) {
+async function handleGET(request: Request) {
   try {
     requireGuestbookKey(request);
     if (!hasLumaDb()) return Response.json({ error: "Supertags require DB_URL." }, { status: 503 });
@@ -15,7 +16,7 @@ export async function GET(request: Request) {
   }
 }
 
-export async function PUT(request: Request) {
+async function handlePUT(request: Request) {
   try {
     requireGuestbookKey(request);
     if (!hasLumaDb()) return Response.json({ error: "Supertags require DB_URL." }, { status: 503 });
@@ -33,3 +34,7 @@ function errorResponse(error: HttpError) {
     { status },
   );
 }
+
+export const GET = handoffHandler(handleGET);
+
+export const PUT = handoffHandler(handlePUT);

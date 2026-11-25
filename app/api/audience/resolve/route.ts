@@ -1,3 +1,4 @@
+import { handoffHandler } from "../../luma/database-handoff";
 import { countIndexedAudience, hasLumaDb, listIndexedAudiencePage, normalizeIndexedAudienceCriteria } from "../../luma/db";
 import { requireGuestbookKey } from "../../session-auth";
 
@@ -5,7 +6,7 @@ type HttpError = Error & { status?: number };
 
 export const runtime = "nodejs";
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   const startedAt = performance.now();
   try {
     requireGuestbookKey(request);
@@ -31,3 +32,5 @@ export async function POST(request: Request) {
     return Response.json({ error: httpError.status ? httpError.message : "Unable to resolve the selected audience." }, { status: httpError.status || 500 });
   }
 }
+
+export const POST = handoffHandler(handlePOST);

@@ -1,9 +1,10 @@
+import { handoffHandler } from "../../luma/database-handoff";
 import { requireGuestbookKey } from "../../session-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET(request: Request) {
+async function handleGET(request: Request) {
   try {
     requireGuestbookKey(request);
     const key = process.env.CAMPUS_API_KEY;
@@ -85,3 +86,5 @@ function searchableValues(value: unknown): string {
   if (typeof value === "object") return Object.values(value).map(searchableValues).join(" ");
   return String(value);
 }
+
+export const GET = handoffHandler(handleGET);

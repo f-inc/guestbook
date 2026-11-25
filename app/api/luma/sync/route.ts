@@ -1,3 +1,4 @@
+import { handoffHandler } from "../database-handoff";
 import { appendFile, mkdir } from "node:fs/promises";
 import { withBrowserLumaSession } from "../browser-session";
 
@@ -38,7 +39,7 @@ const approvalToStatus = {
   session: "going",
 };
 
-export async function GET(request: Request) {
+async function handleGET(request: Request) {
   const url = new URL(request.url);
   if (url.searchParams.get("run") === "1") return withBrowserLumaSession(request, () => runSync(request));
 
@@ -56,7 +57,7 @@ export async function GET(request: Request) {
   }
 }
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   // Recovery/backfill only. Routine freshness uses the event catalog endpoint
   // plus selected-event count reconciliation.
   return withBrowserLumaSession(request, () => runSync(request));
@@ -922,3 +923,7 @@ function jsonError(error: any, requestId: string) {
     { status: error.status || 500 },
   );
 }
+
+export const GET = handoffHandler(handleGET);
+
+export const POST = handoffHandler(handlePOST);

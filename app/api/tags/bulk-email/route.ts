@@ -1,3 +1,4 @@
+import { handoffHandler } from "../../luma/database-handoff";
 import { hasLumaDb, matchIndexedPeopleByEmails, mutateIndexedPeopleTags } from "../../luma/db";
 import { requireGuestbookKey } from "../../session-auth";
 import { parseBulkEmails } from "../bulk-email-tags";
@@ -6,7 +7,7 @@ type HttpError = Error & { code?: string; status?: number };
 
 export const runtime = "nodejs";
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   try {
     requireGuestbookKey(request);
     requireDatabase();
@@ -93,3 +94,5 @@ function errorResponse(error: HttpError) {
   const status = error.code === "P2025" ? 404 : error.status || 500;
   return Response.json({ error: status === 500 ? "Unable to bulk tag emails." : error.message }, { status });
 }
+
+export const POST = handoffHandler(handlePOST);

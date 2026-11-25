@@ -1,3 +1,4 @@
+import { handoffHandler } from "../../luma/database-handoff";
 import { createHash } from "node:crypto";
 import { requireGuestbookKey } from "../../session-auth";
 
@@ -51,7 +52,7 @@ function favicon(domain: string) {
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const imageTypes = new Set(["image/png", "image/jpeg", "image/webp", "image/gif", "image/x-icon", "image/vnd.microsoft.icon"]);
 
-export async function GET(request: Request) {
+async function handleGET(request: Request) {
   try {
     requireGuestbookKey(request);
     const query = new URL(request.url).searchParams;
@@ -92,3 +93,5 @@ export async function GET(request: Request) {
     return Response.json({ error: "Company icon unavailable." }, { status, headers });
   }
 }
+
+export const GET = handoffHandler(handleGET);

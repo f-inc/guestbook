@@ -1,14 +1,19 @@
+import { sourcePrisma } from "../luma/db";
+import { handoffHandler, verifyDatabaseHandoffDestination } from "../luma/database-handoff";
 import { humanIdentityEnabled } from "../luma/human-mode";
 import { requireGuestbookKey } from "../session-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET(request: Request) {
+async function handleGET(request: Request) {
   try {
     requireGuestbookKey(request);
+    if (new URL(request.url).searchParams.get("handoff") === "verify")
+      return Response.json(await verifyDatabaseHandoffDestination(), { headers: { "cache-control": "private, no-store" } });
+    const [identity] = await sourcePrisma().$queryRaw<Array<{ schema: string }>>`SELECT current_schema() AS schema`;
     return Response.json(
-      { ok: true, identityMode: humanIdentityEnabled() ? "human" : "legacy" },
+      { databaseSchema: identity.schema, ok: true, identityMode: humanIdentityEnabled() ? "human" : "legacy" },
       { headers: { "cache-control": "private, no-store" } },
     );
   } catch (error: any) {
@@ -21,3 +26,5 @@ export async function GET(request: Request) {
     );
   }
 }
+
+export const GET = handoffHandler(handleGET);
